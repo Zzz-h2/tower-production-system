@@ -1,0 +1,45 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+backend/.venv/
+
+# ---------- Node / 前端 ----------
+node_modules/
+dist/
+.vite/
+*.local
+
+# ---------- 数据库 / 数据文件 ----------
+db/
+*.sqlite3
+*.db
+*.log
+logs/
+
+# ---------- 截图 / 临时产物 ----------
+_shots/
+_test_*.py
+tmp/
+*.tmp
+
+# ---------- 编辑器 / IDE ----------
+.idea/
+.vscode/
+*.swp
+
+# ---------- 环境与密钥（绝不提交） ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# ---------- 系统 ----------
+.DS_Store
+Thumbs.db

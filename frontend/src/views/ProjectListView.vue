@@ -1,0 +1,351 @@
+<template>
+  <div class="page-wrap">
+    <!-- ① 标题栏 -->
+    <div class="block-header page-title">
+      <span class="icon"></span>
+      <span class="block-title">塔筒生产进度总览</span>
+      <span class="block-subtitle">按月度调度令建项目 · 实时跟踪各风场塔筒生产进度与风险</span>
+    </div>
+
+    <!-- ② 概览指标卡区 -->
+    <div class="kpi-row">
+      <div class="kpi-card">
+        <div class="kpi-value">{{ stats.total_projects }}</div>
+        <div class="kpi-label">在产项目总数</div>
+      </div>
+      <div class="kpi-card kpi-warning">
+        <div class="kpi-value" style="color:#f6ad55;">{{ stats.warning_projects }}</div>
+        <div class="kpi-label">预警项目</div>
+      </div>
+      <div class="kpi-card kpi-delayed">
+        <div class="kpi-value" style="color:#e53e3e;">{{ stats.delayed_projects }}</div>
+        <div class="kpi-label">延期项目</div>
+      </div>
+      <div class="kpi-card kpi-blue">
+        <div class="kpi-value">{{ stats.monthly_plan_total }}</div>
+        <div class="kpi-label">本月计划出品总量</div>
+      </div>
+    </div>
+
+    <!-- ③ 导入月度调度令卡片 -->
+    <div class="block-card">
+      <div class="block-header">
+        <span class="icon"></span>
+        <span class="block-title">导入月度调度令</span>
+        <span class="block-subtitle">通过 Excel 批量创建项目（必填：项目名称/钢塔厂家/本月计划/交付负责人）</span>
+      </div>
+      <DispatchImport @imported="onDispatchImported" />
+    </div>
+
+    <!-- ④ 搜索/筛选栏卡片 -->
+    <div class="block-card">
+      <div class="search-bar">
+        <el-input
+          v-model="filterForm.keyword"
+          placeholder="搜索项目名称 / 机型"
+          clearable
+          style="width: 240px"
+          @input="onFilterChange"
+          @clear="onFilterChange"
+        />
+        <el-select
+          v-model="filterForm.person"
+          placeholder="交付负责人"
+          clearable
+          style="width: 180px"
+          @change="onFilterChange"
+        >
+          <el-option v-for="p in personOptions" :key="p" :label="p" :value="p" />
+        </el-select>
+        <el-select
+          v-model="filterForm.status"
+          placeholder="项目状态"
+          style="width: 160px"
+          @change="onFilterChange"
+        >
+          <el-option v-for="s in statusOptions" :key="s.value" :label="s.label" :value="s.value" />
+        </el-select>
+        <el-button type="primary" :icon="Refresh" @click="onRefresh">刷新</el-button>
+      </div>
+    </div>
+
+    <!-- ⑤ 项目表格卡片 -->
+    <div class="block-card">
+      <div class="block-header">
+        <span class="icon"></span>
+        <span class="block-title">项目列表</span>
+        <span class="block-subtitle">共 {{ store.pagination.total }} 个项目</span>
+        <el-button
+          class="add-btn"
+          type="primary"
+          :icon="Plus"
+          @click="addVisible = true"
+        >手动添加项目</el-button>
+      </div>
+      <el-table :data="store.projects" v-loading="store.loading" stripe>
+        <el-table-column prop="project_name" label="项目名称" min-width="180" />
+        <el-table-column prop="machine_type" label="机型" min-width="120" />
+        <el-table-column prop="factory_name" label="钢塔厂家" min-width="140" />
+        <el-table-column prop="last_month_output" label="截止上月" width="100" align="right" />
+        <el-table-column prop="monthly_plan" label="本月计划" width="100" align="right" />
+        <el-table-column label="整体进度" width="180" align="center">
+          <template #default="{ row }">
+            <div class="progress-cell">
+              <el-progress
+                :percentage="Number(row.progress_pct || 0)"
+                :stroke-width="10"
+                :show-text="false"
+                :color="progressColor"
+                class="list-progress"
+              />
+              <span class="progress-text">{{ Number(row.progress_pct || 0).toFixed(1) }}%</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="delivery_person" label="交付负责人" width="120" />
+        <el-table-column prop="remarks" label="备注" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="remark-cell">{{ row.remarks || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="风险状态" width="100">
+          <template #default="{ row }">
+            <span class="status-pill" :style="riskStyle(row.risk_level)">{{ riskLabel(row.risk_level) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="230" fixed="right">
+          <template #default="{ row }">
+            <div class="op-btns">
+              <el-button size="small" type="primary" @click="goDetail(row)">详细</el-button>
+              <el-button size="small" type="warning" plain @click="onEdit(row)">编辑</el-button>
+              <el-button size="small" type="danger" plain @click="onDelete(row)">删除</el-button>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <!-- ⑥ 分页条 -->
+    <div class="block-card page-bar">
+      <el-select
+        v-model="pageSize"
+        style="width: 120px"
+        @change="onPageSizeChange"
+      >
+        <el-option v-for="s in pageSizes" :key="s" :label="`${s} 条/页`" :value="s" />
+      </el-select>
+      <el-button :disabled="store.pagination.page <= 1" @click="onPrev">上一页</el-button>
+      <el-button :disabled="store.pagination.page >= totalPages" @click="onNext">下一页</el-button>
+      <span class="page-info">
+        共 {{ store.pagination.total }} 条 第 {{ store.pagination.page }}/{{ totalPages }} 页
+      </span>
+    </div>
+
+    <AddProjectDialog v-model="addVisible" @added="onAdded" />
+    <EditProjectDialog v-model="editVisible" :project="editTarget" @updated="onUpdated" />
+  </div>
+</template>
+
+<script setup>
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { Plus, Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { useProjectStore } from '../store/project'
+import { deleteProject as deleteProjectApi } from '../api/node'
+import DispatchImport from '../components/DispatchImport.vue'
+import AddProjectDialog from '../components/AddProjectDialog.vue'
+import EditProjectDialog from '../components/EditProjectDialog.vue'
+
+const store = useProjectStore()
+const router = useRouter()
+
+// 首页总览 KPI（字段与 /api/dashboard/stats 一致）
+const stats = computed(() => store.dashboard)
+
+const addVisible = ref(false)
+const editVisible = ref(false)
+const editTarget = ref(null)
+
+// 本地筛选表单（双向绑定，变化时回写 store 并重置页码）
+const filterForm = reactive({
+  keyword: store.filters.keyword,
+  person: store.filters.person,
+  status: store.filters.status,
+})
+
+const statusOptions = [
+  { label: '全部', value: 'all' },
+  { label: '正常', value: 'normal' },
+  { label: '预警', value: 'warning' },
+  { label: '延期', value: 'delayed' },
+]
+
+const pageSizes = [10, 20, 50, 100]
+const pageSize = ref(store.pagination.page_size)
+
+const totalPages = computed(() =>
+  Math.max(1, Math.ceil((store.pagination.total || 0) / (store.pagination.page_size || 10)))
+)
+
+// 从已加载项目推导交付负责人下拉项（去重、非空）
+const personOptions = computed(() => {
+  const set = new Set()
+  for (const p of store.projects) {
+    if (p.delivery_person) set.add(p.delivery_person)
+  }
+  return Array.from(set)
+})
+
+// 风险状态四色（normal 绿 / warning 黄 / delayed 红 / 未开始灰）
+const riskColors = {
+  normal: ['#f0fff4', '#38a169', '正常'],
+  warning: ['#fffff0', '#d69e2e', '预警'],
+  delayed: ['#fff5f5', '#e53e3e', '延期'],
+}
+const riskStyle = (level) => {
+  const item = riskColors[level] || riskColors.normal
+  return { background: item[0], color: item[1] }
+}
+const riskLabel = (level) => (riskColors[level] || riskColors.normal)[2]
+
+// 进度条分段颜色（按百分比：>=50 绿 / >=20 蓝 / >0 橙 / 0 红）
+const progressColor = [
+  { color: '#38a169', percentage: 100 },
+  { color: '#3182ce', percentage: 50 },
+  { color: '#f6ad55', percentage: 20 },
+  { color: '#e53e3e', percentage: 0 },
+]
+
+// 筛选变化 → 重置页码为 1 并加载
+function onFilterChange() {
+  store.pagination.page = 1
+  store.loadProjects({
+    keyword: filterForm.keyword,
+    person: filterForm.person,
+    status: filterForm.status,
+    page: 1,
+  })
+}
+
+function onRefresh() {
+  store.loadProjects({ page: store.pagination.page })
+}
+
+function onPrev() {
+  if (store.pagination.page > 1) {
+    store.pagination.page -= 1
+    store.loadProjects({ page: store.pagination.page })
+  }
+}
+function onNext() {
+  if (store.pagination.page < totalPages.value) {
+    store.pagination.page += 1
+    store.loadProjects({ page: store.pagination.page })
+  }
+}
+function onPageSizeChange(size) {
+  store.pagination.page_size = size
+  store.pagination.page = 1
+  store.loadProjects({ page_size: size, page: 1 })
+}
+
+function goDetail(row) {
+  router.push(`/projects/${row.id}`)
+}
+
+function onEdit(row) {
+  editTarget.value = row
+  editVisible.value = true
+}
+
+async function onDelete(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除项目「${row.project_name}」吗？此操作不可撤销（含工序/异常/节点等关联数据）！`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch (e) {
+    return   // 用户取消
+  }
+  try {
+    await deleteProjectApi(row.id)
+    ElMessage.success(`项目「${row.project_name}」已删除`)
+    // 删除后回到第 1 页并刷新（避免当前页数据不足）
+    store.loadProjects({ page: 1 })
+    store.loadDashboard()
+  } catch (e) {
+    // 404/500 已由 axios 拦截器统一提示
+  }
+}
+
+function onUpdated() {
+  store.loadProjects({ page: store.pagination.page })
+  store.loadDashboard()
+}
+
+function onDispatchImported() {
+  store.loadProjects({ page: 1 })
+  store.loadDashboard()
+}
+function onAdded() {
+  store.loadProjects({ page: 1 })
+}
+
+onMounted(() => {
+  store.loadDashboard()
+  store.loadProjects({ page: 1 })
+})
+</script>
+
+<style scoped>
+.page-wrap { padding: 24px; }
+.page-title { margin-bottom: 16px; }
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.kpi-warning { border-top: 3px solid var(--color-warning); }
+.kpi-delayed { border-top: 3px solid var(--color-red); }
+.kpi-blue { border-top: 3px solid var(--color-blue); }
+.add-btn { margin-left: auto; }
+.page-bar { display: flex; align-items: center; gap: 12px; }
+.page-info { margin-left: auto; color: var(--color-sub); font-size: 13px; }
+.progress-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: center;
+}
+.list-progress {
+  width: 120px;          /* 加宽，保证填充比例视觉可见 */
+  display: inline-block;
+}
+.progress-text {
+  font-size: 13px;
+  color: #1a365d;
+  font-weight: 500;
+  min-width: 44px;
+  text-align: right;
+}
+
+/* 操作列：三个按钮强制同一行 */
+.op-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;      /* 强制三个按钮同一行 */
+  white-space: nowrap;
+}
+.op-btns .el-button {
+  margin-left: 0;          /* 去掉 el-button 默认左边距，防止换行 */
+}
+/* 备注列：次要文字色弱化显示 */
+.remark-cell {
+  color: var(--color-sub);
+  font-size: 13px;
+}
+</style>

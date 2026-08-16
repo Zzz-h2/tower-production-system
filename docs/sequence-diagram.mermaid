@@ -1,0 +1,54 @@
+sequenceDiagram
+    actor U as 用户
+    participant V as DispatchImport.vue
+    participant A as api/index.js
+    participant R as routers/dispatch_import.py
+    participant S as services/dispatch_import.py
+    participant DB as core/db.py
+    participant D as database.py(根)
+
+    U->>V: 选择 .xlsx
+    V->>A: importDispatch(file) → FormData
+    A->>R: POST /api/projects/import-dispatch
+    R->>R: 校验后缀 .xlsx/.xls
+    R->>S: parse_and_import(tmp_path)
+    S->>DB: read_excel_headers + auto_detect_mapping
+    DB->>D: (复用 utils.excel_parser)
+    S->>S: 校验 REQUIRED_FIELDS 已映射
+    S->>DB: parse_schedule_excel → rows
+    loop 逐行
+        S->>DB: upsert_project(row) → (pid, is_new)
+        alt is_new 且 plan_start_date 非空
+            S->>DB: init_project_processes(pid, start)
+            S->>DB: update_project_risk_level(pid)
+        end
+    end
+    S->>DB: insert_import_log(file,total,success,skipped,detail)
+    S-->>R: ImportResult
+    R-->>A: {success, skipped, errors, message}
+    A-->>V: 响应
+    V-->>U: el-message 成功/失败
+
+---
+
+sequenceDiagram
+    actor U as 用户
+    participant V as ProjectListView.vue
+    participant S as store/project.js
+    participant A as api/index.js
+    participant R as routers/projects.py
+    participant DB as core/db.py
+    participant D as database.py(根)
+
+    U->>V: 输入keyword/选person/选status/翻页
+    V->>S: loadProjects(filters)  (筛选变化→page=1)
+    S->>A: fetchProjects({keyword,person,status,page,page_size})
+    A->>R: GET /api/projects
+    R->>DB: get_projects_filtered(keyword,person,status,skip,limit)
+    DB->>D: get_all_projects(status)
+    D-->>DB: 全量(含 progress_pct/risk_level)
+    DB->>DB: 内存过滤 keyword/person + 切片[skip:skip+limit]
+    DB-->>R: (items, total)
+    R-->>A: {items, total, page, page_size}
+    A-->>S: 写 store.projects / pagination
+    S-->>V: 渲染表格 + 分页条

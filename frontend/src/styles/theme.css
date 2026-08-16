@@ -1,0 +1,131 @@
+/* 全站浅色工业风主题（对齐 Streamlit 版配色） */
+:root {
+  --bg-page: #f4f6f9;
+  --bg-card: #ffffff;
+  --border-card: #e2e8f0;
+  --color-primary: #1a365d;
+  --color-sub: #64748b;
+  --color-green: #38a169;
+  --color-blue: #3182ce;
+  --color-red: #e53e3e;
+  --color-gray: #718096;
+  --color-track: #edf2f7;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-page);
+  font-family: -apple-system, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  color: #222222;
+}
+
+/* 通用卡片框 */
+.block-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-radius: 12px;
+  padding: 20px 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  margin-bottom: 16px;
+}
+
+/* 标题行：色块 + 标题 */
+.block-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.block-header .icon {
+  width: 8px;
+  height: 22px;
+  border-radius: 4px;
+  background: #2b6cb0;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.block-title { font-size: 18px; font-weight: 700; color: var(--color-primary); }
+.block-subtitle { font-size: 13px; color: var(--color-sub); margin-left: auto; }
+
+/* 工序卡片 */
+.process-card-box {
+  background: #fff;
+  border: 1px solid var(--border-card);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  margin-bottom: 16px;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+}
+.pc-header { display: flex; align-items: center; gap: 6px; }
+.pc-title { font-size: 16px; font-weight: 700; color: var(--color-primary); }
+.pc-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: auto;
+}
+.pc-count { font-size: 13px; color: var(--color-sub); margin-top: 8px; }
+.pc-progress { margin-top: 10px; display: flex; align-items: center; gap: 8px; }
+.pc-progress-track {
+  flex: 1;
+  height: 8px;
+  background: var(--color-track);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.pc-progress-bar { height: 100%; border-radius: 4px; transition: width 0.3s ease; }
+.pc-percent { font-size: 12px; color: var(--color-sub); min-width: 40px; text-align: right; }
+.pc-footer { margin-top: auto; padding-top: 10px; text-align: right; }
+
+/* 状态胶囊四色 */
+.status-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 细进度条 */
+.thin-progress { height: 6px; background: var(--color-track); border-radius: 3px; overflow: hidden; }
+.thin-progress-bar { height: 100%; border-radius: 3px; }
+
+/* 列表行卡片（左色条） */
+.row-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #fff;
+  border: 1px solid var(--border-card);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+}
+.row-card .row-bar { width: 4px; align-self: stretch; border-radius: 2px; flex-shrink: 0; }
+
+/* 预警色（风险黄，与状态枚举一致） */
+:root {
+  --color-warning: #d69e2e;
+}
+
+/* 概览指标卡 */
+.kpi-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+.kpi-value { font-size: 30px; font-weight: 700; color: var(--color-primary); line-height: 1.2; }
+.kpi-label { font-size: 13px; color: var(--color-gray); margin-top: 6px; }
+
+/* 搜索/筛选栏 */
+.search-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
