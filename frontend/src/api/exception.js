@@ -7,6 +7,10 @@ export const createException = (pid, nodeId, data) =>
 export const listExceptionsByProject = (pid) =>
   http.get(`/exceptions/projects/${pid}`)
 
+// 项目下已关闭的历史异常记录（按关闭时间倒序）
+export const listClosedExceptions = (pid) =>
+  http.get(`/exceptions/projects/${pid}/exceptions/closed`)
+
 export const listExceptionsByNode = (nodeId) =>
   http.get(`/exceptions/nodes/${nodeId}`)
 

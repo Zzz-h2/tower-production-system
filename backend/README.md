@@ -10,22 +10,34 @@ backend/                    # FastAPI 后端
     main.py                 # FastAPI 实例 / CORS / 路由挂载
     core/config.py          # 数据库配置 + 业务常量（九工序顺序等）
     core/db.py              # 数据库访问（复用原 database.py，绕过 st.cache_data）
-    schemas/                # Pydantic 请求/响应模型
+    schemas/                # Pydantic 请求/响应模型（含 exception.py 异常模型）
     services/business_logic.py   # 状态机/前序联动/分组保存（1:1 复用 utils）
     services/schedule_import.py  # Excel 解析（1:1 复用 utils）
     services/node_service.py     # 节点聚合：指标/卡片/时间轴/分组
-    routers/                # projects / nodes / schedule_import
+    routers/                # projects / nodes / schedule_import / dashboard / exceptions
   requirements.txt
 
 frontend/                   # Vue3 前端
   src/
-    api/                    # axios 封装 + 请求函数
+    api/                    # axios 封装 + 请求函数（含 exception.js 异常 API）
     store/                  # Pinia（项目/节点状态）
     router/                 # Vue Router
     views/                  # 项目列表 / 项目详情
-    components/             # 信息卡/时间轴/卡片网格/详情弹窗/预警列表
+    components/             # 信息卡/时间轴/卡片网格/详情弹窗/预警列表/异常提报
     styles/theme.css        # 浅色工业风主题（对齐原配色）
 ```
+
+## 异常提报模块
+
+- 表 `node_exceptions`（项目/节点/工序/计划日期/责任分类/原因/处理人/计划关闭/措施/状态 closed_at）
+- API：`POST /api/exceptions/projects/{pid}/nodes/{nid}`（提报）、`GET /projects/{pid}`（全部）、
+  `GET /projects/{pid}/exceptions/closed`（已关闭历史）、`GET /nodes/{nid}`（节点异常）、`PUT /{exc_id}`（更新/关闭）
+- 节点预警接口 `GET /api/projects/{pid}/alerts` 按 node_id 携带 exceptions + has_exception
+
+## 风险/进度实时口径（v1.1）
+
+- 风险等级、整体进度、首页总览均基于 `node_plans + node_actuals` 实时计算（弃用 processes 表）
+- 详情/列表/总览/预警 四处口径一致；整体进度 = 附件安装工序进度
 
 ## 启动方式
 

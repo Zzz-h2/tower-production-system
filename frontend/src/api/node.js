@@ -4,6 +4,10 @@ import http from './index'
 export const fetchProjects = (params = {}) =>
   http.get('/projects', { params })
 
+// 全量交付负责人（下拉框数据源，与筛选结果隔离）
+export const fetchAllPersons = () =>
+  http.get('/projects/persons')
+
 export const fetchProject = (pid) => http.get(`/projects/${pid}`)
 
 // 看板指标（项目总览页 KPI 卡）

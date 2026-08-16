@@ -96,6 +96,12 @@ def create_project(payload: ProjectCreate):
     return project
 
 
+@router.get("/persons")
+def list_persons():
+    """返回所有交付负责人（去重排序，供主页面下拉框使用；与筛选结果隔离）。"""
+    return {"items": db.get_all_persons()}
+
+
 @router.get("/{pid}")
 def get_project(pid: int):
     """项目详情（基本信息 / 进度 / 风险）。"""

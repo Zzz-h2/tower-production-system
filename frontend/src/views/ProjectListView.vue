@@ -46,22 +46,26 @@
           clearable
           style="width: 240px"
           @input="onFilterChange"
-          @clear="onFilterChange"
+          @clear="onFilterClear('keyword')"
         />
         <el-select
           v-model="filterForm.person"
           placeholder="交付负责人"
           clearable
+          filterable
           style="width: 180px"
           @change="onFilterChange"
+          @clear="onFilterClear('person')"
         >
-          <el-option v-for="p in personOptions" :key="p" :label="p" :value="p" />
+          <el-option v-for="p in store.allPersons" :key="p" :label="p" :value="p" />
         </el-select>
         <el-select
           v-model="filterForm.status"
           placeholder="项目状态"
+          clearable
           style="width: 160px"
           @change="onFilterChange"
+          @clear="onFilterClear('status')"
         >
           <el-option v-for="s in statusOptions" :key="s.value" :label="s.label" :value="s.value" />
         </el-select>
@@ -188,14 +192,8 @@ const totalPages = computed(() =>
   Math.max(1, Math.ceil((store.pagination.total || 0) / (store.pagination.page_size || 10)))
 )
 
-// 从已加载项目推导交付负责人下拉项（去重、非空）
-const personOptions = computed(() => {
-  const set = new Set()
-  for (const p of store.projects) {
-    if (p.delivery_person) set.add(p.delivery_person)
-  }
-  return Array.from(set)
-})
+// 交付负责人下拉项：使用全量列表（store.allPersons），与当前筛选结果隔离
+// （旧实现基于当前表格行推导，会被筛选结果污染，已移除）
 
 // 风险状态四色（normal 绿 / warning 黄 / delayed 红 / 未开始灰）
 const riskColors = {
@@ -228,8 +226,19 @@ function onFilterChange() {
   })
 }
 
+// 单个筛选字段清空（×）→ 同步表单并重新加载
+function onFilterClear(field) {
+  filterForm[field] = ''
+  onFilterChange()
+}
+
+// 刷新 = 重置全部筛选条件 + 回到第 1 页 + 加载全量
 function onRefresh() {
-  store.loadProjects({ page: store.pagination.page })
+  filterForm.keyword = ''
+  filterForm.person = ''
+  filterForm.status = 'all'
+  store.pagination.page = 1
+  store.loadProjects({ keyword: '', person: '', status: 'all', page: 1 })
 }
 
 function onPrev() {
@@ -294,6 +303,7 @@ function onAdded() {
 }
 
 onMounted(() => {
+  store.loadAllPersons()          // 加载全量交付负责人（下拉框数据源）
   store.loadDashboard()
   store.loadProjects({ page: 1 })
 })

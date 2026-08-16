@@ -14,9 +14,6 @@
           <AlertList :pid="id" />
         </div>
       </el-tab-pane>
-      <el-tab-pane label="📋 风险与异常" name="risk">
-        <el-empty description="风险与异常 Tab（阶段 2 完善）" />
-      </el-tab-pane>
       <el-tab-pane label="📅 里程碑倒排" name="milestone">
         <el-empty description="里程碑倒排 Tab（阶段 2 完善）" />
       </el-tab-pane>

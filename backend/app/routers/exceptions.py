@@ -35,6 +35,12 @@ def list_exceptions(project_id: int):
     return {"items": db.get_node_exceptions_by_project(project_id)}
 
 
+@router.get("/projects/{project_id}/exceptions/closed")
+def list_closed_exceptions(project_id: int):
+    """列出项目下已关闭的历史异常记录（按关闭时间倒序）。"""
+    return {"items": db.get_closed_exceptions_by_project(project_id)}
+
+
 @router.get("/{exc_id}")
 def get_exception(exc_id: int):
     """单条异常详情。"""

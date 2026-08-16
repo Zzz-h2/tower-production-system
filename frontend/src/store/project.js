@@ -4,6 +4,7 @@ import {
   fetchProject,
   fetchNodePlans,
   fetchDashboardStats,
+  fetchAllPersons,
   addProject as addProjectApi,
 } from '../api/node'
 
@@ -13,6 +14,8 @@ export const useProjectStore = defineStore('project', {
     current: null,        // 当前项目详情
     overview: null,       // 节点计划总览（kpis/processes/timeline）
     loading: false,
+
+    allPersons: [],       // 全量交付负责人（下拉框数据源，与筛选结果隔离）
 
     lastNodeSavedAt: 0,   // 节点填报保存时间戳，供 AlertList 监听实时刷新
 
@@ -72,6 +75,17 @@ export const useProjectStore = defineStore('project', {
         this.dashboard = await fetchDashboardStats()
       } catch (e) {
         // 错误已由 axios 拦截器统一提示
+      }
+    },
+
+    /** 加载全量交付负责人（下拉框数据源，与筛选结果隔离）。 */
+    async loadAllPersons() {
+      try {
+        const res = await fetchAllPersons()
+        this.allPersons = res.items || []
+      } catch (err) {
+        console.error('加载交付负责人失败', err)
+        this.allPersons = []
       }
     },
 

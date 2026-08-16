@@ -73,6 +73,21 @@ def get_project_anomalies(project_id: int) -> list[dict]:
     return getattr(_fn, "__wrapped__", _fn)(project_id)
 
 
+def get_all_persons() -> list[str]:
+    """获取所有项目的交付负责人（去重、非空、排序）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT delivery_person FROM projects "
+                "WHERE delivery_person IS NOT NULL AND delivery_person != '' "
+                "ORDER BY delivery_person"
+            )
+            return [row["delivery_person"] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def get_dashboard_stats() -> dict:
     """首页总览统计：与项目列表风险口径完全一致（复用 get_projects_filtered 实时计算）。
 
@@ -302,6 +317,27 @@ def get_node_exceptions_by_node(node_id: int) -> list[dict]:
             cur.execute(
                 "SELECT * FROM node_exceptions WHERE node_id = %s ORDER BY created_at DESC",
                 (node_id,),
+            )
+            return [row for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_closed_exceptions_by_project(project_id: int) -> list[dict]:
+    """查询项目下所有已关闭的历史异常记录（按关闭时间倒序）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, project_id, node_id, process_name, plan_date,
+                       responsibility_category, reason_detail, handler,
+                       planned_close_date, measures, status, created_at, updated_at, closed_at
+                FROM node_exceptions
+                WHERE project_id = %s AND status = 'closed'
+                ORDER BY closed_at DESC, updated_at DESC
+                """,
+                (project_id,),
             )
             return [row for row in cur.fetchall()]
     finally:
