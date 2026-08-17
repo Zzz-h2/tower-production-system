@@ -54,75 +54,6 @@ CREATE INDEX idx_projects_name ON projects(project_name);
 CREATE INDEX idx_projects_person ON projects(delivery_person);
 CREATE INDEX idx_projects_risk ON projects(risk_level);
 CREATE INDEX idx_projects_status ON projects(status);
-
-
--- ============================================================
--- 表2：processes（工序进度明细表）
--- 每个项目固定12道工序，项目创建时自动初始化
--- ============================================================
-CREATE TABLE IF NOT EXISTS processes (
-    id                  INT PRIMARY KEY AUTO_INCREMENT,
-    project_id          INT NOT NULL,
-    process_order       INT NOT NULL,
-    process_name        VARCHAR(255) NOT NULL,
-    standard_days       INT NOT NULL,
-    plan_start_date     VARCHAR(20),
-    plan_end_date       VARCHAR(20),
-    actual_start_date   VARCHAR(20),
-    actual_end_date     VARCHAR(20),
-    status              VARCHAR(20) DEFAULT 'not_started',
-    lag_days            INT DEFAULT 0,
-    completion_pct      DOUBLE DEFAULT 0.0,
-    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_by          VARCHAR(255) DEFAULT 'system',
-
-    UNIQUE KEY uk_processes_project_order (project_id, process_order),
-    CONSTRAINT fk_processes_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    CONSTRAINT chk_processes_status CHECK (status IN ('not_started', 'in_progress', 'completed', 'delayed'))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- 查询索引
-CREATE INDEX idx_processes_project ON processes(project_id);
-CREATE INDEX idx_processes_status ON processes(status);
-CREATE INDEX idx_processes_plan_end ON processes(plan_end_date);
-
-
--- ============================================================
--- 表3：anomalies（异常处理记录表）
--- ============================================================
-CREATE TABLE IF NOT EXISTS anomalies (
-    id                  INT PRIMARY KEY AUTO_INCREMENT,
-    project_id          INT NOT NULL,
-    process_id          INT NOT NULL,
-    process_name        VARCHAR(255) NOT NULL,
-    anomaly_reason      TEXT NOT NULL,
-    responsibility      VARCHAR(50) NOT NULL,
-    estimated_resolve_date VARCHAR(20),
-    actual_resolve_date    VARCHAR(20),
-    measures            TEXT,
-    handler             VARCHAR(255),
-    status              VARCHAR(20) DEFAULT 'open',
-    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    created_by          VARCHAR(255) DEFAULT 'system',
-    updated_by          VARCHAR(255) DEFAULT 'system',
-
-    CONSTRAINT fk_anomalies_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    CONSTRAINT fk_anomalies_process FOREIGN KEY (process_id) REFERENCES processes(id) ON DELETE CASCADE,
-    CONSTRAINT chk_anomalies_responsibility CHECK (responsibility IN ('设备故障', '人员不足', '物料短缺', '设计变更', '天气影响', '质量问题', '外部协调', '其他')),
-    CONSTRAINT chk_anomalies_status CHECK (status IN ('open', 'in_progress', 'closed'))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- 查询索引
-CREATE INDEX idx_anomalies_project ON anomalies(project_id);
-CREATE INDEX idx_anomalies_process ON anomalies(process_id);
-CREATE INDEX idx_anomalies_status ON anomalies(status);
-
-
--- ============================================================
--- 表4：milestones（里程碑节点表）
--- ============================================================
 CREATE TABLE IF NOT EXISTS milestones (
     id                  INT PRIMARY KEY AUTO_INCREMENT,
     project_id          INT NOT NULL,
@@ -183,43 +114,6 @@ CREATE TABLE IF NOT EXISTS import_logs (
     imported_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
     imported_by         VARCHAR(255) DEFAULT 'system'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
--- ============================================================
--- 表7：daily_progress（每日进度填报表，v2.0 新增）
--- ============================================================
-CREATE TABLE IF NOT EXISTS daily_progress (
-    id                  INT PRIMARY KEY AUTO_INCREMENT,
-    project_id          INT NOT NULL,
-    process_id          INT NOT NULL,
-    process_name        VARCHAR(255) NOT NULL,
-    report_date         VARCHAR(20) NOT NULL,
-    plan_qty            DOUBLE DEFAULT 0,
-    actual_qty          DOUBLE DEFAULT 0,
-    cumulative_plan     DOUBLE DEFAULT 0,
-    cumulative_actual   DOUBLE DEFAULT 0,
-    daily_status        VARCHAR(20) DEFAULT 'in_progress',
-    remarks             TEXT,
-    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_by          VARCHAR(255) DEFAULT 'system',
-
-    UNIQUE KEY uk_daily_progress (process_id, report_date),
-    CONSTRAINT fk_daily_progress_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    CONSTRAINT fk_daily_progress_process FOREIGN KEY (process_id) REFERENCES processes(id) ON DELETE CASCADE,
-    CONSTRAINT chk_daily_progress_status CHECK (daily_status IN ('completed', 'in_progress'))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE INDEX idx_dp_project ON daily_progress(project_id);
-CREATE INDEX idx_dp_process ON daily_progress(process_id);
-CREATE INDEX idx_dp_date ON daily_progress(report_date);
-
-
--- ============================================================
--- 表8：process_node_plans（工序节点计划表，v4.0 新增）
--- 排产 Excel 导入：多套塔筒 × 9 道排产工序 × 计划完成日期矩阵
--- 排产工序独立于 processes 表 12 道制造工序，process_name 独立存储
--- ============================================================
 CREATE TABLE IF NOT EXISTS process_node_plans (
     id              INT AUTO_INCREMENT PRIMARY KEY,
     project_id      INT NOT NULL,
@@ -275,10 +169,6 @@ CREATE TABLE IF NOT EXISTS node_exceptions (
 -- 表关联关系说明
 -- ============================================================
 --
--- projects (1) ──── (N) processes      项目与工序：一对多
--- projects (1) ──── (N) anomalies      项目与异常：一对多
 -- projects (1) ──── (N) milestones     项目与里程碑：一对多
--- processes (1) ──── (N) anomalies     工序与异常：一对多
--- processes (1) ──── (N) daily_progress 工序与日报：一对多
 --
 -- 删除级联：删除项目时，自动删除关联的工序、异常、里程碑、日报记录
