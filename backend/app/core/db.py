@@ -61,18 +61,6 @@ def get_all_projects(status_filter=None) -> list[dict]:
 def get_project_by_id(project_id: int) -> dict | None:
     from database import get_project_by_id as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_id)
-
-
-def get_project_processes(project_id: int) -> list[dict]:
-    from database import get_project_processes as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id)
-
-
-def get_project_anomalies(project_id: int) -> list[dict]:
-    from database import get_project_anomalies as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id)
-
-
 def get_all_persons() -> list[str]:
     """获取所有项目的交付负责人（去重、非空、排序）。"""
     conn = get_connection()
@@ -116,20 +104,6 @@ def get_duplicate_project(project_name: str, factory_name: str,
     """四字段组合查重：名称+厂家+负责人+机型 全部一致才算重复。"""
     from database import get_duplicate_project as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_name, factory_name, delivery_person, machine_type)
-
-
-def init_project_processes(project_id: int, plan_start_date: str):
-    """为项目初始化 12 道标准工序。"""
-    from database import init_project_processes as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, plan_start_date)
-
-
-def update_project_risk_level(project_id: int):
-    """根据工序状态重新计算并更新项目风险等级，返回新等级。"""
-    from database import update_project_risk_level as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id)
-
-
 def insert_import_log(file_name: str, total: int, success: int, error: int, error_details: str = ""):
     """记录导入日志。"""
     from database import insert_import_log as _fn
@@ -232,16 +206,6 @@ def delete_project(project_id: int) -> None:
     """删除项目（级联删除工序/异常/里程碑等关联数据，行为与原版一致）。"""
     from database import delete_project as _fn
     _fn(project_id)
-
-
-def regenerate_process_plan(project_id: int, plan_start_date: str) -> int:
-    """按新开工日期重新生成 12 道工序计划，返回生成的工序数。"""
-    from database import regenerate_process_plan as _fn
-    return _fn(project_id, plan_start_date)
-
-
-# ---------- 节点异常提报（node_exceptions） ----------
-
 def get_node_plan_by_id(node_id: int) -> dict | None:
     """按 id 查询单个节点计划。"""
     conn = get_connection()

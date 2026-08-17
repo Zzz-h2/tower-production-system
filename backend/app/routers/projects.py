@@ -85,10 +85,7 @@ def create_project(payload: ProjectCreate):
 
     # 3) 写入（upsert 返回 (project_id, is_new)）
     pid, is_new = db.upsert_project(data)
-    # 仅当为新建项目且指定了开工日期时，初始化 12 道工序并刷新风险等级
-    if is_new and data.get("plan_start_date"):
-        db.init_project_processes(pid, data["plan_start_date"])
-        db.update_project_risk_level(pid)
+    # 废弃 processes 表初始化与 risk_level 写入：风险等级由 node_plans+node_actuals 实时计算
 
     project = db.get_project_by_id(pid)
     if not project:
@@ -168,11 +165,7 @@ def update_project(pid: int, payload: ProjectUpdateRequest):
 
     if data:
         db.update_project(pid, data)
-
-    # 编辑计划日期后刷新风险/进度（工序重排由计划变更驱动，保持与原版口径）
-    if "plan_start_date" in data and str(data["plan_start_date"]):
-        db.regenerate_process_plan(pid, data["plan_start_date"])
-    db.update_project_risk_level(pid)
+    # 废弃 processes 表工序重排与 risk_level 写入：风险等级由 node_plans+node_actuals 实时计算
 
     return db.get_project_by_id(pid)
 

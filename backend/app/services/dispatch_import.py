@@ -50,12 +50,9 @@ def parse_and_import(tmp_path: str, file_name: str) -> dict:
     # 4) 解析（标准化行 + 行级错误；失败行被跳过）
     rows, parse_errors = parse_schedule_excel(tmp_path, mapping)
 
-    # 5) 逐行建项目（upsert）→ 新建则初始化工序 + 刷新风险
+    # 5) 逐行建项目（upsert）→ 新建项目即建项目记录（废弃 processes 初始化与风险写入）
     for row in rows:
         pid, is_new = db.upsert_project(row)
-        if is_new and row.get("plan_start_date"):
-            db.init_project_processes(pid, row["plan_start_date"])
-            db.update_project_risk_level(pid)
 
     # 6) 写导入日志（总条数 = 成功 + 跳过）
     db.insert_import_log(
