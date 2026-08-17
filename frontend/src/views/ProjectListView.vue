@@ -1,11 +1,29 @@
 <template>
   <div class="page-wrap">
-    <!-- ① 标题栏 -->
-    <div class="block-header page-title">
-      <span class="icon"></span>
-      <span class="block-title">塔筒生产进度总览</span>
-      <span class="block-subtitle">按月度调度令建项目 · 实时跟踪各风场塔筒生产进度与风险</span>
-    </div>
+    <!-- ① 左侧一级视图切换栏 -->
+    <div class="page-layout">
+      <div class="side-menu">
+        <el-menu :default-active="activeView" class="view-switch-menu" @select="handleViewSwitch">
+          <el-menu-item index="production">
+            <el-icon><TrendCharts /></el-icon>
+            <span>生产进度总览</span>
+          </el-menu-item>
+          <el-menu-item index="schedule">
+            <el-icon><DocumentChecked /></el-icon>
+            <span>排产计划总览</span>
+          </el-menu-item>
+        </el-menu>
+      </div>
+
+      <div class="main-content">
+        <!-- ========== 生产进度总览（原主页面，逻辑不变） ========== -->
+        <template v-if="activeView === 'production'">
+          <!-- 标题栏 -->
+          <div class="block-header page-title">
+            <span class="icon"></span>
+            <span class="block-title">塔筒生产进度总览</span>
+            <span class="block-subtitle">按月度调度令建项目 · 实时跟踪各风场塔筒生产进度与风险</span>
+          </div>
 
     <!-- ② 概览指标卡区 -->
     <div class="kpi-row">
@@ -147,22 +165,35 @@
 
     <AddProjectDialog v-model="addVisible" @added="onAdded" />
     <EditProjectDialog v-model="editVisible" :project="editTarget" @updated="onUpdated" />
+        </template>
+
+        <!-- ========== 排产计划总览（副页面） ========== -->
+        <SchedulePlanOverview v-else />
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, Refresh } from '@element-plus/icons-vue'
+import { Plus, Refresh, TrendCharts, DocumentChecked } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useProjectStore } from '../store/project'
 import { deleteProject as deleteProjectApi } from '../api/node'
 import DispatchImport from '../components/DispatchImport.vue'
 import AddProjectDialog from '../components/AddProjectDialog.vue'
 import EditProjectDialog from '../components/EditProjectDialog.vue'
+import SchedulePlanOverview from '../components/SchedulePlanOverview.vue'
 
 const store = useProjectStore()
 const router = useRouter()
+
+// 左侧一级视图切换：production 生产进度总览 / schedule 排产计划总览
+const activeView = ref('production')
+function handleViewSwitch(index) {
+  activeView.value = index
+}
 
 // 首页总览 KPI（字段与 /api/dashboard/stats 一致）
 const stats = computed(() => store.dashboard)
@@ -311,6 +342,19 @@ onMounted(() => {
 
 <style scoped>
 .page-wrap { padding: 24px; }
+.page-layout { display: flex; gap: 20px; align-items: flex-start; }
+.side-menu {
+  width: 200px; flex-shrink: 0; background: #fff;
+  border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px;
+}
+.side-menu :deep(.el-menu) { border-right: none; }
+.side-menu :deep(.el-menu-item) { border-radius: 8px; margin-bottom: 4px; }
+.side-menu :deep(.el-menu-item.is-active) {
+  background: #1a365d; color: #fff; font-weight: 500;
+}
+.side-menu :deep(.el-menu-item:not(.is-active):hover) { background: #f4f6f9; }
+.side-menu :deep(.el-menu-item .el-icon) { margin-right: 8px; }
+.main-content { flex: 1; min-width: 0; }
 .page-title { margin-bottom: 16px; }
 .kpi-row {
   display: grid;

@@ -104,6 +104,7 @@ const onSaved = () => {
 }
 const onImported = () => {
   store.loadOverview(props.pid)   // Excel 导入成功后刷新节点计划总览
+  store.lastNodeSavedAt = Date.now()   // 触发节点预警/异常模块自动刷新（排产变化 → 预警重算）
 }
 
 onMounted(() => store.loadOverview(props.pid))

@@ -168,8 +168,19 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     # 风险等级 + 整体进度：基于 node_plans + node_actuals 实时计算（弃用 processes 表）
     from ..services.node_service import enrich_rows
     today_s = str(date.today())
+
+    # 排产状态：批量查询已上传排产的项目 id 集合
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT project_id FROM process_node_plans")
+            has_schedule_ids = {r["project_id"] for r in cur.fetchall()}
+    finally:
+        conn.close()
+
     for p in rows:
         pid = p["id"]
+        p["has_schedule_plan"] = pid in has_schedule_ids
         plans = get_node_plans(pid)
         actuals = get_node_actuals(pid)
         nodes = enrich_rows(plans, actuals)
