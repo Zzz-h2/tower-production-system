@@ -14,7 +14,7 @@ from typing import Optional, Any
 import pymysql
 import pymysql.cursors
 
-from config import MYSQL_CONFIG
+from backend.app.core.config import MYSQL_CONFIG
 
 try:
     import streamlit as st  # 仅用于 @st.cache_data 只读查询缓存
@@ -392,7 +392,7 @@ def init_project_processes(project_id: int, plan_start_date: str) -> None:
     为项目初始化12道标准工序。
     若工序已存在则跳过（避免重复初始化）。
     """
-    from utils.business_logic import PROCESS_NAMES, PROCESS_DAYS  # 延迟导入避免循环
+    from backend.app.services.business_logic import PROCESS_NAMES, PROCESS_DAYS  # 延迟导入避免循环
 
     conn = get_connection()
     try:
@@ -405,8 +405,8 @@ def init_project_processes(project_id: int, plan_start_date: str) -> None:
                 return  # 已初始化，跳过
 
             # 使用正向计划生成函数计算计划日期
-            from utils.business_logic import generate_forward_plan
-            from utils.workday_calendar import parse_date
+            from backend.app.services.business_logic import generate_forward_plan
+            from backend.app.services.workday_calendar import parse_date
 
             start_date = parse_date(plan_start_date)
             forward_plan = generate_forward_plan(start_date)
@@ -443,8 +443,8 @@ def regenerate_process_plan(project_id: int, plan_start_date: str) -> int:
     Returns:
         int: 更新/创建的工序数量
     """
-    from utils.business_logic import PROCESS_NAMES, PROCESS_DAYS, generate_forward_plan
-    from utils.workday_calendar import parse_date
+    from backend.app.services.business_logic import PROCESS_NAMES, PROCESS_DAYS, generate_forward_plan
+    from backend.app.services.workday_calendar import parse_date
 
     conn = get_connection()
     try:
@@ -543,7 +543,7 @@ def update_project_risk_level(project_id: int) -> str:
     根据工序状态重新计算并更新项目风险等级。
     返回新的风险等级。
     """
-    from utils.business_logic import judge_warning_level  # 延迟导入
+    from backend.app.services.business_logic import judge_warning_level  # 延迟导入
 
     processes = get_project_processes(project_id)
     risk_level, _ = judge_warning_level(processes)

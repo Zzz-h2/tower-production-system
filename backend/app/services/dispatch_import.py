@@ -23,7 +23,7 @@ def parse_and_import(tmp_path: str, file_name: str) -> dict:
         HTTPException 400: 表头读取失败 / 必填字段映射缺失
     """
     from fastapi import HTTPException
-    from utils.excel_parser import (
+    from .excel_parser import (
         read_excel_headers,
         auto_detect_mapping,
         parse_schedule_excel,

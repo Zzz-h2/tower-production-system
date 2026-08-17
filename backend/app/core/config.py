@@ -24,14 +24,11 @@ MYSQL_CONFIG = {
 }
 
 # ---------- 业务常量（与 config.py 同源） ----------
-try:
-    from config import SCHEDULE_PROCESS_NAMES as _S
-    SCHEDULE_PROCESS_NAMES = list(_S)  # 九工序顺序（前序联动依据）
-except Exception:  # pragma: no cover - 兜底常量
-    SCHEDULE_PROCESS_NAMES = [
-        "钢板到货", "法兰到货", "下料", "卷制", "组对", "黑塔",
-        "防腐", "附件安装", "具备验收",
-    ]
+# 九工序顺序（前序联动依据；与排产 Excel 一致，不再依赖根目录 config.py）
+SCHEDULE_PROCESS_NAMES = [
+    "钢板到货", "法兰到货", "下料", "卷制", "组对", "黑塔",
+    "防腐", "附件安装", "具备验收",
+]
 
 # 状态语义色（前端渲染与后端响应统一）
 STATUS_COLORS = {
