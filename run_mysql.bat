@@ -1,11 +1,7 @@
 @echo off
 chcp 65001 >nul
-title Tower Production System (MySQL mode)
+title Tower Production System (FastAPI + Vue3, MySQL mode)
 cd /d "%~dp0"
-
-rem ===== install dependencies (official PyPI to avoid mirror 403) =====
-echo Checking / installing dependencies...
-python -m pip install -r requirements.txt -i https://pypi.org/simple
 
 rem ===== MySQL connection settings (password set inline below) =====
 set MYSQL_HOST=127.0.0.1
@@ -16,8 +12,15 @@ set MYSQL_PORT=3306
 
 echo.
 echo Connecting to MySQL %MYSQL_HOST%:%MYSQL_PORT% / %MYSQL_DATABASE%
-echo Starting Streamlit... open http://localhost:8501 in your browser
+echo Starting backend :8000 and frontend :5173 ...
 echo.
 
-python -m streamlit run app.py --server.port 8501
-pause
+rem ===== 启动后端 (FastAPI :8000) =====
+start "TowerBackend" /d "%~dp0backend" "%~dp0backend\.venv\Scripts\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+rem ===== 启动前端 (Vite :5173) =====
+start "TowerFrontend" /d "%~dp0frontend" cmd /k "npm run dev"
+
+echo 浏览器访问 http://localhost:5173
+start "" "http://localhost:5173"
+exit /b

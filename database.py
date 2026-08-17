@@ -183,7 +183,7 @@ def upsert_project(data: dict) -> tuple[int, bool]:
 # 首页项目列表不做缓存：风险等级随日期实时变化，缓存会导致首页显示过期状态。
 # （数据量小（项目×12工序），实时查询毫秒级，保证日期推移后首页立即同步。）
 def get_all_projects(status_filter: Optional[str] = None) -> list[dict]:
-    """获取所有项目列表（含进度统计；风险等级实时计算，不缓存）"""
+    """获取所有项目列表（基础字段；风险/进度由 backend 基于 node_plans 实时计算覆盖）。"""
     conn = get_connection()
     try:
         where_clause = "WHERE p.status = %s" if status_filter else ""
@@ -191,110 +191,36 @@ def get_all_projects(status_filter: Optional[str] = None) -> list[dict]:
 
         with conn.cursor() as cursor:
             cursor.execute(f"""
-                SELECT 
-                    p.*,
-                    COUNT(CASE WHEN pr.status = 'completed' THEN 1 END) AS completed_count,
-                    ROUND(
-                        COUNT(CASE WHEN pr.status = 'completed' THEN 1 END) * 100.0 / 12, 1
-                    ) AS progress_pct,
-                    -- 实时风险等级：取所有工序中最大滞后天数判断（每日实时计算，不再依赖静态字段）
-                    CASE 
-                        WHEN MAX(
-                            CASE 
-                                WHEN pr.actual_end_date IS NOT NULL THEN 
-                                    -- 已完成：按实际完成 vs 计划结束算滞后
-                                    COALESCE(DATEDIFF(pr.actual_end_date, pr.plan_end_date), 0)
-                                WHEN pr.plan_end_date IS NOT NULL AND CURDATE() > pr.plan_end_date THEN 
-                                    -- 未完成且已超计划结束：按今天 vs 计划结束算滞后
-                                    DATEDIFF(CURDATE(), pr.plan_end_date)
-                                ELSE 0
-                            END
-                        ) >= 2 THEN 'delayed'
-                        WHEN MAX(
-                            CASE 
-                                WHEN pr.actual_end_date IS NOT NULL THEN 
-                                    COALESCE(DATEDIFF(pr.actual_end_date, pr.plan_end_date), 0)
-                                WHEN pr.plan_end_date IS NOT NULL AND CURDATE() > pr.plan_end_date THEN 
-                                    DATEDIFF(CURDATE(), pr.plan_end_date)
-                                ELSE 0
-                            END
-                        ) >= 1 THEN 'warning'
-                        ELSE 'normal'
-                    END AS risk_level_live
-                FROM projects p
-                LEFT JOIN processes pr ON p.id = pr.project_id
+                SELECT p.* FROM projects p
                 {where_clause}
-                GROUP BY p.id
-                ORDER BY 
-                    CASE risk_level_live
-                        WHEN 'delayed' THEN 1 
-                        WHEN 'warning' THEN 2 
-                        WHEN 'normal' THEN 3 
-                    END,
-                    p.updated_at DESC
+                ORDER BY p.updated_at DESC
             """, params)
-
             rows = []
             for row in cursor.fetchall():
                 d = dict(row)
-                # p.* 展开含静态 risk_level 列，实时计算列用独立别名避免冲突，此处统一映射回 risk_level
-                d['risk_level'] = d.pop('risk_level_live')
+                d.setdefault('risk_level', 'normal')
+                d.setdefault('progress_pct', 0)
                 rows.append(d)
             return rows
     finally:
         conn.close()
 
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_project_by_id(project_id: int) -> Optional[dict]:
-    """根据ID获取单个项目"""
+    """根据ID获取单个项目（基础字段；风险/进度由路由基于 node_plans 实时计算覆盖）。"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT 
-                    p.*,
-                    COUNT(CASE WHEN pr.status = 'completed' THEN 1 END) AS completed_count,
-                    ROUND(
-                        COUNT(CASE WHEN pr.status = 'completed' THEN 1 END) * 100.0 / 12, 1
-                    ) AS progress_pct,
-                    -- 实时风险等级（与 get_all_projects 口径一致：取所有工序最大滞后天数）
-                    CASE 
-                        WHEN MAX(
-                            CASE 
-                                WHEN pr.actual_end_date IS NOT NULL THEN 
-                                    COALESCE(DATEDIFF(pr.actual_end_date, pr.plan_end_date), 0)
-                                WHEN pr.plan_end_date IS NOT NULL AND CURDATE() > pr.plan_end_date THEN 
-                                    DATEDIFF(CURDATE(), pr.plan_end_date)
-                                ELSE 0
-                            END
-                        ) >= 2 THEN 'delayed'
-                        WHEN MAX(
-                            CASE 
-                                WHEN pr.actual_end_date IS NOT NULL THEN 
-                                    COALESCE(DATEDIFF(pr.actual_end_date, pr.plan_end_date), 0)
-                                WHEN pr.plan_end_date IS NOT NULL AND CURDATE() > pr.plan_end_date THEN 
-                                    DATEDIFF(CURDATE(), pr.plan_end_date)
-                                ELSE 0
-                            END
-                        ) >= 1 THEN 'warning'
-                        ELSE 'normal'
-                    END AS risk_level_live
-                FROM projects p
-                LEFT JOIN processes pr ON p.id = pr.project_id
-                WHERE p.id = %s
-                GROUP BY p.id
-            """, (project_id,))
+            cursor.execute("SELECT p.* FROM projects p WHERE p.id = %s", (project_id,))
             row = cursor.fetchone()
             if row:
                 d = dict(row)
-                # 同 get_all_projects：实时列独立别名避免与 p.* 静态 risk_level 冲突
-                d['risk_level'] = d.pop('risk_level_live')
+                d.setdefault('risk_level', 'normal')
+                d.setdefault('progress_pct', 0)
                 return d
             return None
     finally:
         conn.close()
-
 
 def get_project_by_name(project_name: str) -> Optional[dict]:
     """根据项目名称查询项目（用于手动添加的重复校验）。
@@ -381,139 +307,7 @@ def delete_project(project_id: int) -> None:
             conn.commit()
     finally:
         conn.close()
-def update_process(process_id: int, data: dict) -> None:
-    """更新工序进度（含 status 写入前校验，防止 CHECK 约束冲突）"""
-    # status 字段合法枚举值（需与 db_schema_mysql.sql 中 CHECK 约束严格一致）
-    VALID_STATUSES = {'not_started', 'in_progress', 'completed', 'delayed'}
-
-    conn = get_connection()
-    try:
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        fields = []
-        values = []
-        for key in ['actual_start_date', 'actual_end_date', 'status', 
-                     'lag_days', 'completion_pct', 'updated_by',
-                     'plan_start_date', 'plan_end_date']:
-            if key in data:
-                val = data[key]
-                # status 字段写入前校验：strip 首尾空格 + 检查是否合法
-                if key == 'status':
-                    val = str(val).strip() if val else 'not_started'
-                    if val not in VALID_STATUSES:
-                        val = 'not_started'  # 非法值兜底
-                fields.append(f"{key} = %s")
-                values.append(val)
-        fields.append("updated_at = %s")
-        values.append(now)
-        values.append(process_id)
-
-        with conn.cursor() as cursor:
-            cursor.execute(f"UPDATE processes SET {', '.join(fields)} WHERE id = %s", values)
-            conn.commit()
-    finally:
-        conn.close()
-# ============================================================
-# 异常管理操作
-# ============================================================
-
-def insert_anomaly(data: dict) -> int:
-    """新增异常记录"""
-    conn = get_connection()
-    try:
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO anomalies 
-                    (project_id, process_id, process_name, anomaly_reason,
-                     responsibility, estimated_resolve_date, measures, handler,
-                     status, created_at, updated_at, created_by, updated_by)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                data['project_id'], data['process_id'], data['process_name'],
-                data['anomaly_reason'], data['responsibility'],
-                data.get('estimated_resolve_date'), data.get('measures'),
-                data.get('handler', 'system'), 'open',
-                now, now, data.get('created_by', 'system'), data.get('updated_by', 'system')
-            ))
-            conn.commit()
-            return cursor.lastrowid
-    finally:
-        conn.close()
-def update_anomaly_status(anomaly_id: int, status: str, 
-                           actual_resolve_date: Optional[str] = None,
-                           handler: Optional[str] = None) -> None:
-    """更新异常处理状态（闭环）"""
-    conn = get_connection()
-    try:
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        with conn.cursor() as cursor:
-            if actual_resolve_date:
-                cursor.execute("""
-                    UPDATE anomalies SET 
-                        status = %s, actual_resolve_date = %s, updated_at = %s
-                    WHERE id = %s
-                """, (status, actual_resolve_date, now, anomaly_id))
-            else:
-                cursor.execute("""
-                    UPDATE anomalies SET status = %s, updated_at = %s WHERE id = %s
-                """, (status, now, anomaly_id))
-            conn.commit()
-    finally:
-        conn.close()
-
-
-# ============================================================
-# 统计查询操作
-# ============================================================
-
 @st.cache_data(ttl=300, show_spinner=False)
-def get_dashboard_stats() -> dict:
-    """获取看板统计数据（风险计数基于实时工序状态，与项目列表口径一致）"""
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) AS total_projects,
-                    COUNT(CASE WHEN COALESCE(risk_calc.risk_level, 'normal') = 'normal' THEN 1 END) AS normal_count,
-                    COUNT(CASE WHEN COALESCE(risk_calc.risk_level, 'normal') = 'warning' THEN 1 END) AS warning_count,
-                    COUNT(CASE WHEN COALESCE(risk_calc.risk_level, 'normal') = 'delayed' THEN 1 END) AS delayed_count,
-                    COALESCE(SUM(p.monthly_plan), 0) AS total_monthly_plan
-                FROM projects p
-                LEFT JOIN (
-                    SELECT 
-                        project_id,
-                        CASE 
-                            WHEN MAX(
-                                CASE 
-                                    WHEN actual_end_date IS NOT NULL AND plan_end_date IS NOT NULL THEN
-                                        CAST(DATEDIFF(actual_end_date, plan_end_date) AS SIGNED)
-                                    WHEN actual_end_date IS NULL AND plan_end_date IS NOT NULL AND CURDATE() > plan_end_date THEN
-                                        CAST(DATEDIFF(CURDATE(), plan_end_date) AS SIGNED)
-                                    ELSE 0
-                                END
-                            ) >= 2 THEN 'delayed'
-                            WHEN MAX(
-                                CASE 
-                                    WHEN actual_end_date IS NOT NULL AND plan_end_date IS NOT NULL THEN
-                                        CAST(DATEDIFF(actual_end_date, plan_end_date) AS SIGNED)
-                                    WHEN actual_end_date IS NULL AND plan_end_date IS NOT NULL AND CURDATE() > plan_end_date THEN
-                                        CAST(DATEDIFF(CURDATE(), plan_end_date) AS SIGNED)
-                                    ELSE 0
-                                END
-                            ) >= 1 THEN 'warning'
-                            ELSE 'normal'
-                        END AS risk_level
-                    FROM processes
-                    GROUP BY project_id
-                ) risk_calc ON risk_calc.project_id = p.id
-                WHERE p.status = 'in_progress'
-            """)
-            return dict(cursor.fetchone())
-    finally:
-        conn.close()
-
-
 def insert_import_log(file_name: str, total: int, success: int, 
                        error: int, error_details: str = '') -> None:
     """记录导入日志"""

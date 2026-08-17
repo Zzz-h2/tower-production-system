@@ -38,31 +38,22 @@
 ```bash
 # 1. 进入项目目录
 cd tower_production_system
-# 2. 安装依赖
-pip install -r requirements.txt
-# 3. 启动系统
-python -m streamlit run app.py
-# 或双击 run_mysql.bat（Windows，内置 MySQL 连接变量）
-# 说明：MySQL 连接通过环境变量 MYSQL_HOST/USER/PASSWORD/DATABASE/PORT 配置，见 config.py
-
-#清除缓存
-Get-ChildItem -Path . -Filter "*.pyc" -Recurse -File | Remove-Item -Force
-Get-ChildItem -Path . -Filter "__pycache__" -Recurse -Directory | Remove-Item -Recurse -Force
-
-#检查缓存
-Get-ChildItem -Path . -Filter "*.pyc" -Recurse -File
-Get-ChildItem -Path . -Filter "__pycache__" -Recurse -Directory
+# 2. 安装依赖（后端）
+cd backend && pip install -r requirements.txt
+# 3. 启动系统（Windows 直接双击 run.bat 或 start_app.bat）
+# 后端：cd backend && uvicorn app.main:app --port 8000
+# 前端：cd frontend && npm run dev   → http://localhost:5173
+# 说明：MySQL 连接通过环境变量 MYSQL_HOST/USER/PASSWORD/DATABASE/PORT 配置，见 backend/app/core/config.py
 ```
-启动后浏览器自动打开 `http://localhost:8501`
+启动后浏览器访问 `http://localhost:5173`（前端 Vite 开发服务器代理 /api → 后端 :8000）
 
 ### 首次使用
 
-1. 点击「导入月度调度令」上传 Excel 文件
-2. 在表头映射界面匹配字段
-3. 导入成功后在主界面查看项目列表
-4. 点击「查看详情」进入单项目管控页
-5. 在详情页更新工序进度、提报异常
-6. 使用里程碑倒排工具规划交付节点
+1. 主页面左侧切换到「排产计划总览」或进项目详情「节点计划」Tab 导入排产计划 Excel
+2. 项目详情「节点计划」Tab 查看工序时间轴、填报各节点实际进度
+3. 填报后「节点预警」Tab 自动生成当前预警；可提报/编辑/关闭异常
+4. 使用「里程碑倒排」输入交付截止日自动倒排
+5. 主页面可筛选/搜索/编辑/删除项目
 
 ---
 
@@ -70,22 +61,22 @@ Get-ChildItem -Path . -Filter "__pycache__" -Recurse -Directory
 
 ```
 tower_production_system/
-├── app.py                      # 主入口（项目总览看板）
-├── config.py                   # 全局配置（颜色/工序参数）
-├── database.py                 # 数据库操作（MySQL CRUD）
-├── requirements.txt            # Python 依赖
-├── run.bat                     # Windows 启动脚本
-├── db_schema.sql               # 数据库建表脚本
-├── db_schema_mysql.sql         # MySQL 建表脚本
-├── db_upgrade_v2_mysql.sql     # MySQL 表结构升级脚本
-├── utils/
-│   ├── __init__.py
-│   ├── business_logic.py       # 核心业务逻辑
-│   ├── excel_parser.py         # Excel 解析器
-│   └── workday_calendar.py     # 工作日历工具
-├── pages/
-│   └── 2_项目详情.py            # 项目详情页
-└── 需求说明书与技术方案.md      # 完整需求文档
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI 入口 / CORS / 路由
+│   │   ├── core/                # config / db（数据库访问）
+│   │   ├── routers/             # projects / nodes / dashboard / exceptions 等
+│   │   ├── schemas/             # Pydantic 模型
+│   │   └── services/            # 业务逻辑（状态机/倒排/Excel 解析，自包含）
+│   └── requirements.txt
+├── frontend/
+│   ├── src/                     # Vue3 前端（views/components/store/api）
+│   └── package.json
+├── database.py                  # 数据库操作（MySQL CRUD，被 backend 复用）
+├── db_schema_mysql.sql          # MySQL 建表脚本（node_plans/node_actuals/node_exceptions 等）
+├── run.bat / run_mysql.bat      # Windows 一键启动（后端+前端）
+├── start_app.bat                # 幂等启动（检测端口空闲再拉起）
+└── README.md / 启动指南.md      # 文档
 ```
 
 ---
