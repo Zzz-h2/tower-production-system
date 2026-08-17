@@ -230,3 +230,41 @@ def get_alerts(pid: int):
         items.append(item)
 
     return {"items": items, "total": len(items)}
+
+
+@router.get("/{pid}/milestone-backward")
+def milestone_backward(pid: int, deadline: str = None):
+    """里程碑倒排：给定交付截止日，返回倒排计划与偏差分析。"""
+    if not deadline:
+        raise HTTPException(status_code=400, detail="缺少 deadline 参数")
+    try:
+        dl = date.fromisoformat(deadline)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="deadline 格式应为 YYYY-MM-DD")
+    if not db.get_project_by_id(pid):
+        raise HTTPException(status_code=404, detail="项目不存在")
+    from ..services import milestone as milestone_svc
+    return milestone_svc.build_milestone_backward(pid, dl)
+
+
+class MilestoneBackwardRequest(BaseModel):
+    """里程碑倒排请求体：交付截止日 + 可选的自定义工序工期。"""
+    delivery_deadline: str
+    custom_durations: Optional[dict[str, int]] = None
+
+
+@router.post("/{pid}/milestone-backward")
+def milestone_backward_with_durations(pid: int, req: MilestoneBackwardRequest):
+    """里程碑倒排（支持按工序自定义工期）：delivery_deadline + custom_durations。"""
+    try:
+        dl = date.fromisoformat(req.delivery_deadline)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="delivery_deadline 格式应为 YYYY-MM-DD")
+    if not db.get_project_by_id(pid):
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if req.custom_durations:
+        for name, days in req.custom_durations.items():
+            if not isinstance(days, int) or days < 1 or days > 365:
+                raise HTTPException(status_code=400, detail=f"工序 {name} 工期必须是 1~365 的整数")
+    from ..services import milestone as milestone_svc
+    return milestone_svc.build_milestone_backward(pid, dl, req.custom_durations)

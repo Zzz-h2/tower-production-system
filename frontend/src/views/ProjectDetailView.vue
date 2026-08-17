@@ -15,7 +15,13 @@
         </div>
       </el-tab-pane>
       <el-tab-pane label="📅 里程碑倒排" name="milestone">
-        <el-empty description="里程碑倒排 Tab（阶段 2 完善）" />
+        <div class="block-card">
+          <div class="block-header">
+            <span class="icon"></span><span class="block-title">里程碑倒排</span>
+            <span class="block-subtitle" style="color:#3182ce;">输入交付截止日自动倒排</span>
+          </div>
+          <MilestoneBackward :pid="id" />
+        </div>
       </el-tab-pane>
     </el-tabs>
   </div>
@@ -27,6 +33,7 @@ import { useProjectStore } from '../store/project'
 import ProjectHeaderCard from '../components/ProjectHeaderCard.vue'
 import NodeScheduleTab from '../components/NodeScheduleTab.vue'
 import AlertList from '../components/AlertList.vue'
+import MilestoneBackward from '../components/MilestoneBackward.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 const store = useProjectStore()
