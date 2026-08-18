@@ -172,3 +172,10 @@ CREATE TABLE IF NOT EXISTS node_exceptions (
 -- projects (1) ──── (N) milestones     项目与里程碑：一对多
 --
 -- 删除级联：删除项目时，自动删除关联的工序、异常、里程碑、日报记录
+
+
+-- ============================================================
+-- 性能索引：列表页批量查询（消除 N+1 后的 IN 查询 / DISTINCT 全扫描）
+-- ============================================================
+CREATE INDEX idx_pnp_project ON process_node_plans(project_id);
+CREATE INDEX idx_nap_project ON node_actual_progress(project_id);

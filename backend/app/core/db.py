@@ -38,6 +38,18 @@ def get_node_actuals(project_id: int) -> dict:
     return getattr(_fn, "__wrapped__", _fn)(project_id)
 
 
+def get_node_plans_batch(project_ids: list[int]) -> dict[int, list[dict]]:
+    """批量查询多个项目的工序节点计划：{project_id: [plan, ...]}（消除列表页 N+1）。"""
+    from database import get_node_plans_batch as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_ids)
+
+
+def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
+    """批量查询多个项目节点实际进度：{project_id: {node_plan_id: {...}}}。"""
+    from database import get_node_actuals_batch as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_ids)
+
+
 def insert_node_plans(project_id: int, plans: list[dict]) -> int:
     """批量写入节点计划（先清空该项目旧计划再写入，与原版一致）。"""
     from database import insert_node_plans as _fn
@@ -143,7 +155,11 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     from ..services.node_service import enrich_rows
     today_s = str(date.today())
 
-    # 排产状态：批量查询已上传排产的项目 id 集合
+    # 一次性批量查询（消除 N+1：原逻辑每项目 2 次 DB 往返 → 现在全程仅 3 次）
+    all_pids = [p["id"] for p in rows]
+    plans_map = get_node_plans_batch(all_pids)      # 1 次查询
+    actuals_map = get_node_actuals_batch(all_pids)  # 1 次查询
+
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -155,8 +171,8 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     for p in rows:
         pid = p["id"]
         p["has_schedule_plan"] = pid in has_schedule_ids
-        plans = get_node_plans(pid)
-        actuals = get_node_actuals(pid)
+        plans = plans_map.get(pid, [])
+        actuals = actuals_map.get(pid, {})
         nodes = enrich_rows(plans, actuals)
 
         # 风险等级：历史逾期 > 今日未完成 > 正常

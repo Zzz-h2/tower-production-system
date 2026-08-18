@@ -439,6 +439,55 @@ def get_node_actuals(project_id: int) -> dict:
         conn.close()
 
 
+def get_node_plans_batch(project_ids: list[int]) -> dict[int, list[dict]]:
+    """批量查询多个项目的工序节点计划，返回 {project_id: [plan, ...]}（消除列表页 N+1）。"""
+    if not project_ids:
+        return {}
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            fmt = ",".join(["%s"] * len(project_ids))
+            cur.execute(f"""
+                SELECT * FROM process_node_plans
+                WHERE project_id IN ({fmt})
+                ORDER BY project_id, process_order, plan_date
+            """, project_ids)
+            rows = cur.fetchall()
+        result: dict[int, list[dict]] = {}
+        for row in rows:
+            d = dict(row)
+            result.setdefault(int(d["project_id"]), []).append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
+    """批量查询多个项目节点实际进度，返回 {project_id: {node_plan_id: {actual_qty, report_date}}}。"""
+    if not project_ids:
+        return {}
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            fmt = ",".join(["%s"] * len(project_ids))
+            cur.execute(f"""
+                SELECT project_id, node_plan_id, actual_qty, report_date
+                FROM node_actual_progress
+                WHERE project_id IN ({fmt})
+            """, project_ids)
+            rows = cur.fetchall()
+        result: dict[int, dict] = {}
+        for row in rows:
+            pid = int(row["project_id"])
+            result.setdefault(pid, {})[int(row["node_plan_id"])] = {
+                "actual_qty": int(row["actual_qty"] or 0),
+                "report_date": row["report_date"],
+            }
+        return result
+    finally:
+        conn.close()
+
+
 if __name__ == '__main__':
     init_database()
     print("Database initialization test passed.")
