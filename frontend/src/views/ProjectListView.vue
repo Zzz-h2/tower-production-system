@@ -12,6 +12,10 @@
             <el-icon><DocumentChecked /></el-icon>
             <span>排产计划总览</span>
           </el-menu-item>
+          <el-menu-item index="ranking">
+            <el-icon><Trophy /></el-icon>
+            <span>出品排名总览</span>
+          </el-menu-item>
         </el-menu>
       </div>
 
@@ -168,7 +172,10 @@
         </template>
 
         <!-- ========== 排产计划总览（副页面） ========== -->
-        <SchedulePlanOverview v-else />
+        <SchedulePlanOverview v-else-if="activeView === 'schedule'" />
+
+        <!-- ========== 出品排名总览（副页面） ========== -->
+        <ProductionRankingOverview v-else-if="activeView === 'ranking'" />
       </div>
     </div>
   </div>
@@ -177,7 +184,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, Refresh, TrendCharts, DocumentChecked } from '@element-plus/icons-vue'
+import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useProjectStore } from '../store/project'
 import { deleteProject as deleteProjectApi } from '../api/node'
@@ -185,6 +192,7 @@ import DispatchImport from '../components/DispatchImport.vue'
 import AddProjectDialog from '../components/AddProjectDialog.vue'
 import EditProjectDialog from '../components/EditProjectDialog.vue'
 import SchedulePlanOverview from '../components/SchedulePlanOverview.vue'
+import ProductionRankingOverview from '../components/ProductionRankingOverview.vue'
 
 const store = useProjectStore()
 const router = useRouter()

@@ -488,6 +488,79 @@ def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
         conn.close()
 
 
+def get_attachment_plans_by_month(month_start: str, month_end: str) -> list[dict]:
+    """取某月内所有『附件安装』工序节点计划（出品排名统计源）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, project_id, process_name, plan_date, plan_qty
+                FROM process_node_plans
+                WHERE process_name = '附件安装'
+                  AND plan_date >= %s AND plan_date < %s
+            """, (month_start, month_end))
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_actuals_by_node_ids(node_ids: list[int]) -> dict:
+    """批量取节点实际进度，返回 {node_plan_id: actual_qty}（消除 N+1）。"""
+    if not node_ids:
+        return {}
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            fmt = ",".join(["%s"] * len(node_ids))
+            cur.execute(f"""
+                SELECT node_plan_id, actual_qty
+                FROM node_actual_progress
+                WHERE node_plan_id IN ({fmt})
+            """, node_ids)
+            return {int(r["node_plan_id"]): int(r["actual_qty"] or 0) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_delivery_persons_by_projects(project_ids: list[int]) -> dict[int, str]:
+    """批量取项目交付负责人：{project_id: delivery_person}（跳过空负责人）。"""
+    if not project_ids:
+        return {}
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            fmt = ",".join(["%s"] * len(project_ids))
+            cur.execute(f"""
+                SELECT id, delivery_person FROM projects
+                WHERE id IN ({fmt})
+            """, project_ids)
+            return {
+                int(r["id"]): str(r["delivery_person"]).strip()
+                for r in cur.fetchall() if r["delivery_person"]
+            }
+    finally:
+        conn.close()
+
+
+def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: str) -> list[dict]:
+    """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT n.id, n.project_id, n.process_name, n.plan_date, n.plan_qty,
+                       p.project_name, p.machine_type, p.factory_name
+                FROM process_node_plans n
+                JOIN projects p ON p.id = n.project_id
+                WHERE p.delivery_person = %s
+                  AND n.plan_date >= %s AND n.plan_date < %s
+                ORDER BY p.id, n.process_order, n.plan_date
+            """, (person, month_start, month_end))
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 if __name__ == '__main__':
     init_database()
     print("Database initialization test passed.")

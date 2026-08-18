@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import projects, nodes, schedule_import, dashboard, dispatch_import, exceptions
+from .routers import projects, nodes, schedule_import, dashboard, dispatch_import, exceptions, ranking
 
 app = FastAPI(
     title="塔筒生产进度管控系统 API",
@@ -26,6 +26,7 @@ app.include_router(schedule_import.router)
 app.include_router(dashboard.router)
 app.include_router(dispatch_import.router)
 app.include_router(exceptions.router)
+app.include_router(ranking.router)
 
 
 @app.get("/api/health")

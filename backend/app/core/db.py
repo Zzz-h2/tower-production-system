@@ -50,6 +50,30 @@ def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
     return getattr(_fn, "__wrapped__", _fn)(project_ids)
 
 
+def get_attachment_plans_by_month(month_start: str, month_end: str) -> list[dict]:
+    """取某月内所有『附件安装』工序节点计划（出品排名统计源）。"""
+    from database import get_attachment_plans_by_month as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end)
+
+
+def get_actuals_by_node_ids(node_ids: list[int]) -> dict:
+    """批量取节点实际进度：{node_plan_id: actual_qty}（消除 N+1）。"""
+    from database import get_actuals_by_node_ids as _fn
+    return getattr(_fn, "__wrapped__", _fn)(node_ids)
+
+
+def get_delivery_persons_by_projects(project_ids: list[int]) -> dict[int, str]:
+    """批量取项目交付负责人：{project_id: delivery_person}。"""
+    from database import get_delivery_persons_by_projects as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_ids)
+
+
+def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: str) -> list[dict]:
+    """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。"""
+    from database import get_all_plans_by_month_and_person as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, person)
+
+
 def insert_node_plans(project_id: int, plans: list[dict]) -> int:
     """批量写入节点计划（先清空该项目旧计划再写入，与原版一致）。"""
     from database import insert_node_plans as _fn
