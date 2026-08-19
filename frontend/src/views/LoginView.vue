@@ -14,9 +14,8 @@
       </el-form>
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="login-err" />
       <div class="login-tip">
-        预设账号：<br />
-        管理员 admin / admin123（全功能）<br />
-        普通账号 user / user123（受限）
+        普通账号：user / user123<br />
+        管理员请联系：15353262798
       </div>
     </el-card>
   </div>
