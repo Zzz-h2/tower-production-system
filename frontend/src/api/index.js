@@ -1,9 +1,9 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
-// axios 实例：baseURL 走 Vite 代理（/api → FastAPI:8000）
+// 生产环境：直连 CloudRun 后端公网域名（CloudBase HTTP 网关转发会剥离 /api 前缀导致 404，故直连）
 const http = axios.create({
-  baseURL: '/api',
+  baseURL: 'https://tower-backend-299223-6-1470711810.sh.run.tcloudbase.com/api',
   timeout: 30000,
 })
 

@@ -11,10 +11,15 @@ app = FastAPI(
     description="前后端分离式单体后端（FastAPI + MySQL，业务逻辑与 Streamlit 版 1:1 一致）",
 )
 
-# CORS：允许前端 Vite 开发服务器（http://localhost:5173）
+# CORS：本地 Vite 开发服务器 + CloudBase 静态托管前端域名（直连后端，跨域由 CORS 兜底）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://tower-frontend-cloudbase-d2g5mgnii8ac68cb7.webapps.tcloudbase.com",
+        "https://tower-frontend-cloudbase-d2g5jgnii8ac68cb7.webapps.tcloudbase.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
