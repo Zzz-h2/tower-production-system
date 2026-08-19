@@ -138,7 +138,7 @@
 
     <!-- 导入弹窗（复用 ScheduleImport） -->
     <el-dialog v-model="importVisible" :title="`导入排产计划：${importTarget?.project_name || ''}`" width="560px" destroy-on-close>
-      <ScheduleImport v-if="importTarget" :pid="String(importTarget.id)" @imported="onImported" />
+      <ScheduleImport v-if="importTarget" :pid="String(importTarget.id)" :disabled="!auth.canEdit" @imported="onImported" />
     </el-dialog>
   </div>
 </template>

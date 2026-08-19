@@ -9,13 +9,15 @@
       drag
       :accept="'.xlsx,.xls'"
       :show-file-list="false"
-      :http-request="doUpload"
-      :disabled="uploading"
+      :http-request="!props.disabled ? doUpload : () => {}"
+      :disabled="props.disabled || uploading"
     >
-      <div class="upload-hint">
+      <div class="upload-hint" :class="{ 'is-disabled': props.disabled }">
         <div style="font-size:20px; margin-bottom:6px;">📂</div>
-        <div style="font-weight:600;">点击或拖拽 Excel 文件到此处</div>
-        <div style="font-size:12px; color:#64748b; margin-top:4px;">上传后立即解析入库，覆盖该项目原有节点计划</div>
+        <div style="font-weight:600;">
+          {{ props.disabled ? '仅管理员可导入排产计划' : '点击或拖拽 Excel 文件到此处' }}
+        </div>
+        <div v-if="!props.disabled" style="font-size:12px; color:#64748b; margin-top:4px;">上传后立即解析入库，覆盖该项目原有节点计划</div>
       </div>
     </el-upload>
   </div>
@@ -28,6 +30,7 @@ import { importSchedule } from '../api/node'
 
 const props = defineProps({
   pid: { type: String, required: true },
+  disabled: { type: Boolean, default: false },   // 外部控制是否禁用（普通账号仅管理员可导入）
 })
 const emit = defineEmits(['imported'])
 
@@ -54,4 +57,15 @@ async function doUpload({ file }) {
 <style scoped>
 .import-card { margin-bottom: 16px; }
 .upload-hint { padding: 18px 0; color: #1a365d; }
+.is-disabled {
+  color: #a0aec0 !important;
+  cursor: not-allowed;
+}
+:deep(.el-upload.is-disabled) {
+  cursor: not-allowed;
+}
+:deep(.el-upload.is-disabled .el-upload-dragger) {
+  border-color: #e2e8f0 !important;
+  background: #f7fafc !important;
+}
 </style>

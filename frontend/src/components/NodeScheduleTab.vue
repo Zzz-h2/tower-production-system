@@ -1,7 +1,7 @@
 <template>
   <div>
     <!-- 导入排产计划入口（对齐原版：节点计划 Tab 最上方） -->
-    <ScheduleImport :pid="pid" @imported="onImported" />
+    <ScheduleImport :pid="pid" :disabled="!auth.canEdit" @imported="onImported" />
 
     <!-- 顶部指标 KPI 卡 -->
     <div class="block-card" v-if="overview">
@@ -63,6 +63,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useProjectStore } from '../store/project'
+import { useAuthStore } from '../store/auth'
 import ScheduleImport from './ScheduleImport.vue'
 import NodeTimelineChart from './NodeTimelineChart.vue'
 import ProcessCardGrid from './ProcessCardGrid.vue'
@@ -70,6 +71,7 @@ import ProcessDetailDialog from './ProcessDetailDialog.vue'
 
 const props = defineProps({ pid: { type: String, required: true } })
 const store = useProjectStore()
+const auth = useAuthStore()   // 普通账号禁用导入排产（仅管理员可导入）
 const overview = computed(() => store.overview)
 
 // 是否有节点计划数据
