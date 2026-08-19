@@ -11,7 +11,7 @@
         <div style="font-size:20px; margin-bottom:6px;">📂</div>
         <div style="font-weight:600;">点击或拖拽调度令 Excel 文件到此处</div>
         <div style="font-size:12px; color:#64748b; margin-top:4px;">
-          将自动建项目、初始化 12 道工序并计算风险（必填：项目名称/钢塔厂家/本月计划/交付负责人）
+          （必填：项目名称/钢塔厂家/本月计划/交付负责人）
         </div>
       </div>
     </el-upload>
