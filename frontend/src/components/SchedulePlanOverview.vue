@@ -88,7 +88,7 @@
         </el-table-column>
         <el-table-column label="操作" width="210" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" type="primary" plain @click="openImport(row)">导入</el-button>
+            <el-button size="small" type="primary" plain :disabled="!auth.canEdit" @click="openImport(row)">导入</el-button>
             <el-button size="small" @click="goDetail(row)">查看</el-button>
             <el-button size="small" type="warning" plain disabled title="预警功能即将上线">预警</el-button>
           </template>
@@ -127,7 +127,7 @@
         </el-table-column>
         <el-table-column label="操作" width="230" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" type="primary" plain @click="openImport(row)">重新导入</el-button>
+            <el-button size="small" type="primary" plain :disabled="!auth.canEdit" @click="openImport(row)">重新导入</el-button>
             <el-button size="small" @click="goDetail(row)">查看</el-button>
             <el-button size="small" type="warning" plain disabled title="预警功能即将上线">预警</el-button>
           </template>
@@ -150,10 +150,12 @@ import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { fetchProjects } from '../api/node'
 import { useProjectStore } from '../store/project'
+import { useAuthStore } from '../store/auth'
 import ScheduleImport from './ScheduleImport.vue'
 
 const router = useRouter()
 const store = useProjectStore()
+const auth = useAuthStore()   // 普通账号仅可查看排产总览，导入/重新导入禁用
 
 const allItems = ref([])
 const filters = ref({ keyword: '', person: '', uploadStatus: 'all' })

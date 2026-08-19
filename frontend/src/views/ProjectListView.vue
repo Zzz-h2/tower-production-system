@@ -56,7 +56,7 @@
         <span class="block-title">导入月度调度令</span>
         <span class="block-subtitle">通过 Excel 批量创建项目（必填：项目名称/钢塔厂家/本月计划/交付负责人）</span>
       </div>
-      <DispatchImport @imported="onDispatchImported" />
+      <DispatchImport :disabled="!auth.canEdit" @imported="onDispatchImported" />
     </div>
 
     <!-- ④ 搜索/筛选栏卡片 -->
@@ -105,6 +105,7 @@
           class="add-btn"
           type="primary"
           :icon="Plus"
+          :disabled="!auth.canEdit"
           @click="addVisible = true"
         >手动添加项目</el-button>
       </div>
@@ -143,8 +144,8 @@
           <template #default="{ row }">
             <div class="op-btns">
               <el-button size="small" type="primary" @click="goDetail(row)">详细</el-button>
-              <el-button size="small" type="warning" plain @click="onEdit(row)">编辑</el-button>
-              <el-button size="small" type="danger" plain @click="onDelete(row)">删除</el-button>
+              <el-button size="small" type="warning" plain :disabled="!auth.canEdit" @click="onEdit(row)">编辑</el-button>
+              <el-button size="small" type="danger" plain :disabled="!auth.canEdit" @click="onDelete(row)">删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -187,6 +188,7 @@ import { useRouter } from 'vue-router'
 import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useProjectStore } from '../store/project'
+import { useAuthStore } from '../store/auth'
 import { deleteProject as deleteProjectApi } from '../api/node'
 import DispatchImport from '../components/DispatchImport.vue'
 import AddProjectDialog from '../components/AddProjectDialog.vue'
@@ -196,6 +198,7 @@ import ProductionRankingOverview from '../components/ProductionRankingOverview.v
 
 const store = useProjectStore()
 const router = useRouter()
+const auth = useAuthStore()   // 按钮级权限：管理员可编辑，普通账号只读
 
 // 左侧一级视图切换：production 生产进度总览 / schedule 排产计划总览
 const activeView = ref('production')

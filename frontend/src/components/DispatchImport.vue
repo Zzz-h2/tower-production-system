@@ -5,7 +5,7 @@
       :accept="'.xlsx,.xls'"
       :show-file-list="false"
       :http-request="doUpload"
-      :disabled="uploading"
+      :disabled="uploading || disabled"
     >
       <div class="upload-hint">
         <div style="font-size:20px; margin-bottom:6px;">📂</div>
@@ -39,6 +39,10 @@ import { ElMessage } from 'element-plus'
 import { importDispatch } from '../api/node'
 
 const emit = defineEmits(['imported'])
+
+defineProps({
+  disabled: { type: Boolean, default: false },  // 普通账号禁用导入（按钮级权限）
+})
 
 const uploading = ref(false)
 const result = ref(null)
