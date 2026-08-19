@@ -1,0 +1,10 @@
+# 不进镜像的内容
+backend/.venv
+backend/__pycache__
+**/__pycache__
+*.pyc
+.git
+.gitignore
+frontend
+dist
+*.md
