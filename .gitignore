@@ -35,6 +35,8 @@ tmp/
 .env
 .env.*
 !.env.example
+# 生产 API 地址仅含 VITE_ 前缀变量、无密钥，入库以便构建产物直连后端
+!.env.production
 *.pem
 *.key
 secrets.json
