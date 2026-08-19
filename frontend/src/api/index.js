@@ -1,9 +1,10 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
-// 生产环境：直连 CloudRun 后端公网域名（CloudBase HTTP 网关转发会剥离 /api 前缀导致 404，故直连）
+// 生产 build 由 .env.production 的 VITE_API_BASE 注入后端公网地址（直连绕过网关 /api 剥离问题）；
+// 本地 npm run dev 未设该变量时回退 '/api'，由 Vite 代理转发到 localhost:8000
 const http = axios.create({
-  baseURL: 'https://tower-backend-299223-6-1470711810.sh.run.tcloudbase.com/api',
+  baseURL: import.meta.env.VITE_API_BASE || '/api',
   timeout: 30000,
 })
 
