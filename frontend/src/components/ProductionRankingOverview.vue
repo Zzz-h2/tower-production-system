@@ -87,26 +87,40 @@
     <el-dialog
       v-model="detailVisible"
       :title="`${detailPerson} · 逾期/提前项目清单（${store.filters.month}）`"
-      width="720px"
+      width="88vw"
+      :style="{ maxWidth: '1280px' }"
     >
-      <el-table :data="detailRows" border stripe style="width: 100%" :row-style="{ height: '48px' }">
-        <el-table-column label="项目名称" prop="project_name" min-width="200" show-overflow-tooltip />
-        <el-table-column label="机号" prop="machine_no" width="80">
+      <el-table
+        :data="detailRows"
+        border
+        stripe
+        style="width: 100%"
+        :row-style="{ height: '52px' }"
+        :max-height="'60vh'"
+        :header-cell-style="{ whiteSpace: 'nowrap', background: '#f7fafc', color: '#1a365d' }"
+        :cell-style="{ whiteSpace: 'nowrap' }"
+      >
+        <el-table-column label="项目名称" prop="project_name" min-width="260" show-overflow-tooltip />
+        <el-table-column label="机号" prop="machine_no" width="110">
           <template #default="{ row }">{{ row.machine_no || '-' }}</template>
         </el-table-column>
-        <el-table-column label="异常类型" width="90" align="center">
+        <el-table-column label="异常类型" width="100" align="center">
           <template #default="{ row }">
             <el-tag :type="row.exception_type === '逾期' ? 'danger' : 'primary'" size="small">
               {{ row.exception_type }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="工序" prop="process_name" min-width="110" />
-        <el-table-column label="计划日期" prop="plan_date" width="110" />
-        <el-table-column label="计划/实际" min-width="100">
-          <template #default="{ row }">{{ row.plan_qty }} / {{ row.actual_qty }}</template>
+        <el-table-column label="工序" prop="process_name" min-width="120" />
+        <el-table-column label="计划日期" prop="plan_date" width="130" />
+        <el-table-column label="计划/实际" min-width="150">
+          <template #default="{ row }">
+            <span style="white-space: nowrap; font-variant-numeric: tabular-nums;">
+              {{ row.plan_qty }} / {{ row.actual_qty }}
+            </span>
+          </template>
         </el-table-column>
-        <el-table-column label="偏差天数" prop="deviation_days" width="90" align="center" />
+        <el-table-column label="偏差天数" prop="deviation_days" width="100" align="center" />
       </el-table>
       <el-empty v-if="!detailRows.length" description="该负责人当月无逾期或提前项目" />
     </el-dialog>
@@ -182,4 +196,9 @@ onMounted(load)
 .block-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px 20px; }
 .block-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .block-title { font-size: 15px; font-weight: 600; color: #1a365d; }
+/* 详情弹窗表格：表头与单元格强制单行，避免短文本被竖排 */
+.detail-dialog-table th.el-table__cell,
+.detail-dialog-table td.el-table__cell {
+  white-space: nowrap;
+}
 </style>
