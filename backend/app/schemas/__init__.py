@@ -19,6 +19,7 @@ class SaveNodeProgressRequest(BaseModel):
     """
     group: str
     values: list[NodeValue]
+    report_date: Optional[str] = None  # 新增：填报日期 YYYY-MM-DD；为空则用服务端当天
 
 
 # ---------- Excel 导入 ----------

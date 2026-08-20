@@ -43,6 +43,21 @@
 
       <!-- 填报模式（四分组手风琴） -->
       <template v-if="innerMode === 'input'">
+        <!-- 填报日期：管理员可改（补录/校正），普通账号锁定今天 -->
+        <div class="report-date-row">
+          <span class="report-date-label">📅 填报日期</span>
+          <el-date-picker
+            v-model="reportDate"
+            type="date"
+            value-format="YYYY-MM-DD"
+            :disabled="!auth.isAdmin"
+            :placeholder="auth.isAdmin ? '可选择历史日期补录' : fmtToday()"
+            style="width: 180px;"
+          />
+          <span class="report-date-hint" style="color:#718096;">
+            {{ auth.isAdmin ? '管理员可补录历史日期' : '普通账号仅可填报今日，日期已锁定' }}
+          </span>
+        </div>
         <el-segmented v-model="activeGroup" :options="groupOptions" block style="margin-bottom:14px;" />
         <div v-if="groupNodes.length === 0" class="empty-hint">当前分组「{{ groupLabel }}」没有可保存的节点。</div>
         <template v-else>
@@ -73,6 +88,7 @@ import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchProcessNodes, saveNodeProgress } from '../api/node'
 import { useProjectStore } from '../store/project'
+import { useAuthStore } from '../store/auth'
 import ExceptionReportTab from './ExceptionReportTab.vue'
 
 const props = defineProps({
@@ -83,6 +99,15 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue', 'saved'])
 const store = useProjectStore()
+const auth = useAuthStore() // isAdmin 决定日期选择器是否可编辑
+
+// 填报日期：默认今天，格式 YYYY-MM-DD
+function fmtToday() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+const reportDate = ref(fmtToday())
 
 const detail = ref(null)
 const innerMode = ref('detail')
@@ -147,6 +172,7 @@ async function save() {
     const res = await saveNodeProgress(props.pid, props.processName, {
       group: activeGroup.value,
       values,
+      report_date: reportDate.value, // 始终带上；普通用户锁定为今天
     })
     ElMessage.success(res.message)
     emit('saved')          // 父组件关闭弹窗 + 刷新
@@ -162,6 +188,7 @@ watch(
       innerMode.value = props.mode || 'detail'
       activeGroup.value = 'today'
       selectedNodeId.value = null
+      reportDate.value = fmtToday() // 新增：打开弹窗重置为今天
       load()
     }
   },
@@ -172,4 +199,15 @@ watch(
 .empty-hint { color: #64748b; font-size: 13px; padding: 12px 0; }
 .exc-node-select { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
 .exc-node-label { font-size: 13px; color: #1a365d; font-weight: 600; white-space: nowrap; }
+.report-date-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #f7fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.report-date-label { font-size: 14px; font-weight: 600; color: #1a365d; white-space: nowrap; }
 </style>

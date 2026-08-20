@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """节点实际进度保存 API：按分组独立保存（互不覆盖）。"""
 from fastapi import APIRouter, HTTPException
-from datetime import date
+from datetime import date, datetime
 
 from ..core import db
 from ..schemas import SaveNodeProgressRequest
@@ -50,8 +50,15 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
         if err:
             raise HTTPException(status_code=422, detail=err)
 
+    # 填报日期：前端传入则使用，否则回退当天；校验格式
+    report_date = req.report_date or today.strftime("%Y-%m-%d")
+    if req.report_date:
+        try:
+            datetime.strptime(req.report_date, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="report_date 格式必须为 YYYY-MM-DD")
+
     # 写入（只写当前分组）
-    report_date = today.strftime("%Y-%m-%d")
     saved = 0
     for p in groups[req.group]:
         qty = int(input_values.get(p["id"], actuals.get(p["id"], {}).get("actual_qty", 0)))
