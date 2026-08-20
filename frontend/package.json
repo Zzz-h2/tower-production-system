@@ -12,9 +12,11 @@
     "axios": "^1.7.2",
     "echarts": "^5.5.0",
     "element-plus": "^2.7.5",
+    "file-saver": "^2.0.5",
     "pinia": "^2.1.7",
     "vue": "^3.4.29",
-    "vue-router": "^4.3.3"
+    "vue-router": "^4.3.3",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.5",

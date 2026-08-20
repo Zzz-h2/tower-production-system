@@ -32,6 +32,7 @@ export const useProjectStore = defineStore('project', {
       keyword: '',
       person: '',
       status: 'all',
+      month: '',          // 全局共享调度令月份（YYYY-MM），三页联动；ensureMonth 补当前月
     },
 
     // 分页
@@ -43,6 +44,17 @@ export const useProjectStore = defineStore('project', {
   }),
   actions: {
     /**
+     * 确保共享月份非空：默认当前自然月（YYYY-MM）。
+     */
+    ensureMonth() {
+      if (!this.filters.month) {
+        const d = new Date()
+        this.filters.month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+      }
+      return this.filters.month
+    },
+
+    /**
      * 加载项目列表（总览页）。
      * 合并外部传入的筛选/分页条件到 state，再请求后端（服务端分页）。
      */
@@ -50,6 +62,7 @@ export const useProjectStore = defineStore('project', {
       if (filters.keyword !== undefined) this.filters.keyword = filters.keyword
       if (filters.person !== undefined) this.filters.person = filters.person
       if (filters.status !== undefined) this.filters.status = filters.status
+      if (filters.month !== undefined) this.filters.month = filters.month
       if (filters.page !== undefined) this.pagination.page = filters.page
       if (filters.page_size !== undefined) this.pagination.page_size = filters.page_size
 
@@ -59,6 +72,7 @@ export const useProjectStore = defineStore('project', {
           keyword: this.filters.keyword || undefined,
           person: this.filters.person || undefined,
           status: this.filters.status || 'all',
+          month: this.filters.month || undefined,
           page: this.pagination.page,
           page_size: this.pagination.page_size,
         })
@@ -69,10 +83,10 @@ export const useProjectStore = defineStore('project', {
       }
     },
 
-    /** 加载看板指标。 */
+    /** 加载看板指标（随共享月份联动）。 */
     async loadDashboard() {
       try {
-        this.dashboard = await fetchDashboardStats()
+        this.dashboard = await fetchDashboardStats(this.filters.month || undefined)
       } catch (e) {
         // 错误已由 axios 拦截器统一提示
       }

@@ -25,20 +25,21 @@ def _month_range(month: str) -> tuple[str, str]:
 
 
 def get_production_ranking(month: str) -> list[dict]:
-    """返回按完成率降序的负责人排名列表。month 形如 '2026-08'。"""
+    """返回按完成率降序的负责人排名列表。month 形如 '2026-08'。
+
+    口径（三页联动一致）：项目集合按 projects.created_at 年月（调度令月份）筛选，
+    累计计划/完成按该月内『附件安装』节点汇总；负责人由 SQL JOIN 直接带回。
+    """
     ns, ne = _month_range(month)
 
-    plans = db.get_attachment_plans_by_month(ns, ne)          # 1 次查询
+    plans = db.get_attachment_plans_by_month(ns, ne, month)   # 1 次查询（含 delivery_person）
     node_ids = [p["id"] for p in plans]
     actuals = db.get_actuals_by_node_ids(node_ids)            # 1 次查询
-
-    proj_ids = {int(p["project_id"]) for p in plans}
-    person_map = db.get_delivery_persons_by_projects(list(proj_ids))  # 1 次查询
 
     # 按负责人聚合（内存，杜绝 N+1）
     agg: dict[str, dict] = {}
     for p in plans:
-        person = person_map.get(int(p["project_id"]))
+        person = str(p.get("delivery_person") or "").strip()
         if not person:
             continue
         a = agg.setdefault(person, {"plan": 0, "actual": 0, "projects": set()})

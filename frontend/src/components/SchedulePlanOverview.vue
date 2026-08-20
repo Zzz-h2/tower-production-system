@@ -54,6 +54,14 @@
           <el-option label="已上传" value="uploaded" />
           <el-option label="未上传" value="not_uploaded" />
         </el-select>
+        <el-date-picker
+          v-model="store.filters.month"
+          type="month"
+          value-format="YYYY-MM"
+          placeholder="选择调度令月份"
+          style="width: 160px"
+          @change="load"
+        />
         <el-button type="primary" :icon="Refresh" @click="load">刷新</el-button>
       </div>
     </div>
@@ -211,7 +219,12 @@ function goDetail(row) {
 }
 
 async function load() {
-  const res = await fetchProjects({ page: 1, page_size: 1000 })
+  store.ensureMonth()   // 共享月份非空（默认当前自然月）
+  const res = await fetchProjects({
+    page: 1,
+    page_size: 1000,
+    month: store.filters.month || undefined,
+  })
   allItems.value = res.items || []
 }
 

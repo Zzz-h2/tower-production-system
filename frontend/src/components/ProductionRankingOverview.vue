@@ -4,11 +4,11 @@
     <div class="block-card">
       <div class="toolbar">
         <el-date-picker
-          v-model="month"
+          v-model="store.filters.month"
           type="month"
           value-format="YYYY-MM"
-          placeholder="选择月份"
-          style="width: 150px"
+          placeholder="选择调度令月份"
+          style="width: 160px"
           @change="load"
         />
         <el-button type="primary" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
@@ -86,7 +86,7 @@
     <!-- ④ 详情弹窗 -->
     <el-dialog
       v-model="detailVisible"
-      :title="`${detailPerson} · 逾期/提前项目清单（${month}）`"
+      :title="`${detailPerson} · 逾期/提前项目清单（${store.filters.month}）`"
       width="720px"
     >
       <el-table :data="detailRows" border stripe style="width: 100%" :row-style="{ height: '48px' }">
@@ -117,10 +117,10 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
+import { useProjectStore } from '../store/project'
 import { fetchProductionRanking, fetchProductionRankingDetail } from '../api/ranking'
 
-const now = new Date()
-const month = ref(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`)
+const store = useProjectStore()   // 共享调度令月份（三页联动）
 const loading = ref(false)
 const rows = ref([])
 
@@ -144,7 +144,7 @@ const detailRows = ref([])
 async function openDetail(row) {
   detailPerson.value = row.delivery_person
   try {
-    const res = await fetchProductionRankingDetail(month.value, row.delivery_person)
+    const res = await fetchProductionRankingDetail(store.filters.month, row.delivery_person)
     detailRows.value = res || []
   } catch (e) {
     ElMessage.error('加载明细失败')
@@ -155,8 +155,9 @@ async function openDetail(row) {
 
 async function load() {
   loading.value = true
+  store.ensureMonth()   // 共享月份非空（默认当前自然月）
   try {
-    const res = await fetchProductionRanking(month.value)
+    const res = await fetchProductionRanking(store.filters.month)
     rows.value = res || []
   } catch (e) {
     ElMessage.error('加载排名数据失败')

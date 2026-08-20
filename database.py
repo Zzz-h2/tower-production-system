@@ -488,17 +488,33 @@ def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
         conn.close()
 
 
-def get_attachment_plans_by_month(month_start: str, month_end: str) -> list[dict]:
-    """取某月内所有『附件安装』工序节点计划（出品排名统计源）。"""
+def get_attachment_plans_by_month(month_start: str, month_end: str, month: str | None = None) -> list[dict]:
+    """取某月内所有『附件安装』工序节点计划（出品排名统计源）。
+
+    month 传入时约束项目 created_at 月份（调度令月份口径，三页联动一致），并带回 delivery_person。
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT id, project_id, process_name, plan_date, plan_qty
-                FROM process_node_plans
-                WHERE process_name = '附件安装'
-                  AND plan_date >= %s AND plan_date < %s
-            """, (month_start, month_end))
+            if month:
+                cur.execute("""
+                    SELECT pnp.id, pnp.project_id, pnp.process_name, pnp.plan_date, pnp.plan_qty,
+                           p.delivery_person
+                    FROM process_node_plans pnp
+                    JOIN projects p ON pnp.project_id = p.id
+                    WHERE pnp.process_name = '附件安装'
+                      AND DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
+                      AND pnp.plan_date >= %s AND pnp.plan_date < %s
+                """, (month, month_start, month_end))
+            else:
+                cur.execute("""
+                    SELECT pnp.id, pnp.project_id, pnp.process_name, pnp.plan_date, pnp.plan_qty,
+                           p.delivery_person
+                    FROM process_node_plans pnp
+                    JOIN projects p ON pnp.project_id = p.id
+                    WHERE pnp.process_name = '附件安装'
+                      AND pnp.plan_date >= %s AND pnp.plan_date < %s
+                """, (month_start, month_end))
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()

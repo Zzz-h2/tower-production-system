@@ -50,10 +50,10 @@ def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
     return getattr(_fn, "__wrapped__", _fn)(project_ids)
 
 
-def get_attachment_plans_by_month(month_start: str, month_end: str) -> list[dict]:
-    """取某月内所有『附件安装』工序节点计划（出品排名统计源）。"""
+def get_attachment_plans_by_month(month_start: str, month_end: str, month: str | None = None) -> list[dict]:
+    """取某月内所有『附件安装』工序节点计划（出品排名统计源；month 约束项目 created_at 月份）。"""
     from database import get_attachment_plans_by_month as _fn
-    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end)
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, month)
 
 
 def get_actuals_by_node_ids(node_ids: list[int]) -> dict:
@@ -112,13 +112,16 @@ def get_all_persons() -> list[str]:
         conn.close()
 
 
-def get_dashboard_stats() -> dict:
+def get_dashboard_stats(month: str | None = None) -> dict:
     """首页总览统计：与项目列表风险口径完全一致（复用 get_projects_filtered 实时计算）。
 
     不再基于 processes 表旧 risk_level 统计——直接复用项目列表的
     node_plans + node_actuals 实时风险判定结果，保证两者 100% 一致。
+    month: 调度令月份（created_at 年月），透传给列表过滤。
     """
-    items, _ = get_projects_filtered(keyword="", person="", status="", skip=0, limit=100000)
+    items, _ = get_projects_filtered(
+        keyword="", person="", status="", skip=0, limit=100000, month=month
+    )
     return {
         "total_projects": len(items),
         "warning_projects": sum(1 for p in items if p.get("risk_level") == "warning"),
@@ -149,7 +152,8 @@ def insert_import_log(file_name: str, total: int, success: int, error: int, erro
 # ---------- 项目列表：搜索/筛选 + 服务端分页 ----------
 
 def get_projects_filtered(keyword: str | None = None, person: str | None = None,
-                          status: str | None = None, skip: int = 0, limit: int = 10):
+                          status: str | None = None, skip: int = 0, limit: int = 10,
+                          month: str | None = None):
     """项目搜索/筛选 + 服务端分页。
 
     status 语义为「风险等级」（normal/warning/delayed），由 node_plans + node_actuals
@@ -157,9 +161,14 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     （生命周期字段 in_progress/completed）。
     实现：取全量项目 → keyword/person 内存过滤 → 计算 risk_level/progress_pct →
     风险等级内存过滤 → 切片分页。
+    month: 调度令月份（projects.created_at 年月，如 '2026-08'），三页联动共享口径。
     """
     # status 不再作为生命周期条件下推，统一取全量项目
     rows = get_all_projects(None)
+
+    # ★ 按调度令月份（created_at 年月）过滤
+    if month:
+        rows = [p for p in rows if str(p.get("created_at", ""))[:7] == month]
 
     # keyword：项目名称 或 机型 模糊包含（忽略大小写）
     if keyword:

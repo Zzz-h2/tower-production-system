@@ -10,8 +10,13 @@ export const fetchAllPersons = () =>
 
 export const fetchProject = (pid) => http.get(`/projects/${pid}`)
 
-// 看板指标（项目总览页 KPI 卡）
-export const fetchDashboardStats = () => http.get('/dashboard/stats')
+// 看板指标（项目总览页 KPI 卡，支持调度令月份 month）
+export const fetchDashboardStats = (month) =>
+  http.get('/dashboard/stats', { params: { month } })
+
+// 导出指定调度令月份计划完成情况（全量，前端本地生成 xlsx）
+export const fetchExportProjects = (month) =>
+  http.get('/projects/export', { params: { month } })
 
 // 手动添加项目
 export const addProject = (payload) => http.post('/projects', payload)

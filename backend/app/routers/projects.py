@@ -33,17 +33,39 @@ def list_projects(
     status: Optional[str] = None,
     page: int = 1,
     page_size: int = 10,
+    month: Optional[str] = None,
 ):
-    """项目列表（总览页）：支持模糊搜索、负责人/状态筛选、服务端分页。"""
+    """项目列表（总览页）：支持模糊搜索、负责人/状态筛选、调度令月份过滤、服务端分页。"""
     page = max(1, int(page))
     page_size = max(1, int(page_size))
     skip = (page - 1) * page_size
-    items, total = db.get_projects_filtered(keyword, person, status, skip, page_size)
+    items, total = db.get_projects_filtered(keyword, person, status, skip, page_size, month)
     # 兜底字段，保证前端渲染不报错
     for p in items:
         p.setdefault("progress_pct", 0)
         p.setdefault("risk_level", "normal")
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/export")
+def export_projects(month: Optional[str] = None):
+    """导出指定调度令月份计划完成情况（全量，不分页）。
+
+    口径与列表/KPI 完全一致：按 projects.created_at 年月过滤，进度为附件安装实时完成率。
+    """
+    items, total = db.get_projects_filtered(None, None, None, 0, 100000, month)
+    result = []
+    for p in items:
+        result.append({
+            "project_name": p.get("project_name", ""),
+            "machine_type": p.get("machine_type", ""),
+            "factory_name": p.get("factory_name", ""),
+            "last_month_output": int(p.get("last_month_output", 0) or 0),
+            "monthly_plan": int(p.get("monthly_plan", 0) or 0),
+            "progress_pct": float(p.get("progress_pct", 0.0) or 0.0),
+            "delivery_person": p.get("delivery_person", ""),
+        })
+    return {"month": month, "total": total, "items": result}
 
 
 @router.post("")

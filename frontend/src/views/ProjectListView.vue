@@ -91,6 +91,15 @@
         >
           <el-option v-for="s in statusOptions" :key="s.value" :label="s.label" :value="s.value" />
         </el-select>
+        <el-date-picker
+          v-model="store.filters.month"
+          type="month"
+          value-format="YYYY-MM"
+          placeholder="选择调度令月份"
+          style="width: 160px"
+          @change="onMonthChange"
+        />
+        <el-button :icon="Download" :loading="exporting" @click="onExport">导出</el-button>
         <el-button type="primary" :icon="Refresh" @click="onRefresh">刷新</el-button>
       </div>
     </div>
@@ -185,11 +194,13 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy } from '@element-plus/icons-vue'
+import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy, Download } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import * as XLSX from 'xlsx'
+import { saveAs } from 'file-saver'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
-import { deleteProject as deleteProjectApi } from '../api/node'
+import { deleteProject as deleteProjectApi, fetchExportProjects } from '../api/node'
 import DispatchImport from '../components/DispatchImport.vue'
 import AddProjectDialog from '../components/AddProjectDialog.vue'
 import EditProjectDialog from '../components/EditProjectDialog.vue'
@@ -199,6 +210,7 @@ import ProductionRankingOverview from '../components/ProductionRankingOverview.v
 const store = useProjectStore()
 const router = useRouter()
 const auth = useAuthStore()   // 按钮级权限：管理员可编辑，普通账号只读
+const exporting = ref(false)  // 导出中状态
 
 // 左侧一级视图切换：production 生产进度总览 / schedule 排产计划总览
 const activeView = ref('production')
@@ -274,13 +286,50 @@ function onFilterClear(field) {
   onFilterChange()
 }
 
-// 刷新 = 重置全部筛选条件 + 回到第 1 页 + 加载全量
+// 刷新 = 重置全部筛选条件 + 回到第 1 页 + 加载全量（保留共享月份）
 function onRefresh() {
   filterForm.keyword = ''
   filterForm.person = ''
   filterForm.status = 'all'
   store.pagination.page = 1
   store.loadProjects({ keyword: '', person: '', status: 'all', page: 1 })
+  store.loadDashboard()
+}
+
+// 月份切换：三页联动（共享 store.filters.month）→ 列表 + KPI 同步刷新
+function onMonthChange() {
+  store.pagination.page = 1
+  store.loadProjects({ page: 1 })
+  store.loadDashboard()
+}
+
+// 导出当前共享月份的计划完成情况（前端本地生成 xlsx）
+async function onExport() {
+  exporting.value = true
+  try {
+    const res = await fetchExportProjects(store.filters.month)
+    const rows = (res.items || res.data?.items || [])
+    const header = [['项目名称', '机型', '钢塔厂家', '截至上月进度', '本月计划', '整体进度(%)', '交付负责人']]
+    const body = rows.map(r => [
+      r.project_name, r.machine_type, r.factory_name,
+      r.last_month_output, r.monthly_plan,
+      (Number(r.progress_pct) || 0).toFixed(1), r.delivery_person,
+    ])
+    const ws = XLSX.utils.aoa_to_sheet([...header, ...body])
+    ws['!cols'] = [
+      { wch: 26 }, { wch: 14 }, { wch: 18 },
+      { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 },
+    ]
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, '生产进度总览')
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+    saveAs(new Blob([buf], { type: 'application/octet-stream' }), `生产进度总览_${store.filters.month}.xlsx`)
+    ElMessage.success('导出成功')
+  } catch (e) {
+    ElMessage.error('导出失败，请重试')
+  } finally {
+    exporting.value = false
+  }
 }
 
 function onPrev() {
@@ -345,7 +394,8 @@ function onAdded() {
 }
 
 onMounted(() => {
-  store.loadAllPersons()          // 加载全量交付负责人（下拉框数据源）
+  store.ensureMonth()            // 默认共享月份 = 当前自然月
+  store.loadAllPersons()         // 加载全量交付负责人（下拉框数据源）
   store.loadDashboard()
   store.loadProjects({ page: 1 })
 })
