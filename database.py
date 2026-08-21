@@ -299,10 +299,14 @@ def update_project(project_id: int, data: dict) -> None:
 
 
 def delete_project(project_id: int) -> None:
-    """删除项目（级联删除工序、异常、里程碑）"""
+    """删除项目（应用层级联：工序计划/实际进度/异常先删，再删项目主表；里程碑由外键 cascade 自动清理）"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
+            # 先清三张无外键的子表，避免孤儿行（顺序：子→父）
+            cursor.execute("DELETE FROM node_actual_progress WHERE project_id = %s", (project_id,))
+            cursor.execute("DELETE FROM node_exceptions WHERE project_id = %s", (project_id,))
+            cursor.execute("DELETE FROM process_node_plans WHERE project_id = %s", (project_id,))
             cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
             conn.commit()
     finally:
