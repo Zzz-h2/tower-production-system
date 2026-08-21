@@ -1,11 +1,12 @@
 <template>
   <el-row :gutter="16" v-if="processes.length">
     <el-col :span="8" v-for="p in processes" :key="p.process_name" style="margin-bottom: 16px;">
-      <div class="process-card-box">
+      <div class="process-card-box" style="height: 100%;">
         <div class="pc-header">
           <span class="pc-dot" :style="{ color: colorOf(p.status) }">{{ emojiOf(p.status) }}</span>
           <span class="pc-title">{{ p.process_name }}</span>
-          <span class="pc-pill" :style="pillStyle(p.status)">{{ p.label }}</span>
+          <span class="pc-pill pc-tag" :style="pillStyle(p.status)">{{ p.label }}</span>
+          <span v-if="p.has_today_plan" class="pc-tag pc-tag-today">📌 今日有计划</span>
           <span v-for="t in (p.tags || [])" :key="t" class="pc-tag" :style="tagStyle(t)">{{ t }}</span>
         </div>
         <div class="pc-count">{{ p.total_actual }}/{{ p.total_plan }} 套</div>
@@ -59,16 +60,38 @@ const tagStyle = (t) => {
 </script>
 
 <style scoped>
-/* 附加标签：浅底小字圆角，紧跟主状态胶囊 */
+.pc-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  min-height: 28px;
+}
+.pc-title { font-weight: 600; color: #1a365d; font-size: 15px; }
+/* 统一所有标签尺寸：已完成 / 已逾期 / 进行中 / 今日有计划 / 已提前 等都走这一份 */
 .pc-tag {
   font-size: 11px;
   padding: 1px 7px;
   border-radius: 10px;
-  margin-left: 4px;
   line-height: 18px;
   white-space: nowrap;
   flex-shrink: 0;
+  border: none;
 }
+/* 今日有计划：与"已完成"等同类胶囊，蓝色系 */
+.pc-tag-today {
+  background: #ebf8ff;
+  color: #1a365d;
+  border: 1px solid #bee3f8;
+}
+/* 兜底：旧 banner 残留直接隐藏 */
+.pc-tag-today-banner { display: none; }
+/* 卡片等高：flex 列布局，按钮贴底 */
+.process-card-box {
+  display: flex;
+  flex-direction: column;
+}
+.pc-footer { margin-top: auto; }
 /* 无工序节点明细数据空状态 */
 .pc-empty {
   text-align: center;
