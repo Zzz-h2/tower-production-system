@@ -50,19 +50,15 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
         if err:
             raise HTTPException(status_code=422, detail=err)
 
-    # 填报日期：前端传入则使用，否则回退当天；校验格式
-    report_date = req.report_date or today.strftime("%Y-%m-%d")
-    if req.report_date:
+    # 写入（只写当前分组，每行独立填报日期）
+    saved = 0
+    for v in req.values:
+        rd = v.report_date or req.report_date or today.strftime("%Y-%m-%d")
         try:
-            datetime.strptime(req.report_date, "%Y-%m-%d")
+            datetime.strptime(rd, "%Y-%m-%d")
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="report_date 格式必须为 YYYY-MM-DD")
-
-    # 写入（只写当前分组）
-    saved = 0
-    for p in groups[req.group]:
-        qty = int(input_values.get(p["id"], actuals.get(p["id"], {}).get("actual_qty", 0)))
-        db.upsert_node_actual(pid, p["id"], process_name, qty, report_date)
+        db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd)
         saved += 1
 
     return {

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 class NodeValue(BaseModel):
     node_id: int
     qty: int = Field(ge=0)
+    report_date: Optional[str] = None  # 新增：该行填报日期 YYYY-MM-DD；为空则回退顶层或服务端当天
 
 
 class SaveNodeProgressRequest(BaseModel):
