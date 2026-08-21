@@ -65,12 +65,19 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
             r["plan_qty"] for r in grp
             if str(r["plan_date"])[:10] == str(today)[:10]
         )
+        # 今日有计划：存在 plan_date 为今天的节点 且 实际 < 计划（今天仍有未完成节点）
+        has_today_plan = any(
+            str(r["plan_date"])[:10] == str(today)[:10]
+            and actuals.get(r["id"], {}).get("actual_qty", 0) < r["plan_qty"]
+            for r in grp
+        )
         progress = (total_actual / total_plan * 100) if total_plan else 0
         processes.append({
             "process_name": pn,
             "status": proc_status["status"],
             "label": proc_status["label"],
             "tags": proc_status.get("tags", []),
+            "has_today_plan": has_today_plan,
             "total_plan": total_plan,
             "total_plan_qty": total_plan,      # 总计划套数（前端进度条分母）
             "total_actual": total_actual,
