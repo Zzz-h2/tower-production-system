@@ -144,6 +144,7 @@ def upsert_project(data: dict) -> tuple[int, bool]:
                         last_month_output = %s, monthly_plan = %s,
                         monthly_total_plan = %s,
                         plan_start_date = %s, plan_end_date = %s,
+                        big_area_person = %s,
                         updated_at = %s
                     WHERE id = %s
                 """, (
@@ -152,6 +153,7 @@ def upsert_project(data: dict) -> tuple[int, bool]:
                     data.get('monthly_total_plan', data['monthly_plan']),
                     data.get('plan_start_date'),
                     data.get('plan_end_date'),
+                    data.get('big_area_person', '') or '',
                     now,
                     existing['id']
                 ))
@@ -163,14 +165,15 @@ def upsert_project(data: dict) -> tuple[int, bool]:
                     INSERT INTO projects 
                         (project_name, factory_name, last_month_output, monthly_plan,
                          monthly_total_plan,
-                         delivery_person, machine_type, plan_start_date, plan_end_date,
+                         delivery_person, big_area_person, machine_type, plan_start_date, plan_end_date,
                          created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     data['project_name'], data['factory_name'],
                     data.get('last_month_output', 0), data['monthly_plan'],
                     data.get('monthly_total_plan', data['monthly_plan']),
-                    data['delivery_person'], machine_type,
+                    data['delivery_person'], data.get('big_area_person', '') or '',
+                    machine_type,
                     data.get('plan_start_date'),
                     data.get('plan_end_date'), now, now
                 ))
@@ -202,6 +205,20 @@ def get_all_projects(status_filter: Optional[str] = None) -> list[dict]:
                 d.setdefault('progress_pct', 0)
                 rows.append(d)
             return rows
+    finally:
+        conn.close()
+
+def get_all_big_area_persons() -> list[str]:
+    """获取所有项目的大区负责人（去重、非空、排序），供主页面下拉框使用。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT big_area_person FROM projects
+                WHERE big_area_person IS NOT NULL AND big_area_person != ''
+                ORDER BY big_area_person
+            """)
+            return [row['big_area_person'] for row in cursor.fetchall()]
     finally:
         conn.close()
 
@@ -282,7 +299,7 @@ def update_project(project_id: int, data: dict) -> None:
         fields = []
         values = []
         for key in ['project_name', 'factory_name', 'last_month_output', 'monthly_plan',
-                     'delivery_person', 'plan_start_date', 'plan_end_date', 
+                     'delivery_person', 'big_area_person', 'plan_start_date', 'plan_end_date', 
                      'risk_level', 'status', 'remarks']:
             if key in data:
                 fields.append(f"{key} = %s")

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS projects (
     monthly_plan        INT NOT NULL DEFAULT 0,
     monthly_total_plan  INT DEFAULT 0,
     delivery_person     VARCHAR(191) NOT NULL,
+    big_area_person     VARCHAR(191) DEFAULT '',
     plan_start_date     VARCHAR(20),
     plan_end_date       VARCHAR(20),
     actual_start_date   VARCHAR(20),
