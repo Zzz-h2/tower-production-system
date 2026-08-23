@@ -8,6 +8,10 @@ export const fetchProjects = (params = {}) =>
 export const fetchAllPersons = () =>
   http.get('/projects/persons')
 
+// 全量大区负责人（下拉框数据源，与筛选结果隔离）
+export const fetchBigAreaPersons = () =>
+  http.get('/projects/big-area-persons')
+
 export const fetchProject = (pid) => http.get(`/projects/${pid}`)
 
 // 看板指标（项目总览页 KPI 卡，支持调度令月份 month）

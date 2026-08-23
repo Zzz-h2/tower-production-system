@@ -18,6 +18,9 @@
       <el-form-item label="交付负责人" prop="delivery_person">
         <el-input v-model="form.delivery_person" placeholder="必填" />
       </el-form-item>
+      <el-form-item label="大区负责人" prop="big_area_person">
+        <el-input v-model="form.big_area_person" placeholder="选填" />
+      </el-form-item>
       <el-form-item label="本月计划出品" prop="monthly_plan">
         <el-input v-model.number="form.monthly_plan" placeholder="必填，整数" />
       </el-form-item>
@@ -66,12 +69,13 @@ watch(() => props.modelValue, (v) => { visible.value = v })
 const formRef = ref(null)
 const submitting = ref(false)
 
-// 表单初始值（5 必填 + 3 选填）
+// 表单初始值（5 必填 + 4 选填）
 const emptyForm = () => ({
   project_name: '',
   machine_type: '',
   factory_name: '',
   delivery_person: '',
+  big_area_person: '',
   monthly_plan: null,
   last_month_output: null,
   plan_start_date: '',

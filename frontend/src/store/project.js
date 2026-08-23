@@ -5,6 +5,7 @@ import {
   fetchNodePlans,
   fetchDashboardStats,
   fetchAllPersons,
+  fetchBigAreaPersons,
   addProject as addProjectApi,
 } from '../api/node'
 
@@ -16,6 +17,7 @@ export const useProjectStore = defineStore('project', {
     loading: false,
 
     allPersons: [],       // 全量交付负责人（下拉框数据源，与筛选结果隔离）
+    allBigAreaPersons: [], // 全量大区负责人（下拉框数据源，与筛选结果隔离）
 
     lastNodeSavedAt: 0,   // 节点填报保存时间戳，供 AlertList 监听实时刷新
 
@@ -31,6 +33,7 @@ export const useProjectStore = defineStore('project', {
     filters: {
       keyword: '',
       person: '',
+      bigAreaPerson: '',
       status: 'all',
       month: '',          // 全局共享调度令月份（YYYY-MM），三页联动；ensureMonth 补当前月
     },
@@ -61,6 +64,7 @@ export const useProjectStore = defineStore('project', {
     async loadProjects(filters = {}) {
       if (filters.keyword !== undefined) this.filters.keyword = filters.keyword
       if (filters.person !== undefined) this.filters.person = filters.person
+      if (filters.bigAreaPerson !== undefined) this.filters.bigAreaPerson = filters.bigAreaPerson
       if (filters.status !== undefined) this.filters.status = filters.status
       if (filters.month !== undefined) this.filters.month = filters.month
       if (filters.page !== undefined) this.pagination.page = filters.page
@@ -71,6 +75,7 @@ export const useProjectStore = defineStore('project', {
         const data = await fetchProjects({
           keyword: this.filters.keyword || undefined,
           person: this.filters.person || undefined,
+          big_area_person: this.filters.bigAreaPerson || undefined,
           status: this.filters.status || 'all',
           month: this.filters.month || undefined,
           page: this.pagination.page,
@@ -103,6 +108,17 @@ export const useProjectStore = defineStore('project', {
       }
     },
 
+    /** 加载全量大区负责人（下拉框数据源，与筛选结果隔离）。 */
+    async loadAllBigAreaPersons() {
+      try {
+        const res = await fetchBigAreaPersons()
+        this.allBigAreaPersons = res.items || []
+      } catch (err) {
+        console.error('加载大区负责人失败', err)
+        this.allBigAreaPersons = []
+      }
+    },
+
     /** 手动添加项目，成功后刷新列表（保留当前筛选/分页）。 */
     async addProject(payload) {
       const created = await addProjectApi(payload)
@@ -112,7 +128,7 @@ export const useProjectStore = defineStore('project', {
 
     /** 重置筛选条件与页码。 */
     resetFilters() {
-      this.filters = { keyword: '', person: '', status: 'all' }
+      this.filters = { keyword: '', person: '', bigAreaPerson: '', status: 'all' }
       this.pagination.page = 1
     },
 

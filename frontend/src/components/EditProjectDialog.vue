@@ -18,6 +18,9 @@
       <el-form-item label="交付负责人" prop="delivery_person">
         <el-input v-model="form.delivery_person" placeholder="必填" />
       </el-form-item>
+      <el-form-item label="大区负责人" prop="big_area_person">
+        <el-input v-model="form.big_area_person" placeholder="选填" />
+      </el-form-item>
       <el-form-item label="本月计划出品" prop="monthly_plan">
         <el-input v-model.number="form.monthly_plan" placeholder="必填，整数" />
       </el-form-item>
@@ -75,6 +78,7 @@ const emptyForm = () => ({
   machine_type: '',
   factory_name: '',
   delivery_person: '',
+  big_area_person: '',
   monthly_plan: null,
   last_month_output: null,
   plan_start_date: '',
@@ -93,6 +97,7 @@ watch(
       machine_type: p.machine_type || '',
       factory_name: p.factory_name || '',
       delivery_person: p.delivery_person || '',
+      big_area_person: p.big_area_person || '',
       monthly_plan: p.monthly_plan ?? null,
       last_month_output: p.last_month_output ?? null,
       plan_start_date: p.plan_start_date || '',

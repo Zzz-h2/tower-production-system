@@ -82,6 +82,17 @@
           <el-option v-for="p in store.allPersons" :key="p" :label="p" :value="p" />
         </el-select>
         <el-select
+          v-model="filterForm.bigAreaPerson"
+          placeholder="大区负责人"
+          clearable
+          filterable
+          style="width: 180px"
+          @change="onFilterChange"
+          @clear="onFilterClear('bigAreaPerson')"
+        >
+          <el-option v-for="p in store.allBigAreaPersons" :key="p" :label="p" :value="p" />
+        </el-select>
+        <el-select
           v-model="filterForm.status"
           placeholder="项目状态"
           clearable
@@ -139,6 +150,11 @@
           </template>
         </el-table-column>
         <el-table-column prop="delivery_person" label="交付负责人" width="120" />
+        <el-table-column prop="big_area_person" label="大区负责人" width="120">
+          <template #default="{ row }">
+            <span class="region-cell">{{ row.big_area_person || '—' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="remarks" label="备注" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="remark-cell">{{ row.remarks || '—' }}</span>
@@ -229,6 +245,7 @@ const editTarget = ref(null)
 const filterForm = reactive({
   keyword: store.filters.keyword,
   person: store.filters.person,
+  bigAreaPerson: store.filters.bigAreaPerson,
   status: store.filters.status,
 })
 
@@ -275,6 +292,7 @@ function onFilterChange() {
   store.loadProjects({
     keyword: filterForm.keyword,
     person: filterForm.person,
+    bigAreaPerson: filterForm.bigAreaPerson,
     status: filterForm.status,
     page: 1,
   })
@@ -290,9 +308,10 @@ function onFilterClear(field) {
 function onRefresh() {
   filterForm.keyword = ''
   filterForm.person = ''
+  filterForm.bigAreaPerson = ''
   filterForm.status = 'all'
   store.pagination.page = 1
-  store.loadProjects({ keyword: '', person: '', status: 'all', page: 1 })
+  store.loadProjects({ keyword: '', person: '', bigAreaPerson: '', status: 'all', page: 1 })
   store.loadDashboard()
 }
 
@@ -309,16 +328,16 @@ async function onExport() {
   try {
     const res = await fetchExportProjects(store.filters.month)
     const rows = (res.items || res.data?.items || [])
-    const header = [['项目名称', '机型', '钢塔厂家', '截至上月进度', '本月计划', '整体进度(%)', '交付负责人']]
+    const header = [['项目名称', '机型', '钢塔厂家', '截至上月进度', '本月计划', '整体进度(%)', '交付负责人', '大区负责人']]
     const body = rows.map(r => [
       r.project_name, r.machine_type, r.factory_name,
       r.last_month_output, r.monthly_plan,
-      (Number(r.progress_pct) || 0).toFixed(1), r.delivery_person,
+      (Number(r.progress_pct) || 0).toFixed(1), r.delivery_person, r.big_area_person,
     ])
     const ws = XLSX.utils.aoa_to_sheet([...header, ...body])
     ws['!cols'] = [
       { wch: 26 }, { wch: 14 }, { wch: 18 },
-      { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 },
+      { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 12 },
     ]
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, '生产进度总览')
@@ -396,6 +415,7 @@ function onAdded() {
 onMounted(() => {
   store.ensureMonth()            // 默认共享月份 = 当前自然月
   store.loadAllPersons()         // 加载全量交付负责人（下拉框数据源）
+  store.loadAllBigAreaPersons()  // 加载全量大区负责人（下拉框数据源）
   store.loadDashboard()
   store.loadProjects({ page: 1 })
 })
@@ -460,6 +480,11 @@ onMounted(() => {
 }
 /* 备注列：次要文字色弱化显示 */
 .remark-cell {
+  color: var(--color-sub);
+  font-size: 13px;
+}
+/* 大区负责人列：次要文字色弱化显示（与备注同色系） */
+.region-cell {
   color: var(--color-sub);
   font-size: 13px;
 }
