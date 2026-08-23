@@ -20,6 +20,7 @@ class ProjectCreate(BaseModel):
     machine_type: Optional[str] = None         # 机型 *
     factory_name: Optional[str] = None         # 钢塔厂家 *
     delivery_person: Optional[str] = None      # 交付负责人 *
+    big_area_person: Optional[str] = None      # 大区负责人（选填）
     monthly_plan: Optional[int] = None          # 本月计划出品数量 *
     last_month_output: Optional[int] = None    # 截止上月出品（选填）
     plan_start_date: Optional[str] = None      # 计划开工日期（选填）
@@ -34,12 +35,15 @@ def list_projects(
     page: int = 1,
     page_size: int = 10,
     month: Optional[str] = None,
+    big_area_person: Optional[str] = None,
 ):
-    """项目列表（总览页）：支持模糊搜索、负责人/状态筛选、调度令月份过滤、服务端分页。"""
+    """项目列表（总览页）：支持模糊搜索、负责人/大区负责人/状态筛选、调度令月份过滤、服务端分页。"""
     page = max(1, int(page))
     page_size = max(1, int(page_size))
     skip = (page - 1) * page_size
-    items, total = db.get_projects_filtered(keyword, person, status, skip, page_size, month)
+    items, total = db.get_projects_filtered(
+        keyword, person, status, skip, page_size, month, big_area_person
+    )
     # 兜底字段，保证前端渲染不报错
     for p in items:
         p.setdefault("progress_pct", 0)
@@ -64,6 +68,7 @@ def export_projects(month: Optional[str] = None):
             "monthly_plan": int(p.get("monthly_plan", 0) or 0),
             "progress_pct": float(p.get("progress_pct", 0.0) or 0.0),
             "delivery_person": p.get("delivery_person", ""),
+            "big_area_person": p.get("big_area_person", ""),
         })
     return {"month": month, "total": total, "items": result}
 
@@ -119,6 +124,12 @@ def create_project(payload: ProjectCreate):
 def list_persons():
     """返回所有交付负责人（去重排序，供主页面下拉框使用；与筛选结果隔离）。"""
     return {"items": db.get_all_persons()}
+
+
+@router.get("/big-area-persons")
+def list_big_area_persons():
+    """返回所有大区负责人（去重排序，供主页面下拉框使用；与筛选结果隔离）。"""
+    return {"items": db.get_all_big_area_persons()}
 
 
 @router.get("/{pid}")

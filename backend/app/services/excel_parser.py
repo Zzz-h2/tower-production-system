@@ -32,6 +32,7 @@ OPTIONAL_FIELDS = [
     "plan_start_date",    # 计划开工日期
     "plan_end_date",      # 计划交付日期
     "machine_type",       # 机型（v3.1 新增，Excel 有机型列则自动匹配）
+    "big_area_person",    # 大区负责人（选填）
 ]
 
 # 所有系统字段
@@ -47,6 +48,7 @@ FIELD_LABELS = {
     "plan_start_date": "计划开工日期",
     "plan_end_date": "计划交付日期",
     "machine_type": "机型",
+    "big_area_person": "大区负责人",
 }
 
 
@@ -187,6 +189,10 @@ def auto_detect_mapping(excel_headers: list[str]) -> dict[str, str]:
             ["机型"], ["型号"], ["塔型"], ["塔筒", "型号"], ["机型", "规格"],
             ["model"], ["type"],
         ],
+        "big_area_person": [
+            ["大区负责人"], ["大区"], ["区域负责人"], ["片区负责人"],
+            ["大区", "负责人"], ["区域", "负责人"],
+        ],
     }
 
     headers = [str(h).strip() for h in excel_headers]
@@ -205,6 +211,9 @@ def auto_detect_mapping(excel_headers: list[str]) -> dict[str, str]:
         "计划交付日期": "plan_end_date", "交付日期": "plan_end_date",
         # v3.1: 机型
         "机型": "machine_type", "型号": "machine_type", "塔型": "machine_type",
+        # 大区负责人（业务专属别名）
+        "大区负责人": "big_area_person", "大区": "big_area_person",
+        "区域负责人": "big_area_person", "片区负责人": "big_area_person",
     }
 
     # 动态别名：匹配「X月计划」「截止X月底出品」等月度变化列名
@@ -411,6 +420,7 @@ def parse_schedule_excel(
         project_data["project_name"] = str(project_data.get("project_name", "")).strip()
         project_data["factory_name"] = str(project_data.get("factory_name", "")).strip()
         project_data["delivery_person"] = str(project_data.get("delivery_person", "")).strip()
+        project_data["big_area_person"] = str(project_data.get("big_area_person", "") or "").strip()
 
         standardized_data.append(project_data)
 
@@ -439,6 +449,7 @@ def generate_sample_excel(output_path: str) -> str:
         "截止上月月底出品": [4, 2, 6, 0, 3],
         "本月计划出品": [8, 6, 4, 8, 6],
         "交付负责人": ["张三", "张三", "李四", "王五", "赵六"],
+        "大区负责人": ["华北大区", "华北大区", "西北大区", "西南大区", "华东大区"],
         "计划开工日期": ["2026-08-01", "2026-08-05", "2026-07-15", "2026-08-10", "2026-07-20"],
         "计划交付日期": ["2026-09-05", "2026-09-10", "2026-08-20", "2026-09-15", "2026-08-25"],
     }

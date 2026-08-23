@@ -112,6 +112,12 @@ def get_all_persons() -> list[str]:
         conn.close()
 
 
+def get_all_big_area_persons() -> list[str]:
+    """获取所有项目的大区负责人（去重、非空、排序）。"""
+    from database import get_all_big_area_persons as _fn
+    return getattr(_fn, "__wrapped__", _fn)()
+
+
 def get_dashboard_stats(month: str | None = None) -> dict:
     """首页总览统计：与项目列表风险口径完全一致（复用 get_projects_filtered 实时计算）。
 
@@ -153,15 +159,16 @@ def insert_import_log(file_name: str, total: int, success: int, error: int, erro
 
 def get_projects_filtered(keyword: str | None = None, person: str | None = None,
                           status: str | None = None, skip: int = 0, limit: int = 10,
-                          month: str | None = None):
+                          month: str | None = None, big_area_person: str | None = None):
     """项目搜索/筛选 + 服务端分页。
 
     status 语义为「风险等级」（normal/warning/delayed），由 node_plans + node_actuals
     实时计算（与详情页/节点预警口径一致），因此**不能**下推到 SQL 的 projects.status
     （生命周期字段 in_progress/completed）。
-    实现：取全量项目 → keyword/person 内存过滤 → 计算 risk_level/progress_pct →
+    实现：取全量项目 → keyword/person/big_area_person 内存过滤 → 计算 risk_level/progress_pct →
     风险等级内存过滤 → 切片分页。
     month: 调度令月份（projects.created_at 年月，如 '2026-08'），三页联动共享口径。
+    big_area_person: 大区负责人 精确相等过滤。
     """
     # status 不再作为生命周期条件下推，统一取全量项目
     rows = get_all_projects(None)
@@ -183,6 +190,11 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     if person:
         pname = str(person).strip()
         rows = [p for p in rows if str(p.get("delivery_person", "")) == pname]
+
+    # big_area_person：大区负责人 精确相等
+    if big_area_person:
+        bname = str(big_area_person).strip()
+        rows = [p for p in rows if str(p.get("big_area_person", "")) == bname]
 
     # 风险等级 + 整体进度：基于 node_plans + node_actuals 实时计算（弃用 processes 表）
     from ..services.node_service import enrich_rows

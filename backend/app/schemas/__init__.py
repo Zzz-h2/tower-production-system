@@ -40,6 +40,7 @@ class ProjectUpdateRequest(BaseModel):
     last_month_output: Optional[int] = None
     monthly_plan: Optional[int] = None
     delivery_person: Optional[str] = None
+    big_area_person: Optional[str] = None
     plan_start_date: Optional[str] = None
     plan_end_date: Optional[str] = None
     risk_level: Optional[str] = None
