@@ -8,6 +8,9 @@ const http = axios.create({
   timeout: 30000,
 })
 
+// 401 并发处理幂等锁：避免多接口同时 401 时重复清 token / 重复跳登录页（竞态保护）
+let auth401Handling = false
+
 // 请求拦截器：从 localStorage 'tower_auth' 读取 token，注入 Bearer 头
 http.interceptors.request.use(
   (config) => {
@@ -38,22 +41,33 @@ http.interceptors.response.use(
     const url = err.config?.url || ''
     const isLoginUrl = url.includes('/auth/login')
 
-    // 会话过期（业务接口 401）
+    // 会话过期（业务接口 401）：并发 401 需幂等保护，避免竞态下重复清 token
     if (status === 401 && !isLoginUrl) {
-      try {
-        // 动态引入，避免 api <-> store/router 的循环依赖
-        const { useAuthStore } = await import('../store/auth')
-        const { default: router } = await import('../router')
-        const auth = useAuthStore()
-        auth.logout()
-        const current = router.currentRoute.value
-        const redirect = current && current.name !== 'login' ? current.fullPath : ''
-        router.replace({
-          path: '/login',
-          query: redirect ? { redirect } : {},
-        })
-      } catch (e) {
-        // 动态引入失败（极端情况）也不阻断流程
+      if (!auth401Handling) {
+        auth401Handling = true
+        // 先快照当前 token；仅当 token 未被重新登录覆盖时才清登出，杜绝竞态清掉新 token
+        const staleToken = localStorage.getItem('tower_auth')
+        try {
+          // 动态引入，避免 api <-> store/router 的循环依赖
+          const { useAuthStore } = await import('../store/auth')
+          const { default: router } = await import('../router')
+          const auth = useAuthStore()
+          // 仅当 token 未被重新登录覆盖、且仍处于登录态时才清登出并跳登录页，
+          // 避免并发 401 的延迟处理在用户已重登后误清新 token / 误跳登录页
+          if (localStorage.getItem('tower_auth') === staleToken && auth.isLoggedIn) {
+            auth.logout()
+            const current = router.currentRoute.value
+            const redirect = current && current.name !== 'login' ? current.fullPath : ''
+            router.replace({
+              path: '/login',
+              query: redirect ? { redirect } : {},
+            })
+          }
+        } catch (e) {
+          // 动态引入失败（极端情况）也不阻断流程
+        }
+        // 3 秒后解锁，允许下一次真实会话过期再处理
+        setTimeout(() => { auth401Handling = false }, 3000)
       }
       ElMessage.error('登录已过期，请重新登录')
       return Promise.reject(err)
