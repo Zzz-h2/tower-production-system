@@ -14,8 +14,7 @@
       </el-form>
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="login-err" />
       <div class="login-tip">
-        普通账号：user / user123<br />
-        管理员请联系：15353262798
+        管理员账号请联系管理员开通；大区账号由调度令导入自动开通，初始密码见系统公告
       </div>
     </el-card>
   </div>
@@ -34,7 +33,7 @@ const form = reactive({ username: '', password: '' })
 const loading = ref(false)
 const error = ref('')
 
-const onSubmit = () => {
+const onSubmit = async () => {
   error.value = ''
   if (!form.username || !form.password) {
     error.value = '请输入用户名和密码'
@@ -42,13 +41,15 @@ const onSubmit = () => {
   }
   loading.value = true
   try {
-    auth.login(form.username, form.password)
+    await auth.login(form.username, form.password)
     ElMessage.success(`欢迎，${auth.label}`)
     // 登录后回到被拦截前想去的页面（默认项目列表）
     const redirect = route.query.redirect
     router.replace(typeof redirect === 'string' && redirect ? redirect : '/projects')
   } catch (e) {
-    error.value = e.message
+    // 登录失败：优先展示后端 detail（如「用户名或密码错误」）
+    const detail = e.response?.data?.detail
+    error.value = typeof detail === 'string' && detail ? detail : (e.message || '登录失败')
   } finally {
     loading.value = false
   }

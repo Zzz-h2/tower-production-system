@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """FastAPI 应用入口：CORS、路由挂载、（可选）WebSocket。"""
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routers import projects, nodes, schedule_import, dashboard, dispatch_import, exceptions, ranking
+from .core.deps import require_login
+from .routers import (projects, nodes, schedule_import, dashboard,
+                      dispatch_import, exceptions, ranking, auth)
 
 app = FastAPI(
     title="塔筒生产进度管控系统 API",
@@ -25,20 +27,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(projects.router)
-app.include_router(nodes.router)
-app.include_router(schedule_import.router)
-app.include_router(dashboard.router)
-app.include_router(dispatch_import.router)
-app.include_router(exceptions.router)
-app.include_router(ranking.router)
+# 认证 router：公开（登录/登出/当前用户）
+app.include_router(auth.router)
+
+# 业务 router：统一登录保护（T01 预期行为：无 token 访问业务接口返回 401）
+# 行级数据隔离注入由 T02 完成；此处仅做 router 级登录校验。
+app.include_router(projects.router, dependencies=[Depends(require_login)])
+app.include_router(nodes.router, dependencies=[Depends(require_login)])
+app.include_router(schedule_import.router, dependencies=[Depends(require_login)])
+app.include_router(dashboard.router, dependencies=[Depends(require_login)])
+app.include_router(dispatch_import.router, dependencies=[Depends(require_login)])
+app.include_router(exceptions.router, dependencies=[Depends(require_login)])
+app.include_router(ranking.router, dependencies=[Depends(require_login)])
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "tower-production-api"}
-
-
-# ---------- 可选：WebSocket 实时进度推送 ----------
-# 保留挂载占位；启用时接入 ws 管理器即可。
-# from .ws import manager  # noqa
