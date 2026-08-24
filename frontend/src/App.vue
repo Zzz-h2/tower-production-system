@@ -6,7 +6,10 @@
         <span class="user-name">
           当前用户：{{ auth.username }}
           <el-tag size="small" :type="auth.isAdmin ? 'danger' : 'info'">
-            {{ auth.isAdmin ? '管理员' : '普通账号' }}
+            {{ auth.label || (auth.isAdmin ? '管理员' : '普通账号') }}
+          </el-tag>
+          <el-tag v-if="auth.isBigArea && auth.bigAreaName" size="small" type="warning">
+            {{ auth.bigAreaName }}
           </el-tag>
         </span>
         <el-button size="small" @click="onLogout">退出登录</el-button>

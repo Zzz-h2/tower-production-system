@@ -24,15 +24,16 @@ def _month_range(month: str) -> tuple[str, str]:
     return f"{y}-{m:02d}-01", f"{y}-{m + 1:02d}-01"
 
 
-def get_production_ranking(month: str) -> list[dict]:
+def get_production_ranking(month: str, big_area_person: str | None = None) -> list[dict]:
     """返回按完成率降序的负责人排名列表。month 形如 '2026-08'。
 
     口径（三页联动一致）：项目集合按 projects.created_at 年月（调度令月份）筛选，
     累计计划/完成按该月内『附件安装』节点汇总；负责人由 SQL JOIN 直接带回。
+    big_area_person: 大区负责人（大区行级隔离；admin 传 None 看全量）。
     """
     ns, ne = _month_range(month)
 
-    plans = db.get_attachment_plans_by_month(ns, ne, month)   # 1 次查询（含 delivery_person）
+    plans = db.get_attachment_plans_by_month(ns, ne, month, big_area_person)   # 1 次查询（含 delivery_person）
     node_ids = [p["id"] for p in plans]
     actuals = db.get_actuals_by_node_ids(node_ids)            # 1 次查询
 
@@ -69,10 +70,13 @@ def get_production_ranking(month: str) -> list[dict]:
     return rows
 
 
-def get_production_ranking_detail(month: str, person: str) -> list[dict]:
-    """该负责人当月名下、存在逾期或提前节点的项目清单（全部工序）。"""
+def get_production_ranking_detail(month: str, person: str, big_area_person: str | None = None) -> list[dict]:
+    """该负责人当月名下、存在逾期或提前节点的项目清单（全部工序）。
+
+    big_area_person: 大区负责人（大区行级隔离；admin 传 None 看全量）。
+    """
     ns, ne = _month_range(month)
-    plans = db.get_all_plans_by_month_and_person(ns, ne, person)  # 1 次查询
+    plans = db.get_all_plans_by_month_and_person(ns, ne, person, big_area_person)  # 1 次查询
     node_ids = [p["id"] for p in plans]
     actuals = db.get_actuals_by_node_ids(node_ids)                # 1 次查询
     today = date.today()

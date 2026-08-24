@@ -23,7 +23,7 @@
         <el-input v-model="form.measures" type="textarea" :rows="3" placeholder="请输入处理措施" />
       </el-form-item>
       <el-form-item>
-        <el-button type="primary" @click="onSubmit">提交异常</el-button>
+        <el-button type="primary" :disabled="!auth.canFill" @click="onSubmit">提交异常</el-button>
       </el-form-item>
     </el-form>
 
@@ -50,9 +50,11 @@
 import { ref, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { createException, listExceptionsByNode, updateException } from '../api/exception'
+import { useAuthStore } from '../store/auth'
 
 const props = defineProps({ pid: { type: String, default: '' }, nodeId: { type: Number, default: null } })
 const emit = defineEmits(['changed'])
+const auth = useAuthStore() // 提报权限：admin 或大区账号（大区仅本大区，后端已隔离）
 
 const form = ref({
   responsibility_category: '',

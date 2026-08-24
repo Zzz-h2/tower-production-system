@@ -81,7 +81,9 @@
         >
           <el-option v-for="p in store.allPersons" :key="p" :label="p" :value="p" />
         </el-select>
+        <!-- 大区负责人筛选：仅管理员可见（大区账号区域已锁定，隐藏下拉避免歧义；后端亦强制隔离） -->
         <el-select
+          v-if="auth.isAdmin"
           v-model="filterForm.bigAreaPerson"
           placeholder="大区负责人"
           clearable
@@ -129,7 +131,7 @@
           @click="addVisible = true"
         >手动添加项目</el-button>
       </div>
-      <el-table :data="store.projects" v-loading="store.loading" stripe>
+      <el-table v-if="store.projects.length || store.loading" :data="store.projects" v-loading="store.loading" stripe>
         <el-table-column prop="project_name" label="项目名称" min-width="180" />
         <el-table-column prop="machine_type" label="机型" min-width="120" />
         <el-table-column prop="factory_name" label="钢塔厂家" min-width="140" />
@@ -175,6 +177,12 @@
           </template>
         </el-table-column>
       </el-table>
+      <!-- 空态（非报错）：当前筛选/隔离范围内暂无项目数据 -->
+      <el-empty
+        v-else
+        description="当前大区暂无项目数据（请管理员先导入调度令）"
+        style="padding: 32px 0;"
+      />
     </div>
 
     <!-- ⑥ 分页条 -->
@@ -308,10 +316,11 @@ function onFilterClear(field) {
 function onRefresh() {
   filterForm.keyword = ''
   filterForm.person = ''
-  filterForm.bigAreaPerson = ''
+  // 大区账号区域锁定：刷新时保持锁定值（后端同样强制隔离，此处保持前端一致）
+  filterForm.bigAreaPerson = auth.isAdmin ? '' : auth.lockedBigAreaName
   filterForm.status = 'all'
   store.pagination.page = 1
-  store.loadProjects({ keyword: '', person: '', bigAreaPerson: '', status: 'all', page: 1 })
+  store.loadProjects({ keyword: '', person: '', bigAreaPerson: filterForm.bigAreaPerson, status: 'all', page: 1 })
   store.loadDashboard()
 }
 
@@ -404,9 +413,16 @@ function onUpdated() {
   store.loadDashboard()
 }
 
-function onDispatchImported() {
+function onDispatchImported(res) {
   store.loadProjects({ page: 1 })
   store.loadDashboard()
+  // 调度令导入后：若后端已自动开通大区账号则提示数量，否则提示联系管理员发放密码
+  const accountsReady = Number(res?.accounts_ready || 0)
+  if (accountsReady > 0) {
+    ElMessage.success(`已自动开通 ${accountsReady} 个大区账号`)
+  } else {
+    ElMessage.info('导入成功，可联系管理员为相应大区账号发放密码')
+  }
 }
 function onAdded() {
   store.loadProjects({ page: 1 })
@@ -416,8 +432,10 @@ onMounted(() => {
   store.ensureMonth()            // 默认共享月份 = 当前自然月
   store.loadAllPersons()         // 加载全量交付负责人（下拉框数据源）
   store.loadAllBigAreaPersons()  // 加载全量大区负责人（下拉框数据源）
+  // 大区账号：区域锁定，前端筛选同步锁定（隐藏下拉框；后端同样强制隔离，此处仅保持 UX 一致）
+  filterForm.bigAreaPerson = auth.isAdmin ? '' : auth.lockedBigAreaName
   store.loadDashboard()
-  store.loadProjects({ page: 1 })
+  store.loadProjects({ page: 1, bigAreaPerson: filterForm.bigAreaPerson })
 })
 </script>
 

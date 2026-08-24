@@ -59,8 +59,8 @@
       <template v-if="innerMode === 'input'">
         <div style="font-size:12px; color:#718096; margin-bottom:10px;">
           {{ auth.isAdmin
-            ? '管理员可为每行指定历史日期补录；已保存过的节点，日期会沿用上次保存值，无变更提交不会重置为今天。未开始/未填写的节点日期默认当天（不显示历史值）。'
-            : '普通账号仅可填报今日，日期已锁定' }}
+            ? '管理员可为每行指定历史日期补录（含"已完成"组可编辑）；已保存过的节点，日期会沿用上次保存值，无变更提交不会重置为今天。未开始/未填写的节点日期默认当天（不显示历史值）。'
+            : '大区账号仅可填报本大区节点；未填写节点默认当天，填报日期已锁定（仅可填报今日，且仅限本大区数据）' }}
         </div>
         <el-segmented v-model="activeGroup" :options="groupOptions" block style="margin-bottom:14px;" />
         <div v-if="groupNodes.length === 0" class="empty-hint">当前分组「{{ groupLabel }}」没有可保存的节点。</div>
@@ -77,7 +77,7 @@
               :min="0"
               :max="maxOf(node)"
               size="small"
-              :disabled="!auth.isAdmin && activeGroup === 'done'"
+              :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin)"
             />
             <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
             <!-- 填报日期：标签显示当前日期（未填写灰底/已填写蓝底），管理员点击「更改填报日期」弹 popover 选日历 -->
@@ -94,7 +94,7 @@
                 <template #reference>
                   <el-button
                     size="small"
-                    :disabled="!auth.isAdmin || activeGroup === 'done'"
+                    :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin)"
                     class="rd-btn"
                   >更改填报日期</el-button>
                 </template>
@@ -118,7 +118,7 @@
         </template>
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
           <el-button @click="innerMode = 'detail'">← 返回详情</el-button>
-          <el-button type="primary" @click="save" :loading="saving">💾 保存节点进度</el-button>
+          <el-button type="primary" :disabled="!auth.canFill" @click="save" :loading="saving">💾 保存节点进度</el-button>
         </div>
       </template>
     </template>
@@ -141,7 +141,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue', 'saved'])
 const store = useProjectStore()
-const auth = useAuthStore() // isAdmin 决定日期选择器是否可编辑
+const auth = useAuthStore() // canFill 决定填报/日期是否可编辑（admin 或大区账号；后端已按大区隔离）
 
 // 填报日期：默认今天，格式 YYYY-MM-DD
 function fmtToday() {
@@ -154,7 +154,7 @@ function onDatePicked(nodeId, newVal) {
   reportDates.value[nodeId] = newVal
   datePickerOpen.value[nodeId] = false
 }
-// 每行独立填报日期（按 node.id 存储）；管理员可改历史日期，普通账号锁定今天
+// 每行独立填报日期（按 node.id 存储）；管理员可改历史日期，大区账号锁定今天（仅本大区）
 const reportDates = ref({})
 // 原始已保存填报日期（供 popover「上次保存」提示）
 const savedDates = ref({})
@@ -173,6 +173,43 @@ const selectedNodeId = ref(null)
 // 异常提报后触发预警列表刷新（复用节点保存事件总线）
 function onExceptionChanged() {
   store.lastNodeSavedAt = Date.now()
+}
+
+// ---- 失败信息紧凑渲染工具（纯函数，放最前，不依赖响应式状态） ----
+// 从后端 message 中抽出关键事实，便于紧凑展示
+function parseQuotaMsg(msg) {
+  // 后端格式：「【数量校验未通过】{工序} 节点 {日期} 拟填报 {qty} 套，但截至 {日期} 前序工序（…）累计实际仅 {prev} 套。…」
+  const m1 = String(msg || '').match(/节点\s+(\S+)\s+拟填报/)
+  const m2 = String(msg || '').match(/拟填报\s+(\d+)\s+套/)
+  const m3 = String(msg || '').match(/累计实际仅\s+(\d+)\s+套/)
+  return { nodeDate: m1?.[1] || null, qty: m2?.[1] || null, prev: m3?.[1] || null }
+}
+// 每个错误 code 一条带 emoji 的短摘要
+const CODE_FRIENDLY = {
+  PREV_PROC_QUOTA_EXCEEDED: '🔴 数量校验未通过：请先完成前序工序的实际填报后再试',
+  QTY_EXCEED_PLAN: '⚠️ 数量超计划：节点实际数量不能超过计划数',
+  DONE_READONLY: '🔒 已完成分组不可编辑（仅管理员可调整）',
+  BAD_REPORT_DATE: '📅 填报日期格式错误（应为 YYYY-MM-DD）',
+  NODE_NOT_IN_GROUP: '⚠️ 节点与所选分组不匹配',
+  UNKNOWN_GROUP: '⚠️ 未知分组',
+}
+// HTML 转义，防 XSS
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+// 把每组的失败压缩成一行（PREV 走量化模板，其它走去【】前缀的原 message）
+function shortItem(group, detail) {
+  const label = groupLabelMap[group] || group
+  if (detail?.code === 'PREV_PROC_QUOTA_EXCEEDED') {
+    const f = parseQuotaMsg(detail?.message || '')
+    const date = f.nodeDate ? `（${f.nodeDate}）` : ''
+    if (f.qty != null && f.prev != null) {
+      return `${label}${date}：拟报 ${f.qty} 套 / 前序仅 ${f.prev} 套`
+    }
+    return `${label}：前序累计不足`
+  }
+  const clean = (detail?.message || '请求失败').replace(/^【.+?】/, '')
+  return `${label}：${clean}`
 }
 
 const groupOptions = [
@@ -265,8 +302,35 @@ async function save() {
     const bad = settled.filter((r) => r.status === 'rejected')
     const totalSaved = ok.reduce((s, r) => s + ((r.value?.saved) ?? 0), 0)
     if (bad.length) {
-      const firstErr = bad[0].reason?.message || '请求失败'
-      ElMessage.error(`部分保存失败：${bad.length} 个分组未保存（${firstErr}）`)
+      // 仅取失败（rejected）分组，按 code 聚合压缩展示
+      const items = groupsToSave
+        .map(([g], i) => ({ g, result: settled[i] }))
+        .filter(({ result }) => result?.status === 'rejected')
+        .map(({ g, result }) => {
+          const detail = result.reason?.response?.data?.detail
+          const code = (detail && typeof detail === 'object') ? detail.code : 'UNKNOWN'
+          return { group: g, code, short: shortItem(g, detail) }
+        })
+      const buckets = {}
+      items.forEach(({ code, short }) => {
+        const key = code || 'UNKNOWN'
+        ;(buckets[key] = buckets[key] || []).push(short)
+      })
+      const body = Object.entries(buckets)
+        .map(([code, lines]) => {
+          const headline = CODE_FRIENDLY[code] || `⚠️ ${esc(code)}`
+          const detailLines = lines
+            .map((s) => `<div style="margin-left:14px; color:#4a5568; font-size:13px; line-height:1.7;">• ${esc(s)}</div>`)
+            .join('')
+          return `<div style="margin-top:6px;"><b>${esc(headline)}</b>${detailLines}</div>`
+        })
+        .join('')
+      ElMessage.error({
+        dangerouslyUseHTMLString: true,
+        message: `<div style="line-height:1.6; max-width:540px;"><b>保存失败（${bad.length} / ${groupsToSave.length} 个分组）</b>${body}</div>`,
+        duration: 6000,
+        showClose: true,
+      })
     }
     if (totalSaved > 0) {
       ElMessage.success(`已保存 ${totalSaved} 条节点进度`)

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""里程碑倒排：从交付截止日倒推 9 道排产工序的最晚开始/完成时间，并对比当前状态给出偏差。
+"""里程碑倒排：从交付截止日倒推 11 道排产工序的最晚开始/完成时间，并对比当前状态给出偏差。
 
 数据源：node_plans + node_actuals（经 build_overview 实时计算的工序卡片状态），
 与新版进度/预警口径一致；不再使用旧 processes 表。
@@ -7,13 +7,17 @@
 """
 from datetime import date, timedelta
 
+from fastapi import HTTPException
+
 from ..core import db
 from ..services.node_service import build_overview
 
-# 9 道排产工序及其标准自然日工期（与排产 Excel 顺序一致，可按实际调整）
+# 11 道排产工序及其标准自然日工期（与「排产计划模板.xlsx」表头顺序一致，可按实际调整）
+# 环缝=焊接类 2 天；门框焊接=收口类 1 天
 MILESTONE_PROCESSES = [
     ("钢板到货", 1), ("法兰到货", 1), ("下料", 2), ("卷制", 3),
-    ("组对", 2), ("黑塔", 2), ("防腐", 2), ("附件安装", 3), ("具备验收", 1),
+    ("组对", 2), ("环缝", 2), ("门框焊接", 1),
+    ("黑塔", 2), ("防腐", 2), ("附件安装", 3), ("具备验收", 1),
 ]
 
 
@@ -65,6 +69,9 @@ def estimate_delivery_date(status_list: list[str], custom_durations: dict | None
 
 def build_milestone_backward(pid: int, deadline: date, custom_durations: dict | None = None) -> dict:
     """组装里程碑倒排结果：倒排计划 + 偏差分析 + 预计交付。"""
+    # 护防：过早起止日期倒推会触发 date 溢出（OverflowError），限定合理年份范围 → 400
+    if not (2000 <= deadline.year <= 2100):
+        raise HTTPException(status_code=400, detail="交付截止日应在 2000~2100 年之间")
     backward = generate_backward_plan(deadline, custom_durations)
     today = date.today()
 

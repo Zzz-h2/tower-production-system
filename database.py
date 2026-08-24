@@ -16,18 +16,6 @@ import pymysql.cursors
 
 from backend.app.core.config import MYSQL_CONFIG
 
-try:
-    import streamlit as st  # 仅用于 @st.cache_data 只读查询缓存
-except Exception:  # 后端（FastAPI）环境无 streamlit：缓存降级为空操作，保证纯后端可导入
-    class _NoOpCache:
-        def __call__(self, *args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
-    class _StStub:
-        cache_data = _NoOpCache()
-    st = _StStub()
-
 # MySQL schema 文件路径（SQLite → MySQL 迁移后使用）
 MYSQL_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db_schema_mysql.sql')
 
@@ -185,19 +173,30 @@ def upsert_project(data: dict) -> tuple[int, bool]:
 
 # 首页项目列表不做缓存：风险等级随日期实时变化，缓存会导致首页显示过期状态。
 # （数据量小（项目×12工序），实时查询毫秒级，保证日期推移后首页立即同步。）
-def get_all_projects(status_filter: Optional[str] = None) -> list[dict]:
-    """获取所有项目列表（基础字段；风险/进度由 backend 基于 node_plans 实时计算覆盖）。"""
+def get_all_projects(status_filter: Optional[str] = None,
+                     big_area_person: Optional[str] = None) -> list[dict]:
+    """获取所有项目列表（基础字段；风险/进度由 backend 基于 node_plans 实时计算覆盖）。
+
+    big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
+    """
     conn = get_connection()
     try:
-        where_clause = "WHERE p.status = %s" if status_filter else ""
-        params = (status_filter,) if status_filter else ()
+        clauses = []
+        params = []
+        if status_filter:
+            clauses.append("p.status = %s")
+            params.append(status_filter)
+        if big_area_person:
+            clauses.append("p.big_area_person = %s")
+            params.append(big_area_person)
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
         with conn.cursor() as cursor:
             cursor.execute(f"""
                 SELECT p.* FROM projects p
                 {where_clause}
                 ORDER BY p.updated_at DESC
-            """, params)
+            """, tuple(params))
             rows = []
             for row in cursor.fetchall():
                 d = dict(row)
@@ -222,7 +221,7 @@ def get_all_big_area_persons() -> list[str]:
     finally:
         conn.close()
 
-@st.cache_data(ttl=300, show_spinner=False)
+
 def get_project_by_id(project_id: int) -> Optional[dict]:
     """根据ID获取单个项目（基础字段；风险/进度由路由基于 node_plans 实时计算覆盖）。"""
     conn = get_connection()
@@ -238,28 +237,6 @@ def get_project_by_id(project_id: int) -> Optional[dict]:
             return None
     finally:
         conn.close()
-
-def get_project_by_name(project_name: str) -> Optional[dict]:
-    """根据项目名称查询项目（用于手动添加的重复校验）。
-
-    Args:
-        project_name: 项目名称
-
-    Returns:
-        项目记录 dict（含 id 等字段），不存在返回 None
-    """
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT id, project_name, factory_name FROM projects WHERE project_name = %s LIMIT 1",
-                (project_name,),
-            )
-            row = cursor.fetchone()
-            return dict(row) if row else None
-    finally:
-        conn.close()
-
 
 def get_duplicate_project(project_name: str, factory_name: str,
                           delivery_person: str, machine_type: str) -> Optional[dict]:
@@ -316,7 +293,12 @@ def update_project(project_id: int, data: dict) -> None:
 
 
 def delete_project(project_id: int) -> None:
-    """删除项目（应用层级联：工序计划/实际进度/异常先删，再删项目主表；里程碑由外键 cascade 自动清理）"""
+    """删除项目（应用层级联：工序计划/实际进度/异常先删，再删项目主表；里程碑由外键 cascade 自动清理）。
+
+    说明：三张无外键子表（node_actual_progress / node_exceptions / process_node_plans）在
+    db_schema_mysql.sql 中已补充 projects(id) 的 ON DELETE CASCADE 外键；
+    此处的逐表删除是兼容「建库时尚未带外键的存量库」的兜底，两路叠加互不影响。
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
@@ -328,7 +310,7 @@ def delete_project(project_id: int) -> None:
             conn.commit()
     finally:
         conn.close()
-@st.cache_data(ttl=300, show_spinner=False)
+
 def insert_import_log(file_name: str, total: int, success: int, 
                        error: int, error_details: str = '') -> None:
     """记录导入日志"""
@@ -403,7 +385,7 @@ def insert_node_plans(project_id: int, plans: list[dict]) -> int:
         conn.close()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+
 def get_node_plans(project_id: int) -> list[dict]:
     """获取项目的全部工序节点计划，按 工序顺序 + 计划日期 排序。"""
     conn = get_connection()
@@ -439,7 +421,7 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
         conn.close()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+
 def get_node_actuals(project_id: int) -> dict:
     """获取项目全部节点实际进度，返回 {node_plan_id: {"actual_qty": int, "report_date": date}}。"""
     conn = get_connection()
@@ -460,65 +442,78 @@ def get_node_actuals(project_id: int) -> dict:
         conn.close()
 
 
+def _chunked(seq: list[int], size: int = 900) -> list[list[int]]:
+    """把 id 列表切成固定大小的分片，规避 MySQL 单语句 IN 占位符上限（65535）。"""
+    return [seq[i:i + size] for i in range(0, len(seq), size)]
+
+
 def get_node_plans_batch(project_ids: list[int]) -> dict[int, list[dict]]:
-    """批量查询多个项目的工序节点计划，返回 {project_id: [plan, ...]}（消除列表页 N+1）。"""
+    """批量查询多个项目的工序节点计划，返回 {project_id: [plan, ...]}（消除列表页 N+1）。
+
+    按 900 分片执行 IN 查询，规避 MySQL 单语句占位符上限。
+    """
     if not project_ids:
         return {}
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            fmt = ",".join(["%s"] * len(project_ids))
-            cur.execute(f"""
-                SELECT * FROM process_node_plans
-                WHERE project_id IN ({fmt})
-                ORDER BY project_id, process_order, plan_date
-            """, project_ids)
-            rows = cur.fetchall()
-        result: dict[int, list[dict]] = {}
-        for row in rows:
-            d = dict(row)
-            result.setdefault(int(d["project_id"]), []).append(d)
+            result: dict[int, list[dict]] = {}
+            for chunk in _chunked(project_ids):
+                fmt = ",".join(["%s"] * len(chunk))
+                cur.execute(f"""
+                    SELECT * FROM process_node_plans
+                    WHERE project_id IN ({fmt})
+                    ORDER BY project_id, process_order, plan_date
+                """, chunk)
+                for row in cur.fetchall():
+                    d = dict(row)
+                    result.setdefault(int(d["project_id"]), []).append(d)
         return result
     finally:
         conn.close()
 
 
 def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
-    """批量查询多个项目节点实际进度，返回 {project_id: {node_plan_id: {actual_qty, report_date}}}。"""
+    """批量查询多个项目节点实际进度，返回 {project_id: {node_plan_id: {actual_qty, report_date}}}。
+
+    按 900 分片执行 IN 查询，规避 MySQL 单语句占位符上限。
+    """
     if not project_ids:
         return {}
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            fmt = ",".join(["%s"] * len(project_ids))
-            cur.execute(f"""
-                SELECT project_id, node_plan_id, actual_qty, report_date
-                FROM node_actual_progress
-                WHERE project_id IN ({fmt})
-            """, project_ids)
-            rows = cur.fetchall()
-        result: dict[int, dict] = {}
-        for row in rows:
-            pid = int(row["project_id"])
-            result.setdefault(pid, {})[int(row["node_plan_id"])] = {
-                "actual_qty": int(row["actual_qty"] or 0),
-                "report_date": row["report_date"],
-            }
+            result: dict[int, dict] = {}
+            for chunk in _chunked(project_ids):
+                fmt = ",".join(["%s"] * len(chunk))
+                cur.execute(f"""
+                    SELECT project_id, node_plan_id, actual_qty, report_date
+                    FROM node_actual_progress
+                    WHERE project_id IN ({fmt})
+                """, chunk)
+                for row in cur.fetchall():
+                    pid = int(row["project_id"])
+                    result.setdefault(pid, {})[int(row["node_plan_id"])] = {
+                        "actual_qty": int(row["actual_qty"] or 0),
+                        "report_date": row["report_date"],
+                    }
         return result
     finally:
         conn.close()
 
 
-def get_attachment_plans_by_month(month_start: str, month_end: str, month: str | None = None) -> list[dict]:
+def get_attachment_plans_by_month(month_start: str, month_end: str, month: str | None = None,
+                                  big_area_person: str | None = None) -> list[dict]:
     """取某月内所有『附件安装』工序节点计划（出品排名统计源）。
 
     month 传入时约束项目 created_at 月份（调度令月份口径，三页联动一致），并带回 delivery_person。
+    big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
     """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             if month:
-                cur.execute("""
+                sql = """
                     SELECT pnp.id, pnp.project_id, pnp.process_name, pnp.plan_date, pnp.plan_qty,
                            p.delivery_person
                     FROM process_node_plans pnp
@@ -526,74 +521,159 @@ def get_attachment_plans_by_month(month_start: str, month_end: str, month: str |
                     WHERE pnp.process_name = '附件安装'
                       AND DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
                       AND pnp.plan_date >= %s AND pnp.plan_date < %s
-                """, (month, month_start, month_end))
+                """
+                params = [month, month_start, month_end]
+                if big_area_person:
+                    sql += " AND p.big_area_person = %s"
+                    params.append(big_area_person)
+                cur.execute(sql, params)
             else:
-                cur.execute("""
+                sql = """
                     SELECT pnp.id, pnp.project_id, pnp.process_name, pnp.plan_date, pnp.plan_qty,
                            p.delivery_person
                     FROM process_node_plans pnp
                     JOIN projects p ON pnp.project_id = p.id
                     WHERE pnp.process_name = '附件安装'
                       AND pnp.plan_date >= %s AND pnp.plan_date < %s
-                """, (month_start, month_end))
+                """
+                params = [month_start, month_end]
+                if big_area_person:
+                    sql += " AND p.big_area_person = %s"
+                    params.append(big_area_person)
+                cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 
 
 def get_actuals_by_node_ids(node_ids: list[int]) -> dict:
-    """批量取节点实际进度，返回 {node_plan_id: actual_qty}（消除 N+1）。"""
+    """批量取节点实际进度，返回 {node_plan_id: actual_qty}（消除 N+1）。
+
+    按 900 分片执行 IN 查询，规避 MySQL 单语句占位符上限。
+    """
     if not node_ids:
         return {}
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            fmt = ",".join(["%s"] * len(node_ids))
-            cur.execute(f"""
-                SELECT node_plan_id, actual_qty
-                FROM node_actual_progress
-                WHERE node_plan_id IN ({fmt})
-            """, node_ids)
-            return {int(r["node_plan_id"]): int(r["actual_qty"] or 0) for r in cur.fetchall()}
+            result: dict[int, int] = {}
+            for chunk in _chunked(node_ids):
+                fmt = ",".join(["%s"] * len(chunk))
+                cur.execute(f"""
+                    SELECT node_plan_id, actual_qty
+                    FROM node_actual_progress
+                    WHERE node_plan_id IN ({fmt})
+                """, chunk)
+                for r in cur.fetchall():
+                    result[int(r["node_plan_id"])] = int(r["actual_qty"] or 0)
+            return result
     finally:
         conn.close()
 
 
 def get_delivery_persons_by_projects(project_ids: list[int]) -> dict[int, str]:
-    """批量取项目交付负责人：{project_id: delivery_person}（跳过空负责人）。"""
+    """批量取项目交付负责人：{project_id: delivery_person}（跳过空负责人）。
+
+    按 900 分片执行 IN 查询，规避 MySQL 单语句占位符上限。
+    """
     if not project_ids:
         return {}
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            fmt = ",".join(["%s"] * len(project_ids))
-            cur.execute(f"""
-                SELECT id, delivery_person FROM projects
-                WHERE id IN ({fmt})
-            """, project_ids)
-            return {
-                int(r["id"]): str(r["delivery_person"]).strip()
-                for r in cur.fetchall() if r["delivery_person"]
-            }
+            result: dict[int, str] = {}
+            for chunk in _chunked(project_ids):
+                fmt = ",".join(["%s"] * len(chunk))
+                cur.execute(f"""
+                    SELECT id, delivery_person FROM projects
+                    WHERE id IN ({fmt})
+                """, chunk)
+                for r in cur.fetchall():
+                    if r["delivery_person"]:
+                        result[int(r["id"])] = str(r["delivery_person"]).strip()
+            return result
     finally:
         conn.close()
 
 
-def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: str) -> list[dict]:
-    """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。"""
+def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: str,
+                                      big_area_person: str | None = None) -> list[dict]:
+    """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。
+
+    big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
+            sql = """
                 SELECT n.id, n.project_id, n.process_name, n.plan_date, n.plan_qty,
                        p.project_name, p.machine_type, p.factory_name
                 FROM process_node_plans n
                 JOIN projects p ON p.id = n.project_id
                 WHERE p.delivery_person = %s
                   AND n.plan_date >= %s AND n.plan_date < %s
-                ORDER BY p.id, n.process_order, n.plan_date
-            """, (person, month_start, month_end))
+            """
+            params = [person, month_start, month_end]
+            if big_area_person:
+                sql += " AND p.big_area_person = %s"
+                params.append(big_area_person)
+            sql += " ORDER BY p.id, n.process_order, n.plan_date"
+            cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# ============================================================
+# 用户表（v5.0：大区行级数据隔离）
+# users.username = 大区名（与 Excel 严格一致）；admin 的 big_area_name 为空
+# ============================================================
+
+def upsert_user(username: str, password_hash: str, role: str,
+                big_area_name: str = '', status: str = 'active') -> int:
+    """插入或更新用户（唯一键 username）。
+
+    已存在时仅更新 big_area_name 与 status='active'（保留原密码哈希，不重置）。
+    返回用户 id。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO users (username, password_hash, role, big_area_name, status)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    big_area_name = VALUES(big_area_name),
+                    status = 'active'
+            """, (username, password_hash, role, big_area_name, status))
+            conn.commit()
+            cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
+            row = cursor.fetchone()
+            return int(row['id']) if row else 0
+    finally:
+        conn.close()
+
+
+def get_user_by_username(username: str) -> Optional[dict]:
+    """按用户名查询用户（不存在返回 None）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_user_by_id(uid: int) -> Optional[dict]:
+    """按 id 查询用户（不存在返回 None）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM users WHERE id = %s", (uid,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
     finally:
         conn.close()
 

@@ -195,7 +195,6 @@ def auto_detect_mapping(excel_headers: list[str]) -> dict[str, str]:
         ],
     }
 
-    headers = [str(h).strip() for h in excel_headers]
     mapping = {}
 
     # 业务专属精确别名（优先级最高，先于通用关键词）
@@ -262,8 +261,6 @@ def auto_detect_mapping(excel_headers: list[str]) -> dict[str, str]:
         if best_field:
             mapping[header] = best_field
             matched_fields.add(best_field)
-
-    return mapping
 
     return mapping
 

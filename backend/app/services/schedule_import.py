@@ -14,9 +14,9 @@ Excel 预期格式（第一个 sheet，header=None 逐行读取）：
 
 解析规则：
 - 自动跳过标题/说明行（首行或前几行含「编号/工序/第」等字样，且在工序名行之前）。
-- 定位「工序名行」：该行含 钢板到货/法兰到货 等 9 个排产工序名之一。
+- 定位「工序名行」：该行含 钢板到货/法兰到货 等 11 个排产工序名之一。
 - 数据行：首列（或含「套」的列）为套序号（如「第1套」）；
-  后续 9 列按 SCHEDULE_PROCESS_NAMES 顺序对应各工序计划完成日期。
+  后续 11 列（含新增环缝 / 门框焊接）按 SCHEDULE_PROCESS_NAMES 顺序对应各工序计划完成日期。
 - 单元格非空且可被 pd.to_datetime 解析 → 记为 (process_name, plan_date)；空/非日期跳过并记错误。
 - 输出聚合：按 (process_name, plan_date) 分组，plan_qty = 套数计数；
   process_order = SCHEDULE_PROCESS_NAMES.index(process_name) + 1。
@@ -129,7 +129,7 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
     if header_row_idx is None:
         return [], [
             "未找到工序名行：需包含排产工序名（钢板到货/法兰到货/下料/卷制/"
-            "组对/黑塔/防腐/附件安装/具备验收）"
+            "组对/环缝/门框焊接/黑塔/防腐/附件安装/具备验收）"
         ]
 
     header_vals = rows[header_row_idx]

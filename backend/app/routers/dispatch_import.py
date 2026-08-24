@@ -8,9 +8,10 @@
 import os
 import tempfile
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 
 from ..core import db
+from ..core.deps import require_admin
 from ..services.dispatch_import import parse_and_import
 
 router = APIRouter(prefix="/api/projects", tags=["dispatch-import"])
@@ -20,8 +21,8 @@ ALLOWED_EXT = (".xlsx", ".xls")
 
 
 @router.post("/import-dispatch")
-async def import_dispatch(file: UploadFile = File(...)):
-    """上传月度调度令 Excel → 解析 → 批量建项目。"""
+async def import_dispatch(file: UploadFile = File(...), user: dict = Depends(require_admin)):
+    """上传月度调度令 Excel → 解析 → 批量建项目。（仅 admin）"""
     filename = file.filename or ""
     if not filename.lower().endswith(ALLOWED_EXT):
         raise HTTPException(status_code=400, detail="仅支持 .xlsx / .xls 文件")

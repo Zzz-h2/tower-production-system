@@ -2,8 +2,9 @@
 """出品排名接口。"""
 from datetime import date
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from ..core.deps import get_current_user, get_scope_big_area
 from ..services.ranking_service import get_production_ranking, get_production_ranking_detail
 
 router = APIRouter(prefix="/api", tags=["ranking"])
@@ -22,14 +23,20 @@ def _valid_month(month: str) -> str:
 
 
 @router.get("/ranking/production")
-def api_production_ranking(month: str = None):
-    """出品排名：按交付负责人聚合当月『附件安装』出品并排名。"""
-    return get_production_ranking(_valid_month(month))
+def api_production_ranking(month: str = None, user: dict = Depends(get_current_user)):
+    """出品排名：按交付负责人聚合当月『附件安装』出品并排名。
+
+    行级隔离：big_area 用户仅统计本大区项目；admin 全量。
+    """
+    return get_production_ranking(_valid_month(month), big_area_person=get_scope_big_area(user))
 
 
 @router.get("/ranking/production/detail")
-def api_production_ranking_detail(month: str = None, person: str = None):
-    """某负责人当月逾期/提前项目清单。"""
+def api_production_ranking_detail(month: str = None, person: str = None,
+                                  user: dict = Depends(get_current_user)):
+    """某负责人当月逾期/提前项目清单。行级隔离：big_area 用户仅本大区；admin 全量。"""
     if not person or not str(person).strip():
         raise HTTPException(status_code=400, detail="缺少 person 参数")
-    return get_production_ranking_detail(_valid_month(month), str(person).strip())
+    return get_production_ranking_detail(
+        _valid_month(month), str(person).strip(), big_area_person=get_scope_big_area(user)
+    )

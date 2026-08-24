@@ -3,10 +3,11 @@
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..core import db
+from ..core.deps import get_current_user, get_scope_big_area, require_admin, require_project_access
 from ..schemas import ProjectUpdateRequest
 from ..services.node_service import build_overview, build_process_detail, enrich_rows
 
@@ -36,13 +37,19 @@ def list_projects(
     page_size: int = 10,
     month: Optional[str] = None,
     big_area_person: Optional[str] = None,
+    user: dict = Depends(get_current_user),
 ):
-    """项目列表（总览页）：支持模糊搜索、负责人/大区负责人/状态筛选、调度令月份过滤、服务端分页。"""
+    """项目列表（总览页）：支持模糊搜索、负责人/大区负责人/状态筛选、调度令月份过滤、服务端分页。
+
+    行级隔离：big_area 用户强制只看本大区（忽略前端 big_area_person 参数）；admin 透传前端筛选。
+    """
+    scope = get_scope_big_area(user)
+    eff = scope if user["role"] == "big_area" else big_area_person
     page = max(1, int(page))
     page_size = max(1, int(page_size))
     skip = (page - 1) * page_size
     items, total = db.get_projects_filtered(
-        keyword, person, status, skip, page_size, month, big_area_person
+        keyword, person, status, skip, page_size, month, eff
     )
     # 兜底字段，保证前端渲染不报错
     for p in items:
@@ -52,12 +59,14 @@ def list_projects(
 
 
 @router.get("/export")
-def export_projects(month: Optional[str] = None):
+def export_projects(month: Optional[str] = None, user: dict = Depends(get_current_user)):
     """导出指定调度令月份计划完成情况（全量，不分页）。
 
     口径与列表/KPI 完全一致：按 projects.created_at 年月过滤，进度为附件安装实时完成率。
+    行级隔离：big_area 用户导出仅本大区；admin 导出全量。
     """
-    items, total = db.get_projects_filtered(None, None, None, 0, 100000, month)
+    scope = get_scope_big_area(user)
+    items, total = db.get_projects_filtered(None, None, None, 0, 100000, month, scope)
     result = []
     for p in items:
         result.append({
@@ -74,8 +83,8 @@ def export_projects(month: Optional[str] = None):
 
 
 @router.post("")
-def create_project(payload: ProjectCreate):
-    """手动添加项目：四字段唯一键查重；新项目自动初始化工序 + 风险。"""
+def create_project(payload: ProjectCreate, user: dict = Depends(require_admin)):
+    """手动添加项目：四字段唯一键查重；新项目自动初始化工序 + 风险。（仅 admin）"""
     data = payload.model_dump()
 
     # 1) 5 必填非空校验
@@ -121,23 +130,33 @@ def create_project(payload: ProjectCreate):
 
 
 @router.get("/persons")
-def list_persons():
-    """返回所有交付负责人（去重排序，供主页面下拉框使用；与筛选结果隔离）。"""
-    return {"items": db.get_all_persons()}
+def list_persons(user: dict = Depends(get_current_user)):
+    """返回所有交付负责人（去重排序，供主页面下拉框使用；与筛选结果隔离）。
+
+    行级隔离：big_area 用户仅返回本大区的负责人；admin 返回全量。
+    """
+    return {"items": db.get_all_persons(big_area_person=get_scope_big_area(user))}
 
 
 @router.get("/big-area-persons")
-def list_big_area_persons():
-    """返回所有大区负责人（去重排序，供主页面下拉框使用；与筛选结果隔离）。"""
+def list_big_area_persons(user: dict = Depends(get_current_user)):
+    """返回所有大区负责人（去重排序，供主页面下拉框使用；与筛选结果隔离）。
+
+    行级隔离：big_area 用户仅返回自己所属大区；admin 返回全量。
+    """
+    if user.get("role") == "big_area":
+        name = user.get("big_area_name")
+        return {"items": [name] if name else []}
     return {"items": db.get_all_big_area_persons()}
 
 
 @router.get("/{pid}")
-def get_project(pid: int):
-    """项目详情（基本信息 / 进度 / 风险）。"""
+def get_project(pid: int, user: dict = Depends(get_current_user)):
+    """项目详情（基本信息 / 进度 / 风险）。行级隔离：非本大区项目返回 404 防探测。"""
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
 
     # 风险等级：基于 node_plans + node_actuals 实时判定
     plans = db.get_node_plans(pid)
@@ -168,21 +187,23 @@ def get_project(pid: int):
 
 
 @router.delete("/{pid}/node-plans")
-def clear_node_plans(pid: int):
-    """清空项目的全部节点计划（用于重置脏数据/历史测试数据）。"""
+def clear_node_plans(pid: int, user: dict = Depends(require_admin)):
+    """清空项目的全部节点计划（用于重置脏数据/历史测试数据）。（仅 admin）"""
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
     db.insert_node_plans(pid, [])  # 传入空列表会清空该项目所有节点计划
     return {"message": "✅ 已清空该项目的节点计划"}
 
 
 @router.put("/{pid}")
-def update_project(pid: int, payload: ProjectUpdateRequest):
-    """编辑项目信息（仅更新提交的字段；空项目名/非法整数返回 400）。"""
+def update_project(pid: int, payload: ProjectUpdateRequest, user: dict = Depends(require_admin)):
+    """编辑项目信息（仅更新提交的字段；空项目名/非法整数返回 400）。（仅 admin，归属兜底）"""
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
 
     data = {k: v for k, v in payload.model_dump().items() if v is not None}
     if "project_name" in data and not str(data["project_name"]).strip():
@@ -204,37 +225,43 @@ def update_project(pid: int, payload: ProjectUpdateRequest):
 
 
 @router.delete("/{pid}")
-def delete_project(pid: int):
-    """删除项目（含工序/异常/里程碑等关联数据，行为与原版一致）。"""
+def delete_project(pid: int, user: dict = Depends(require_admin)):
+    """删除项目（含工序/异常/里程碑等关联数据，行为与原版一致）。（仅 admin，归属兜底）"""
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
     db.delete_project(pid)
     return {"message": f"✅ 项目「{project['project_name']}」已删除", "id": pid}
 
 
 @router.get("/{pid}/node-plans")
-def get_node_plans_overview(pid: int):
-    """节点计划总览（指标 / 工序卡片 / 时间轴 / 可见工序）。"""
+def get_node_plans_overview(pid: int, user: dict = Depends(get_current_user)):
+    """节点计划总览（指标 / 工序卡片 / 时间轴 / 可见工序）。行级隔离：非本大区项目返回 404。"""
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
     plans = db.get_node_plans(pid)
     actuals = db.get_node_actuals(pid)
     return build_overview(pid, plans, actuals)
 
 
 @router.get("/{pid}/nodes/{process_name}")
-def get_process_nodes(pid: int, process_name: str):
-    """某工序节点列表（四分组 + 富化行）。"""
+def get_process_nodes(pid: int, process_name: str, user: dict = Depends(get_current_user)):
+    """某工序节点列表（四分组 + 富化行）。行级隔离：非本大区项目返回 404。"""
+    project = db.get_project_by_id(pid)
+    require_project_access(project, user)
     plans = db.get_node_plans(pid)
     actuals = db.get_node_actuals(pid)
     return build_process_detail(process_name, plans, actuals)
 
 
 @router.get("/{pid}/alerts")
-def get_alerts(pid: int):
-    """节点预警列表（逾期未完成 / 部分完成 / 进行中 重点节点）。"""
+def get_alerts(pid: int, user: dict = Depends(get_current_user)):
+    """节点预警列表（逾期未完成 / 部分完成 / 进行中 重点节点）。行级隔离：非本大区项目返回 404。"""
+    project = db.get_project_by_id(pid)
+    require_project_access(project, user)
     plans = db.get_node_plans(pid)
     actuals = db.get_node_actuals(pid)
     from ..services.node_service import enrich_rows
@@ -259,16 +286,16 @@ def get_alerts(pid: int):
 
 
 @router.get("/{pid}/milestone-backward")
-def milestone_backward(pid: int, deadline: str = None):
-    """里程碑倒排：给定交付截止日，返回倒排计划与偏差分析。"""
+def milestone_backward(pid: int, deadline: str = None, user: dict = Depends(get_current_user)):
+    """里程碑倒排：给定交付截止日，返回倒排计划与偏差分析。行级隔离：非本大区项目返回 404。"""
     if not deadline:
         raise HTTPException(status_code=400, detail="缺少 deadline 参数")
     try:
         dl = date.fromisoformat(deadline)
     except ValueError:
         raise HTTPException(status_code=400, detail="deadline 格式应为 YYYY-MM-DD")
-    if not db.get_project_by_id(pid):
-        raise HTTPException(status_code=404, detail="项目不存在")
+    project = db.get_project_by_id(pid)
+    require_project_access(project, user)
     from ..services import milestone as milestone_svc
     return milestone_svc.build_milestone_backward(pid, dl)
 
@@ -280,14 +307,15 @@ class MilestoneBackwardRequest(BaseModel):
 
 
 @router.post("/{pid}/milestone-backward")
-def milestone_backward_with_durations(pid: int, req: MilestoneBackwardRequest):
-    """里程碑倒排（支持按工序自定义工期）：delivery_deadline + custom_durations。"""
+def milestone_backward_with_durations(pid: int, req: MilestoneBackwardRequest,
+                                      user: dict = Depends(get_current_user)):
+    """里程碑倒排（支持按工序自定义工期）：delivery_deadline + custom_durations。行级隔离。"""
     try:
         dl = date.fromisoformat(req.delivery_deadline)
     except ValueError:
         raise HTTPException(status_code=400, detail="delivery_deadline 格式应为 YYYY-MM-DD")
-    if not db.get_project_by_id(pid):
-        raise HTTPException(status_code=404, detail="项目不存在")
+    project = db.get_project_by_id(pid)
+    require_project_access(project, user)
     if req.custom_durations:
         for name, days in req.custom_durations.items():
             if not isinstance(days, int) or days < 1 or days > 365:

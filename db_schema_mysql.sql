@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS projects (
     created_by          VARCHAR(255) DEFAULT 'system',
     updated_by          VARCHAR(255) DEFAULT 'system',
 
+    -- 唯一键提醒：machine_type 默认 ''。若某次导入未提供机型列，则所有同(名称+厂家+负责人)
+    -- 的记录都会落到 machine_type='' 而互相判重（upsert 覆盖 / 手动添加 409）。
+    -- 导入前请确保机型列有值，或明确该(名称+厂家+负责人)组合本身唯一。
     UNIQUE KEY uk_projects_4fields (project_name, factory_name, delivery_person, machine_type),
     CONSTRAINT chk_projects_risk CHECK (risk_level IN ('normal', 'warning', 'delayed')),
     CONSTRAINT chk_projects_status CHECK (status IN ('in_progress', 'completed'))
@@ -122,7 +125,8 @@ CREATE TABLE IF NOT EXISTS process_node_plans (
     process_order   INT NOT NULL DEFAULT 0,
     plan_date       DATE NOT NULL,
     plan_qty        INT NOT NULL DEFAULT 1,
-    UNIQUE KEY uk_proj_proc_date (project_id, process_name, plan_date)
+    UNIQUE KEY uk_proj_proc_date (project_id, process_name, plan_date),
+    CONSTRAINT fk_pnp_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 
@@ -138,7 +142,8 @@ CREATE TABLE IF NOT EXISTS node_actual_progress (
     actual_qty      INT NOT NULL DEFAULT 0,
     report_date     DATE NOT NULL,
     updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_proj_node (project_id, node_plan_id)
+    UNIQUE KEY uk_proj_node (project_id, node_plan_id),
+    CONSTRAINT fk_nap_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 
@@ -162,7 +167,28 @@ CREATE TABLE IF NOT EXISTS node_exceptions (
   closed_at DATETIME DEFAULT NULL,
   INDEX idx_project_id (project_id),
   INDEX idx_node_id (node_id),
-  INDEX idx_status (status)
+  INDEX idx_status (status),
+  CONSTRAINT fk_nex_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ============================================================
+-- 表10：users（系统用户表，v5.0 大区行级数据隔离新增）
+-- username = 大区名（与 Excel 严格一致）；admin 的 big_area_name 为空
+-- 初始账号由 backend/scripts/seed_users.py upsert（不在此处插入）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS users (
+    id                  INT PRIMARY KEY AUTO_INCREMENT,
+    username            VARCHAR(64) NOT NULL,
+    password_hash       VARCHAR(255) NOT NULL,
+    role                VARCHAR(20) DEFAULT 'big_area',
+    big_area_name       VARCHAR(191) DEFAULT '',
+    status              VARCHAR(20) DEFAULT 'active',
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uk_users_username (username),
+    KEY idx_users_role (role)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 

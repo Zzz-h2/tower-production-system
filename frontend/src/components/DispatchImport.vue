@@ -54,7 +54,7 @@ async function doUpload({ file }) {
     const res = await importDispatch(file)
     result.value = res
     ElMessage.success(res.message || '导入完成')
-    emit('imported')   // 父组件刷新列表与看板
+    emit('imported', res)   // 父组件刷新列表与看板；响应透传（含 accounts_ready 时提示开通账号）
   } catch (e) {
     // 错误提示已由 axios 拦截器统一处理
   } finally {

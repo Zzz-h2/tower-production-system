@@ -120,11 +120,12 @@ const result = ref({ estimated_delivery: '', lag_days: 0, has_plan: true })
 // 默认工序工期（顺序与后端 MILESTONE_PROCESSES 一致；"黑塔"为后端标准名）
 const DEFAULT_DURATIONS = {
   '钢板到货': 1, '法兰到货': 1, '下料': 2, '卷制': 3, '组对': 2,
+  '环缝': 2, '门框焊接': 1,
   '黑塔': 2, '防腐': 2, '附件安装': 3, '具备验收': 1,
 }
 const PROCESS_ORDER = [
   '钢板到货', '法兰到货', '下料', '卷制', '组对',
-  '黑塔', '防腐', '附件安装', '具备验收',
+  '环缝', '门框焊接', '黑塔', '防腐', '附件安装', '具备验收',
 ]
 
 // localStorage 按项目隔离

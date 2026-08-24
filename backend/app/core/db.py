@@ -50,10 +50,11 @@ def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
     return getattr(_fn, "__wrapped__", _fn)(project_ids)
 
 
-def get_attachment_plans_by_month(month_start: str, month_end: str, month: str | None = None) -> list[dict]:
+def get_attachment_plans_by_month(month_start: str, month_end: str, month: str | None = None,
+                                  big_area_person: str | None = None) -> list[dict]:
     """取某月内所有『附件安装』工序节点计划（出品排名统计源；month 约束项目 created_at 月份）。"""
     from database import get_attachment_plans_by_month as _fn
-    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, month)
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, month, big_area_person)
 
 
 def get_actuals_by_node_ids(node_ids: list[int]) -> dict:
@@ -68,10 +69,11 @@ def get_delivery_persons_by_projects(project_ids: list[int]) -> dict[int, str]:
     return getattr(_fn, "__wrapped__", _fn)(project_ids)
 
 
-def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: str) -> list[dict]:
+def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: str,
+                                      big_area_person: str | None = None) -> list[dict]:
     """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。"""
     from database import get_all_plans_by_month_and_person as _fn
-    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, person)
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, person, big_area_person)
 
 
 def insert_node_plans(project_id: int, plans: list[dict]) -> int:
@@ -89,24 +91,32 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
 
 # ---------- 项目（复用于项目列表/详情） ----------
 
-def get_all_projects(status_filter=None) -> list[dict]:
+def get_all_projects(status_filter=None, big_area_person: str | None = None) -> list[dict]:
     from database import get_all_projects as _fn
-    return getattr(_fn, "__wrapped__", _fn)(status_filter)
+    return getattr(_fn, "__wrapped__", _fn)(status_filter, big_area_person)
 
 
 def get_project_by_id(project_id: int) -> dict | None:
     from database import get_project_by_id as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_id)
-def get_all_persons() -> list[str]:
-    """获取所有项目的交付负责人（去重、非空、排序）。"""
+def get_all_persons(big_area_person: str | None = None) -> list[str]:
+    """获取所有项目的交付负责人（去重、非空、排序）。
+
+    big_area_person 非 None 时仅返回该大区下的负责人（大区行级隔离）。
+    """
     conn = get_connection()
     try:
+        sql = (
+            "SELECT DISTINCT delivery_person FROM projects "
+            "WHERE delivery_person IS NOT NULL AND delivery_person != ''"
+        )
+        params = []
+        if big_area_person:
+            sql += " AND big_area_person = %s"
+            params.append(big_area_person)
+        sql += " ORDER BY delivery_person"
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT DISTINCT delivery_person FROM projects "
-                "WHERE delivery_person IS NOT NULL AND delivery_person != '' "
-                "ORDER BY delivery_person"
-            )
+            cur.execute(sql, params)
             return [row["delivery_person"] for row in cur.fetchall()]
     finally:
         conn.close()
@@ -118,15 +128,17 @@ def get_all_big_area_persons() -> list[str]:
     return getattr(_fn, "__wrapped__", _fn)()
 
 
-def get_dashboard_stats(month: str | None = None) -> dict:
+def get_dashboard_stats(month: str | None = None, big_area_person: str | None = None) -> dict:
     """首页总览统计：与项目列表风险口径完全一致（复用 get_projects_filtered 实时计算）。
 
     不再基于 processes 表旧 risk_level 统计——直接复用项目列表的
     node_plans + node_actuals 实时风险判定结果，保证两者 100% 一致。
     month: 调度令月份（created_at 年月），透传给列表过滤。
+    big_area_person: 大区负责人（大区行级隔离；admin 传 None 看全量）。
     """
     items, _ = get_projects_filtered(
-        keyword="", person="", status="", skip=0, limit=100000, month=month
+        keyword="", person="", status="", skip=0, limit=100000, month=month,
+        big_area_person=big_area_person,
     )
     return {
         "total_projects": len(items),
@@ -170,8 +182,8 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     month: 调度令月份（projects.created_at 年月，如 '2026-08'），三页联动共享口径。
     big_area_person: 大区负责人 精确相等过滤。
     """
-    # status 不再作为生命周期条件下推，统一取全量项目
-    rows = get_all_projects(None)
+    # status 不再作为生命周期条件下推，统一取全量项目（big_area_person 下推 SQL 做行级隔离）
+    rows = get_all_projects(None, big_area_person)
 
     # ★ 按调度令月份（created_at 年月）过滤
     if month:
@@ -357,6 +369,27 @@ def get_node_exceptions_by_node(node_id: int) -> list[dict]:
             return [row for row in cur.fetchall()]
     finally:
         conn.close()
+
+
+# ---------- 用户（认证：大区行级隔离 v5.0） ----------
+
+def upsert_user(username: str, password_hash: str, role: str,
+                big_area_name: str = '', status: str = 'active') -> int:
+    """插入或更新用户（唯一键 username；已存在保留原密码哈希），返回用户 id。"""
+    from database import upsert_user as _fn
+    return getattr(_fn, "__wrapped__", _fn)(username, password_hash, role, big_area_name, status)
+
+
+def get_user_by_username(username: str) -> dict | None:
+    """按用户名查询用户（不存在返回 None）。"""
+    from database import get_user_by_username as _fn
+    return getattr(_fn, "__wrapped__", _fn)(username)
+
+
+def get_user_by_id(uid: int) -> dict | None:
+    """按 id 查询用户（不存在返回 None）。"""
+    from database import get_user_by_id as _fn
+    return getattr(_fn, "__wrapped__", _fn)(uid)
 
 
 def get_closed_exceptions_by_project(project_id: int) -> list[dict]:
