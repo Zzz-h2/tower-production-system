@@ -19,6 +19,7 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true, // 监听 0.0.0.0，允许局域网其他机器访问（开发联调用）
+    strictPort: true, // 被占用直接报错，绝不静默漂到 5174（避免"地址变了/还是旧代码"的错觉）
     proxy: {
       '/api': {
         target: 'http://localhost:8000',
