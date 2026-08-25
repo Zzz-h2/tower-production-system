@@ -233,27 +233,25 @@ def validate_today_quota(process_name: str, plans_all: list[dict], actuals: dict
                          target_nodes: list[dict], input_values: dict) -> Optional[str]:
     """填报前序联动校验（适用于 today/overdue/future 三组，节点级硬卡）。
 
-    两道硬卡（任一未过即报首个错，前端整批回滚）：
-      1) 前一工序未开始：紧邻的上一道工序截至 p.plan_date 至少有一个节点 actual_qty>0
-         （防止"钢板到货有 4 套就以为能直接跳到黑塔填 4 套"这种累计假象越过中间工序）
-      2) 累计联动上限：p 自身 plan_date 之前所有前序工序的累计实际 ≥ p 拟填报 qty
-         （防超量填报，是原有逻辑，保留作为软上限）
+    规则：
+      - 钢板到货(0)、法兰到货(1)：原材料到货工序，不设任何数量/前序限制。
+      - 下料(2) 及之后：紧邻前序必须已开工（硬卡 1）；可填报量 ≤ 钢板到货 实际累计（硬卡 2）。
 
-    节点级逐一校验（per-node），非"整批共用一个累计"——避免 future 组里被
-    "很后期前序节点提前填报"伪放行，也避免 overdue 组后节点被早期累计偶然满足。
+    节点级逐一校验（per-node）。错误文案统一保留「累计实际仅 M 套」句式，
+    供前端 parseQuotaMsg 解析成「拟报 N 套 / 前序仅 M 套」的旧版量化格式。
     """
     proc_idx = SCHEDULE_PROCESS_NAMES.index(process_name) if process_name in SCHEDULE_PROCESS_NAMES else -1
     if proc_idx < 0:
-        # 工序名未配置：不静默跳过（防纵缝/组对这类命名漂移导致校验被整体绕过），
-        # 直接报错让配置漂移显式可见。
         return (
             f"【配置缺失】工序「{process_name}」未在排产顺序配置（SCHEDULE_PROCESS_NAMES）中，"
             f"无法执行前序联动校验。请联系管理员在 backend/app/core/config.py 中补齐该工序名后重新部署。"
         )
-    if proc_idx == 0:
-        return None  # 第一道工序：不限制联动
+    # 钢板到货(0)、法兰到货(1)：原材料到货，无数量限制
+    if proc_idx <= 1:
+        return None
+
     prev_proc_name = SCHEDULE_PROCESS_NAMES[proc_idx - 1]  # 紧邻的前一工序
-    prev_procs = set(SCHEDULE_PROCESS_NAMES[:proc_idx])
+    steel_name = SCHEDULE_PROCESS_NAMES[0]                 # 钢板到货（下游数量主约束）
 
     for p in target_nodes:
         target_pd = str(p["plan_date"])[:10]
@@ -271,33 +269,21 @@ def validate_today_quota(process_name: str, plans_all: list[dict], actuals: dict
         if not prev_started:
             return (
                 f"【前一工序未开始】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
-                f"但紧邻的前一工序「{prev_proc_name}」截至 {target_pd} 尚未开始实际进度。"
-                f"请先完成「{prev_proc_name}」的进度填报后再来提交。"
+                f"但紧邻的前一工序「{prev_proc_name}」截至 {target_pd} 尚未开始实际进度，"
+                f"前序累计实际仅 0 套。请先完成「{prev_proc_name}」的进度填报后再来提交。"
             )
 
-        # 硬卡 2（保留原累计联动上限）：前序所有工序累计实际 ≥ 拟填报 qty
-        prev_total_node = sum(
-            int(actuals.get(pn["id"], {}).get("actual_qty", 0) or 0)
-            for pn in plans_all
-            if pn["process_name"] in prev_procs
-            and str(pn["plan_date"])[:10] <= target_pd
+        # 硬卡 2：可填报量 ≤ 钢板到货 实际累计（截至 target_pd）
+        steel_total = sum(
+            int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0)
+            for pl in plans_all
+            if pl["process_name"] == steel_name
+            and str(pl["plan_date"])[:10] <= target_pd
         )
-        if qty > prev_total_node:
-            # 前序中有实际进度（截至 target_pd）的工序名，按工序顺序排，供文案提示
-            prev_names_sorted = sorted(prev_procs, key=lambda n: SCHEDULE_PROCESS_NAMES.index(n))
-            done_prev = [
-                pn for pn in prev_names_sorted
-                if any(
-                    pl["process_name"] == pn
-                    and int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0) > 0
-                    and str(pl["plan_date"])[:10] <= target_pd
-                    for pl in plans_all
-                )
-            ]
-            prev_summary = "、".join(done_prev) or "前序工序"
+        if qty > steel_total:
             return (
                 f"【数量校验未通过】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
-                f"但截至 {target_pd} 前序工序（{prev_summary}）累计实际仅 {prev_total_node} 套。"
-                f"请先完成前序工序的进度填报后再来提交。"
+                f"但截至 {target_pd} 钢板到货累计实际仅 {steel_total} 套。"
+                f"请先完成钢板到货的进度填报后再来提交。"
             )
     return None

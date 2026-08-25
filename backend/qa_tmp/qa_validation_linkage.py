@@ -84,6 +84,7 @@ err = validate_today_quota(
 )
 results.append(assert_match("黑塔 应被「前一工序未开始 门框焊接」拒绝", err, "前一工序未开始"))
 results.append(assert_match("错误信息应点名「门框焊接」", err, "门框焊接"))
+results.append(assert_match("文案应含旧版量化 前序累计实际仅 0 套", err, "前序累计实际仅 0 套"))
 
 # 场景 B —— 门框焊接开工后，黑塔填 3 应通过
 print("\n[B] 门框焊接已开工后，黑塔填报 3")
@@ -119,6 +120,38 @@ err = validate_today_quota(
     [{"id": 102, "plan_date": "2026-08-25"}], {102: 99},
 )
 results.append(assert_match("钢板到货 不限制联动", err, None))
+
+# 场景 F —— 法兰到货（idx 1）同样不做任何限制（原材料到货）
+print("\n[F] 第二道工序 法兰到货")
+err = validate_today_quota(
+    "法兰到货", plans, {},
+    [{"id": 202, "plan_date": "2026-08-28"}], {202: 99},
+)
+results.append(assert_match("法兰到货 不限制联动", err, None))
+
+# 场景 G —— 下料硬卡2：拟填报超过 钢板到货 实际累计（截止该日钢板=2+1=3，报5）
+print("\n[G] 下料拟填报 5 > 钢板到货实际累计 3")
+plans_g = [
+    {"id": 1, "process_name": "钢板到货", "plan_date": "2026-08-17", "plan_qty": 2},
+    {"id": 2, "process_name": "钢板到货", "plan_date": "2026-08-25", "plan_qty": 2},
+    {"id": 3, "process_name": "法兰到货", "plan_date": "2026-08-20", "plan_qty": 2},
+    {"id": 4, "process_name": "下料", "plan_date": "2026-08-30", "plan_qty": 5},
+]
+actuals_g = {1: {"actual_qty": 2}, 2: {"actual_qty": 1}, 3: {"actual_qty": 1}}
+err = validate_today_quota(
+    "下料", plans_g, actuals_g,
+    [{"id": 4, "plan_date": "2026-08-30"}], {4: 5},
+)
+results.append(assert_match("下料报5 应被「数量校验未通过」拒绝", err, "数量校验未通过"))
+results.append(assert_match("文案应点名「钢板到货累计实际仅 3 套」", err, "钢板到货累计实际仅 3 套"))
+
+# 场景 H —— 下料硬卡2：拟填报 3 = 钢板到货实际累计 3 → 等于上限允许
+print("\n[H] 下料拟填报 3 = 钢板到货实际累计 3，应通过")
+err = validate_today_quota(
+    "下料", plans_g, actuals_g,
+    [{"id": 4, "plan_date": "2026-08-30"}], {4: 3},
+)
+results.append(assert_match("下料报3 等于上限应通过", err, None))
 
 # 汇总
 passed = sum(results)
