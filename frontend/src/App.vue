@@ -20,14 +20,21 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from './store/auth'
+import { useProjectStore } from './store/project'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const projectStore = useProjectStore()
 const showHeader = computed(() => route.name !== 'login')
+
+// 登录态下启动即拉取排产工序配置（单一来源，供里程碑设置等使用）
+onMounted(() => {
+  if (auth.isLoggedIn) projectStore.loadScheduleConfig()
+})
 
 const onLogout = () => {
   auth.logout()

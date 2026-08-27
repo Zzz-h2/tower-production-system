@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { fetchScheduleConfig } from '../api/milestone'
 import {
   fetchProjects,
   fetchProject,
@@ -18,6 +19,13 @@ export const useProjectStore = defineStore('project', {
 
     allPersons: [],       // 全量交付负责人（下拉框数据源，与筛选结果隔离）
     allBigAreaPersons: [], // 全量大区负责人（下拉框数据源，与筛选结果隔离）
+
+    // 排产工序配置（启动时拉取一次，前端唯一来源；不再手工复制 11 道工序/工期）
+    scheduleConfig: {
+      loaded: false,
+      processNames: [],
+      defaultDurations: {},
+    },
 
     lastNodeSavedAt: 0,   // 节点填报保存时间戳，供 AlertList 监听实时刷新
 
@@ -103,7 +111,7 @@ export const useProjectStore = defineStore('project', {
         const res = await fetchAllPersons()
         this.allPersons = res.items || []
       } catch (err) {
-        console.error('加载交付负责人失败', err)
+        // 错误已由 axios 拦截器统一提示；兜底置空
         this.allPersons = []
       }
     },
@@ -114,7 +122,7 @@ export const useProjectStore = defineStore('project', {
         const res = await fetchBigAreaPersons()
         this.allBigAreaPersons = res.items || []
       } catch (err) {
-        console.error('加载大区负责人失败', err)
+        // 错误已由 axios 拦截器统一提示；兜底置空
         this.allBigAreaPersons = []
       }
     },
@@ -126,10 +134,19 @@ export const useProjectStore = defineStore('project', {
       return created
     },
 
-    /** 重置筛选条件与页码。 */
-    resetFilters() {
-      this.filters = { keyword: '', person: '', bigAreaPerson: '', status: 'all' }
-      this.pagination.page = 1
+    /** 拉取排产工序配置（工序顺序 + 标准工期），仅拉取一次。 */
+    async loadScheduleConfig() {
+      if (this.scheduleConfig.loaded) return
+      try {
+        const res = await fetchScheduleConfig()
+        this.scheduleConfig = {
+          loaded: true,
+          processNames: res?.process_names || [],
+          defaultDurations: res?.default_durations || {},
+        }
+      } catch (err) {
+        // 错误已由 axios 拦截器统一提示；保持空配置
+      }
     },
 
     async loadDetail(pid) {

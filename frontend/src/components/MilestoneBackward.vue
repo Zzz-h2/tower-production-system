@@ -83,7 +83,7 @@
         <el-table-column label="操作" width="90">
           <template #default="{ row }">
             <el-button
-              v-if="settingForm[row.name] !== DEFAULT_DURATIONS[row.name]"
+              v-if="settingForm[row.name] !== defaultDurations[row.name]"
               type="primary"
               link
               size="small"
@@ -106,10 +106,11 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { Refresh, Setting } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { fetchMilestoneBackward } from '../api/milestone'
+import { useProjectStore } from '../store/project'
 
 const props = defineProps({ pid: { type: String, required: true } })
 const deadline = ref('')
@@ -117,45 +118,41 @@ const loading = ref(false)
 const rows = ref([])
 const result = ref({ estimated_delivery: '', lag_days: 0, has_plan: true })
 
-// 默认工序工期（顺序与后端 MILESTONE_PROCESSES 一致；"黑塔"为后端标准名）
-const DEFAULT_DURATIONS = {
-  '钢板到货': 1, '法兰到货': 1, '下料': 2, '卷制': 3, '组对': 2,
-  '环缝': 2, '门框焊接': 1,
-  '黑塔': 2, '防腐': 2, '附件安装': 3, '具备验收': 1,
-}
-const PROCESS_ORDER = [
-  '钢板到货', '法兰到货', '下料', '卷制', '组对',
-  '环缝', '门框焊接', '黑塔', '防腐', '附件安装', '具备验收',
-]
+// 工序顺序与默认工期唯一下发自后端 GET /api/config/schedule（store 缓存），不再本地硬编码
+const store = useProjectStore()
+const defaultDurations = computed(() => store.scheduleConfig.defaultDurations)
+const processOrder = computed(() => store.scheduleConfig.processNames)
+onMounted(() => store.loadScheduleConfig())
 
 // localStorage 按项目隔离
 const getStorageKey = (projectId) => `milestone-durations-${projectId}`
 const loadDurations = () => {
+  const base = defaultDurations.value
   try {
     const saved = localStorage.getItem(getStorageKey(props.pid))
-    return saved ? { ...DEFAULT_DURATIONS, ...JSON.parse(saved) } : { ...DEFAULT_DURATIONS }
+    return saved ? { ...base, ...JSON.parse(saved) } : { ...base }
   } catch (e) {
-    return { ...DEFAULT_DURATIONS }
+    return { ...base }
   }
 }
 
 // 设置抽屉
 const settingVisible = ref(false)
 const settingForm = ref({})
-const settingRows = computed(() => PROCESS_ORDER.map((name) => ({ name })))
+const settingRows = computed(() => processOrder.value.map((name) => ({ name })))
 
 function openMilestoneSetting() {
   settingForm.value = loadDurations()
   settingVisible.value = true
 }
 function resetOne(processName) {
-  settingForm.value[processName] = DEFAULT_DURATIONS[processName]
+  settingForm.value[processName] = defaultDurations.value[processName]
 }
 function resetAll() {
-  settingForm.value = { ...DEFAULT_DURATIONS }
+  settingForm.value = { ...defaultDurations.value }
 }
 function saveSetting() {
-  for (const name of PROCESS_ORDER) {
+  for (const name of processOrder.value) {
     const v = settingForm.value[name]
     if (!Number.isInteger(v) || v < 1 || v > 365) {
       ElMessage.warning(`${name} 工期必须是 1~365 的整数`)

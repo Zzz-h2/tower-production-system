@@ -10,15 +10,12 @@ from datetime import date, timedelta
 from fastapi import HTTPException
 
 from ..core import db
+from ..core.config import SCHEDULE_PROCESS_DAYS
 from ..services.node_service import build_overview
 
-# 11 道排产工序及其标准自然日工期（与「排产计划模板.xlsx」表头顺序一致，可按实际调整）
-# 环缝=焊接类 2 天；门框焊接=收口类 1 天
-MILESTONE_PROCESSES = [
-    ("钢板到货", 1), ("法兰到货", 1), ("下料", 2), ("卷制", 3),
-    ("组对", 2), ("环缝", 2), ("门框焊接", 1),
-    ("黑塔", 2), ("防腐", 2), ("附件安装", 3), ("具备验收", 1),
-]
+# 11 道排产工序及其标准自然日工期：单一来源 = config.SCHEDULE_PROCESS_DAYS
+# （顺序与「排产计划模板.xlsx」表头列一致；自定义时可调整 config 后重新部署）
+MILESTONE_PROCESSES = list(SCHEDULE_PROCESS_DAYS.items())
 
 
 def _effective_durations(custom_durations: dict | None) -> dict:
