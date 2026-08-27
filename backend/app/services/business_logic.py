@@ -235,10 +235,15 @@ def validate_today_quota(process_name: str, plans_all: list[dict], actuals: dict
 
     规则：
       - 钢板到货(0)、法兰到货(1)：原材料到货工序，不设任何数量/前序限制。
-      - 下料(2) 及之后：紧邻前序必须已开工（硬卡 1）；可填报量 ≤ 钢板到货 实际累计（硬卡 2）。
+      - 下料(2)：前置工序「硬编码」指向钢板到货（与法兰到货解耦）。
+          硬卡 1：钢板到货必须已开工。
+          硬卡 2：钢板到货「全部完成」则放行多填；否则下料 ≤ 钢板到货实际累计。
+      - 卷制(3) 及之后：与前一工序（紧邻前序）关联。
+          硬卡 1：紧邻前一工序必须已开工。
+          硬卡 2：可填报量 ≤ 紧邻前一工序的实际累计。
 
     节点级逐一校验（per-node）。错误文案统一保留「累计实际仅 M 套」句式，
-    供前端 parseQuotaMsg 解析成「拟报 N 套 / 前序仅 M 套」的旧版量化格式。
+    供前端 parseQuotaMsg 解析成「拟报 N 套 / 前序仅 M 套」旧版量化格式。
     """
     proc_idx = SCHEDULE_PROCESS_NAMES.index(process_name) if process_name in SCHEDULE_PROCESS_NAMES else -1
     if proc_idx < 0:
@@ -250,8 +255,8 @@ def validate_today_quota(process_name: str, plans_all: list[dict], actuals: dict
     if proc_idx <= 1:
         return None
 
-    prev_proc_name = SCHEDULE_PROCESS_NAMES[proc_idx - 1]  # 紧邻的前一工序
-    steel_name = SCHEDULE_PROCESS_NAMES[0]                 # 钢板到货（下游数量主约束）
+    steel_name = SCHEDULE_PROCESS_NAMES[0]  # 钢板到货（下料的数量主约束）
+    is_cutting = (process_name == "下料")   # 下料前置硬编码为钢板到货
 
     for p in target_nodes:
         target_pd = str(p["plan_date"])[:10]
@@ -259,7 +264,8 @@ def validate_today_quota(process_name: str, plans_all: list[dict], actuals: dict
         if qty <= 0:
             continue
 
-        # 硬卡 1：紧邻的前一工序必须已「开始」（截至 target_pd 至少一个节点 actual_qty>0）
+        # === 硬卡 1：下料→钢板到货；其他→紧邻前序 ===
+        prev_proc_name = steel_name if is_cutting else SCHEDULE_PROCESS_NAMES[proc_idx - 1]
         prev_started = any(
             int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0) > 0
             and pl["process_name"] == prev_proc_name
@@ -269,21 +275,45 @@ def validate_today_quota(process_name: str, plans_all: list[dict], actuals: dict
         if not prev_started:
             return (
                 f"【前一工序未开始】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
-                f"但紧邻的前一工序「{prev_proc_name}」截至 {target_pd} 尚未开始实际进度，"
+                f"但前置工序「{prev_proc_name}」截至 {target_pd} 尚未开始实际进度，"
                 f"前序累计实际仅 0 套。请先完成「{prev_proc_name}」的进度填报后再来提交。"
             )
 
-        # 硬卡 2：可填报量 ≤ 钢板到货 实际累计（截至 target_pd）
-        steel_total = sum(
-            int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0)
-            for pl in plans_all
-            if pl["process_name"] == steel_name
-            and str(pl["plan_date"])[:10] <= target_pd
-        )
-        if qty > steel_total:
-            return (
-                f"【数量校验未通过】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
-                f"但截至 {target_pd} 钢板到货累计实际仅 {steel_total} 套。"
-                f"请先完成钢板到货的进度填报后再来提交。"
+        # === 硬卡 2 ===
+        if is_cutting:
+            # 下料专属：钢板到货「全部完成」则放行多填（满足提前到货实际）
+            steel_total = sum(
+                int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0)
+                for pl in plans_all
+                if pl["process_name"] == steel_name
+                and str(pl["plan_date"])[:10] <= target_pd
             )
+            steel_plan_total = sum(
+                int(pl.get("plan_qty", 0) or 0)
+                for pl in plans_all
+                if pl["process_name"] == steel_name
+                and str(pl["plan_date"])[:10] <= target_pd
+            )
+            if steel_total < steel_plan_total and qty > steel_total:
+                return (
+                    f"【数量校验未通过】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
+                    f"但截至 {target_pd} 钢板到货累计实际仅 {steel_total} 套"
+                    f"（计划 {steel_plan_total} 套尚未全部到货）。"
+                    f"请先完成钢板到货的进度填报后再来提交。"
+                )
+            # 钢板到货全部完成 → 放行多填
+        else:
+            # 卷制及之后：仅卡「紧邻前一工序」实际累计
+            prev_total = sum(
+                int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0)
+                for pl in plans_all
+                if pl["process_name"] == prev_proc_name
+                and str(pl["plan_date"])[:10] <= target_pd
+            )
+            if qty > prev_total:
+                return (
+                    f"【数量校验未通过】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
+                    f"但截至 {target_pd} 前一工序「{prev_proc_name}」累计实际仅 {prev_total} 套。"
+                    f"请先完成「{prev_proc_name}」的进度填报后再来提交。"
+                )
     return None

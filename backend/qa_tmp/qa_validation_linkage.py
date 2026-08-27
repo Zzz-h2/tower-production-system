@@ -153,6 +153,54 @@ err = validate_today_quota(
 )
 results.append(assert_match("下料报3 等于上限应通过", err, None))
 
+# 场景 M —— 卷制 qty 不超过紧邻前序(下料)实际累计 → 通过
+print("\n[M] 卷制 qty=3 ≤ 下料实际3")
+plans_m = [
+    {"id": 21, "process_name": "钢板到货", "plan_date": "2026-08-25", "plan_qty": 4},
+    {"id": 22, "process_name": "下料",     "plan_date": "2026-08-28", "plan_qty": 4},
+    {"id": 23, "process_name": "卷制",     "plan_date": "2026-09-01", "plan_qty": 4},
+]
+actuals_m = {22: {"actual_qty": 3}}   # 下料 实际 3
+err = validate_today_quota("卷制", plans_m, actuals_m,
+                           [{"id": 23, "plan_date": "2026-09-01"}], {23: 3})
+results.append(assert_match("卷制 qty=3 ≤ 下料实际3 → 通过", err, None))
+
+# 场景 N —— 卷制 qty 超过紧邻前序(下料)实际累计 → 拦截，点名下料
+print("\n[N] 卷制 qty=5 > 下料实际3")
+err = validate_today_quota("卷制", plans_m, actuals_m,
+                           [{"id": 23, "plan_date": "2026-09-01"}], {23: 5})
+results.append(assert_match("卷制 qty=5 > 下料实际3 → 拦截", err, "数量校验未通过"))
+results.append(assert_match("文案应点名前一工序「下料」", err, "下料"))
+
+# 场景 O —— 卷制前置(下料)尚未开工 → 硬卡1 拦截
+print("\n[O] 卷制 前置下料未开工")
+actuals_o = {}   # 下料 0 实际
+err = validate_today_quota("卷制", plans_m, actuals_o,
+                           [{"id": 23, "plan_date": "2026-09-01"}], {23: 1})
+results.append(assert_match("卷制 应被「下料未开工」拒绝", err, "下料"))
+
+# 场景 P —— 黑塔 qty 超过紧邻前序(门框焊接)实际累计 → 拦截（验证链传导）
+print("\n[P] 黑塔 qty=4 > 门框焊接实际2")
+plans_p = [
+    {"id": 31, "process_name": "门框焊接", "plan_date": "2026-09-05", "plan_qty": 4},
+    {"id": 32, "process_name": "黑塔",     "plan_date": "2026-09-10", "plan_qty": 4},
+]
+actuals_p = {31: {"actual_qty": 2}}   # 门框焊接 2
+err = validate_today_quota("黑塔", plans_p, actuals_p,
+                           [{"id": 32, "plan_date": "2026-09-10"}], {32: 4})
+results.append(assert_match("黑塔 qty=4 > 门框焊接实际2 → 拦截", err, "门框焊接"))
+
+# 场景 Q —— 下料+钢板到货全部完成 → 多填放行（保留原特例）
+print("\n[Q] 钢板到货全部完成，下料 qty=100 放行")
+plans_q = [
+    {"id": 41, "process_name": "钢板到货", "plan_date": "2026-08-25", "plan_qty": 4},
+    {"id": 42, "process_name": "下料",     "plan_date": "2026-08-30", "plan_qty": 5},
+]
+actuals_q = {41: {"actual_qty": 4}}   # 钢板到货 4/4 全部完成
+err = validate_today_quota("下料", plans_q, actuals_q,
+                           [{"id": 42, "plan_date": "2026-08-30"}], {42: 100})
+results.append(assert_match("钢板到货全部完成，下料 qty=100 放行", err, None))
+
 # 汇总
 passed = sum(results)
 total = len(results)
