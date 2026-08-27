@@ -457,20 +457,9 @@ def generate_sample_excel(output_path: str) -> str:
 
 
 if __name__ == '__main__':
-    # 测试：生成示例文件
+    # 最小演示：生成示例文件并解析（自测用）
     sample_path = os.path.join(os.path.dirname(__file__), "..", "示例调度令.xlsx")
     generate_sample_excel(sample_path)
-    print(f"示例文件已生成: {sample_path}")
-
-    # 测试：自动映射
     headers = read_excel_headers(sample_path)
-    print(f"表头: {headers}")
-    mapping = auto_detect_mapping(headers)
-    print(f"自动映射: {mapping}")
-
-    # 测试：解析
-    data, errors = parse_schedule_excel(sample_path, mapping)
-    print(f"解析结果: {len(data)} 条记录, {len(errors)} 个错误")
-    for d in data:
-        print(f"  - {d['project_name']} | {d['factory_name']} | "
-              f"计划{d['monthly_plan']}段 | 负责人:{d['delivery_person']}")
+    data, errors = parse_schedule_excel(sample_path, auto_detect_mapping(headers))
+    print(f"已生成示例文件并解析：{len(data)} 条记录，{len(errors)} 个错误")

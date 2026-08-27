@@ -7,6 +7,7 @@ Date: 2026-08-03
 Updated: 2026-08-XX (SQLite → MySQL 迁移)
 """
 
+import logging
 import os
 from datetime import datetime
 from typing import Optional, Any
@@ -15,6 +16,8 @@ import pymysql
 import pymysql.cursors
 
 from backend.app.core.config import MYSQL_CONFIG
+
+logger = logging.getLogger(__name__)
 
 # MySQL schema 文件路径（SQLite → MySQL 迁移后使用）
 MYSQL_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db_schema_mysql.sql')
@@ -65,9 +68,9 @@ def init_database() -> None:
                 schema_sql = f.read()
             _execute_script(conn, schema_sql)
             conn.commit()
-            print(f"[DB] Database initialized: {MYSQL_CONFIG['database']}")
+            logger.info("[DB] Database initialized: %s", MYSQL_CONFIG['database'])
         else:
-            print(f"[DB] Database already exists: {MYSQL_CONFIG['database']}")
+            logger.info("[DB] Database already exists: %s", MYSQL_CONFIG['database'])
     except Exception as e:
         conn.rollback()
         raise e

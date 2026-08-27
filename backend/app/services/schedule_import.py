@@ -196,23 +196,6 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
     return plans, errors
 
 
-# ============================================================
-# 命令行入口（QA 测试用）
-# ============================================================
-
-def _print_result(plans: list[dict], errors: list[str]) -> None:
-    print(f"解析完成: {len(plans)} 个节点计划, {len(errors)} 个错误")
-    for p in plans:
-        print(
-            f"  - {p['process_name']}(工序{p['process_order']}) | "
-            f"{p['plan_date']} | 应完成 {p['plan_qty']} 套"
-        )
-    if errors:
-        print("\n错误提示:")
-        for e in errors:
-            print(f"  ! {e}")
-
-
 def parse_upload(file_bytes: bytes, filename: str) -> tuple[list[dict], list[str]]:
     """接收上传文件字节流 → 临时落盘 → 解析。"""
     import tempfile

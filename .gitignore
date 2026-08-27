@@ -26,6 +26,13 @@ _test_*.py
 tmp/
 *.tmp
 
+# ---------- QA 脚本 / 构建检查产物 / Vite 临时文件（与项目记忆规约对齐） ----------
+backend/qa_tmp/
+backend/scripts/
+frontend/dist_qa_buildcheck/
+frontend/dist_t05_buildcheck/
+frontend/vite.config.js.timestamp-*.mjs
+
 # ---------- 编辑器 / IDE ----------
 .idea/
 .vscode/

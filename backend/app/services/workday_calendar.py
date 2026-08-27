@@ -92,96 +92,39 @@ def parse_date(date_str: Optional[str]) -> Optional[date]:
 # v3.0: 自然日历天模式 — 每一天均为生产日
 # ============================================================
 
-def is_workday(check_date: date, exclude_weekends: bool = False) -> bool:
-    """
-    判断是否为工作日。
-    v3.0: 默认不排除周末和节假日，每一天都是生产日。
-    """
-    if exclude_weekends and check_date.weekday() >= 5:
-        return False
-    if exclude_weekends and check_date in _CUSTOM_HOLIDAYS:
-        return False
+def is_workday(check_date: date) -> bool:
+    """v3.0 自然日模式：每一天都是生产日。"""
     return True
 
 
-def next_workday(from_date: date, exclude_weekends: bool = False) -> date:
+def next_workday(from_date: date) -> date:
     """v3.0: 自然日模式下直接返回自身"""
-    if exclude_weekends:
-        current = from_date
-        while not is_workday(current, exclude_weekends=True):
-            current += timedelta(days=1)
-        return current
     return from_date
 
 
-def prev_workday(from_date: date, exclude_weekends: bool = False) -> date:
+def prev_workday(from_date: date) -> date:
     """v3.0: 自然日模式下直接返回自身"""
-    if exclude_weekends:
-        current = from_date
-        while not is_workday(current, exclude_weekends=True):
-            current -= timedelta(days=1)
-        return current
     return from_date
 
 
-def add_workdays(from_date: date, days: int,
-                 exclude_weekends: bool = False) -> date:
-    """
-    v3.0: 直接按自然日累加 from_date + days。
-    若启用 exclude_weekends，则循环跳过周末/节假日。
-    """
+def add_workdays(from_date: date, days: int) -> date:
+    """v3.0: 按自然日累加 from_date + days。"""
     if days <= 0:
         return from_date
-
-    if exclude_weekends:
-        current = from_date
-        added = 0
-        while added < days:
-            current += timedelta(days=1)
-            if is_workday(current, exclude_weekends=True):
-                added += 1
-        return current
-
     return from_date + timedelta(days=days)
 
 
-def subtract_workdays(from_date: date, days: int,
-                      exclude_weekends: bool = False) -> date:
-    """
-    v3.0: 直接按自然日回退 from_date - days。
-    """
+def subtract_workdays(from_date: date, days: int) -> date:
+    """v3.0: 按自然日回退 from_date - days。"""
     if days <= 0:
         return from_date
-
-    if exclude_weekends:
-        current = from_date
-        remaining = days
-        while remaining > 0:
-            current -= timedelta(days=1)
-            if is_workday(current, exclude_weekends=True):
-                remaining -= 1
-        return current
-
     return from_date - timedelta(days=days)
 
 
-def count_workdays_between(start_date: date, end_date: date,
-                           exclude_weekends: bool = False) -> int:
-    """
-    v3.0: 直接计算日历天数 (end - start).days + 1（含起止日）。
-    """
+def count_workdays_between(start_date: date, end_date: date) -> int:
+    """v3.0: 直接计算日历天数 (end - start).days + 1（含起止日）。"""
     if start_date > end_date:
         return 0
-
-    if exclude_weekends:
-        count = 0
-        current = start_date
-        while current <= end_date:
-            if is_workday(current, exclude_weekends=True):
-                count += 1
-            current += timedelta(days=1)
-        return count
-
     return (end_date - start_date).days + 1
 
 
@@ -234,20 +177,15 @@ if __name__ == '__main__':
     assert result == date(2026, 8, 5), f"期望 08-05(周三), 实际 {result}"
     print("✅ 测试4 通过：自然日回退")
 
-    # 测试5: exclude_weekends 参数仍可用（手动切换回工作日模式）
-    result = add_workdays(date(2026, 8, 7), 1, exclude_weekends=True)
-    assert result == date(2026, 8, 10), f"工作日模式: 期望 08-10(周一), 实际 {result}"
-    print("✅ 测试5 通过：exclude_weekends 参数仍可用")
-
-    # 测试6: 滞后天数 — 自然日历天
+    # 测试5: 滞后天数 — 自然日历天
     set_holidays([])
     lag = calculate_lag_days('2026-07-31', date(2026, 8, 3), is_completed=False)
     assert lag == 3, f"期望滞后3天(日历), 实际 {lag}"
-    print("✅ 测试6 通过：滞后天数=3天（自然日）")
+    print("✅ 测试5 通过：滞后天数=3天（自然日）")
 
-    # 测试7: 跨周末滞后天数
+    # 测试6: 跨周末滞后天数
     lag = calculate_lag_days('2026-07-30', date(2026, 8, 3), is_completed=False)
     assert lag == 4, f"期望滞后4天(日历), 实际 {lag}"
-    print(f"✅ 测试7 通过：滞后天数={lag}天（自然日）")
+    print(f"✅ 测试6 通过：滞后天数={lag}天（自然日）")
 
     print("\n🎉 全部测试通过！(v3.0 自然日模式)")
