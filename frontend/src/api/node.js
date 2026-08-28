@@ -29,10 +29,19 @@ export const addProject = (payload) => http.post('/projects', payload)
 export const updateProject = (pid, payload) => http.put(`/projects/${pid}`, payload)
 export const deleteProject = (pid) => http.delete(`/projects/${pid}`)
 
-// 导入月度调度令（批量建项目）
-export const importDispatch = (file) => {
+// 预览月度调度令（返回表头/样例值/建议映射/系统字段，不写库）
+export const previewDispatch = (file) => {
   const form = new FormData()
   form.append('file', file)
+  return http.post('/projects/preview-dispatch', form)
+}
+
+// 导入月度调度令（批量建项目）
+// mapping: {Excel列名: 系统字段名}，不传则由后端自动识别
+export const importDispatch = (file, mapping) => {
+  const form = new FormData()
+  form.append('file', file)
+  if (mapping) form.append('mapping', JSON.stringify(mapping))
   return http.post('/projects/import-dispatch', form)
 }
 
