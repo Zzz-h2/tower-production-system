@@ -117,23 +117,6 @@
       </div>
     </div>
 
-    <div v-if="result" class="result-box">
-      <el-alert
-        :title="result.message"
-        type="success"
-        :closable="false"
-        show-icon
-      />
-      <div class="result-detail">
-        成功 <b>{{ result.success }}</b> 条 · 跳过 <b>{{ result.skipped }}</b> 条
-      </div>
-      <ul v-if="result.errors && result.errors.length" class="error-list">
-        <li v-for="(e, i) in result.errors" :key="i">{{ e }}</li>
-      </ul>
-      <div v-if="step === 2" style="margin-top:10px;">
-        <el-button size="small" @click="resetAll">继续导入其他文件</el-button>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -151,7 +134,6 @@ defineProps({
 const step = ref(1)            // 1=选文件 2=确认映射
 const previewing = ref(false)
 const importing = ref(false)
-const result = ref(null)
 
 const fileName = ref('')
 const pickedFile = ref(null)   // 预览用的原始 File，导入时复用
@@ -197,7 +179,6 @@ const mappingPayload = computed(() => {
 
 async function doPreview({ file }) {
   previewing.value = true
-  result.value = null
   try {
     const res = await previewDispatch(file)
     fileName.value = file.name
@@ -223,9 +204,9 @@ async function doImport() {
   importing.value = true
   try {
     const res = await importDispatch(pickedFile.value, mappingPayload.value)
-    result.value = res
     ElMessage.success(res.message || '导入完成')
     emit('imported', res)   // 父组件刷新列表与看板；响应透传（含 accounts_ready 时提示开通账号）
+    resetAll()              // 导入成功后立即关闭导入面板并重置为初始状态（回到选文件步骤、清空结果与已选文件）
   } catch (e) {
     // 错误提示已由 axios 拦截器统一处理
   } finally {
@@ -239,7 +220,6 @@ function resetAll() {
   fileName.value = ''
   rows.value = []
   systemFields.value = []
-  result.value = null
 }
 </script>
 
@@ -298,8 +278,4 @@ function resetAll() {
   background-color: #24436f;
   border-color: #24436f;
 }
-
-.result-box { margin-top: 12px; }
-.result-detail { margin: 8px 0; font-size: 13px; color: #64748b; }
-.error-list { margin: 6px 0 0; padding-left: 18px; color: #e53e3e; font-size: 12px; }
 </style>
