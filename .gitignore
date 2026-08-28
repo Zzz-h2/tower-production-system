@@ -10,6 +10,8 @@ backend/.venv/
 # ---------- Node / 前端 ----------
 node_modules/
 dist/
+dist_cicd/
+frontend/vite.cicd.config.js
 .vite/
 *.local
 
