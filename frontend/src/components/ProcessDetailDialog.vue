@@ -34,7 +34,7 @@
           </div>
         </el-tab-pane>
         <el-tab-pane label="📝 填报进度" name="input" />
-        <el-tab-pane label="⚠️ 异常提报" name="exception">
+        <el-tab-pane v-if="!isIndependent" label="⚠️ 异常提报" name="exception">
           <div v-if="detail.nodes.length" class="exc-node-select">
             <div class="exc-node-label">选择节点：</div>
             <el-select v-model="selectedNodeId" placeholder="选择要提报异常的节点" style="width: 100%;">
@@ -80,8 +80,8 @@
               :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin)"
             />
             <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
-            <!-- 填报日期：标签显示当前日期（未填写灰底/已填写蓝底），管理员点击「更改填报日期」弹 popover 选日历 -->
-            <div class="cell-report-date">
+            <!-- 填报日期：独立工序（累计完成/累计发运）不设日期，隐藏日期列 -->
+            <div v-if="!isIndependent" class="cell-report-date">
               <span class="rd-tag" :class="{ 'rd-today': (node.actual_qty || 0) === 0 }">
                 📅 {{ reportDates[node.id] || fmtToday() }}
               </span>
@@ -222,6 +222,9 @@ const groupLabelMap = { today: '今日待填报', overdue: '逾期未完成', fu
 const groupLabel = computed(() => groupLabelMap[activeGroup.value] || activeGroup.value)
 const groupNodes = computed(() => detail.value?.groups?.[activeGroup.value] || [])
 
+// 独立工序（累计完成总数/累计发运总数）：无日期语义 → 隐藏日期列与异常提报页签
+const isIndependent = computed(() => !!detail.value?.is_independent)
+
 const statusColors = {
   done: '#38a169', pending: '#718096', in_progress: '#3182ce', warning: '#3182ce', overdue: '#e53e3e',
 }
@@ -238,8 +241,10 @@ const labelOf = (node) => {
   const n = detail.value?.nodes?.find((x) => x.id === node.id)
   return n ? n.label : '—'
 }
-// 分组差异化上限：done=当前值只能减；overdue/future=计划数；today=前序联动（后端校验）
+// 分组差异化上限：done=当前值只能减；overdue/future=计划数；today=前序联动（后端校验）；
+// 独立工序不限上限（累计指标可自由填报，后端同样不设上限）
 const maxOf = (node) => {
+  if (isIndependent.value) return undefined
   if (activeGroup.value === 'done') return node.actual_qty
   if (activeGroup.value === 'overdue' || activeGroup.value === 'future') return node.plan_qty
   return node.plan_qty   // today：上限计划数，前端宽松，后端做前序联动校验

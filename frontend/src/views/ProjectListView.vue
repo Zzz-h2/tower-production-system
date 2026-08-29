@@ -135,6 +135,11 @@
         <el-table-column prop="project_name" label="项目名称" min-width="180" />
         <el-table-column prop="machine_type" label="机型" min-width="120" />
         <el-table-column prop="factory_name" label="钢塔厂家" min-width="140" />
+        <el-table-column prop="contract_count" label="合同总数" width="100" align="right">
+          <template #default="{ row }">
+            <span>{{ row.contract_count ?? '—' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="last_month_output" label="截止上月" width="100" align="right" />
         <el-table-column prop="monthly_plan" label="本月计划" width="100" align="right" />
         <el-table-column label="整体进度" width="180" align="center">
@@ -337,15 +342,15 @@ async function onExport() {
   try {
     const res = await fetchExportProjects(store.filters.month)
     const rows = (res.items || res.data?.items || [])
-    const header = [['项目名称', '机型', '钢塔厂家', '截至上月进度', '本月计划', '整体进度(%)', '交付负责人', '大区负责人']]
+    const header = [['项目名称', '机型', '钢塔厂家', '合同总数', '截至上月进度', '本月计划', '整体进度(%)', '交付负责人', '大区负责人']]
     const body = rows.map(r => [
-      r.project_name, r.machine_type, r.factory_name,
+      r.project_name, r.machine_type, r.factory_name, r.contract_count ?? '',
       r.last_month_output, r.monthly_plan,
       (Number(r.progress_pct) || 0).toFixed(1), r.delivery_person, r.big_area_person,
     ])
     const ws = XLSX.utils.aoa_to_sheet([...header, ...body])
     ws['!cols'] = [
-      { wch: 26 }, { wch: 14 }, { wch: 18 },
+      { wch: 26 }, { wch: 14 }, { wch: 18 }, { wch: 12 },
       { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 12 },
     ]
     const wb = XLSX.utils.book_new()
