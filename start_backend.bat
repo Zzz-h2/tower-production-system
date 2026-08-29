@@ -1,32 +1,18 @@
 @echo off
 cd /d "E:\budy date\project one\tower_production_system\backend"
 set MYSQL_PASSWORD=123456
+set "PYTHONPATH=E:\budy date\project one\tower_production_system\backend"
 
-rem ===== é˜²é‡å…¥ + é˜² rogueï¼šåç«¯ç»Ÿä¸€ä½¿ç”¨ 0.0.0.0:8000 å•ä¾‹ï¼Œç»ä¸æ‹‰æ–°ç«¯å£ =====
-rem æ£€æµ‹æ ‡å‡†åç«¯ 0.0.0.0:8000 æ˜¯å¦å·²åœ¨ç›‘å¬
-netstat -ano 2>nul | findstr "LISTENING" | findstr "0.0.0.0:8000" >nul
-set GOOD_UP=%errorlevel%
-rem æ£€æµ‹æ¼ --host çš„ rogue 127.0.0.1:8000 æ˜¯å¦ä¹Ÿåœ¨ç›‘å¬
-netstat -ano 2>nul | findstr "LISTENING" | findstr "127.0.0.1:8000" >nul
-set ROGUE_UP=%errorlevel%
-
-if %GOOD_UP%==0 (
-  if %ROGUE_UP%==0 (
-    echo [info] æ£€æµ‹åˆ° rogue(127.0.0.1:8000) æ­£åœ¨æŠ¢å  localhostï¼Œä»…æ¸…ç† rogueï¼Œä¿ç•™æ ‡å‡†åç«¯ã€‚
-    for /f "tokens=5" %%p in ('netstat -ano ^| findstr "127.0.0.1:8000" ^| findstr "LISTENING"') do taskkill /f /t /pid %%p >nul 2>&1
-    goto :already
-  )
-  echo [skip] 0.0.0.0:8000 æ ‡å‡†åç«¯å·²åœ¨è¿è¡Œï¼Œè·³è¿‡å¯åŠ¨ï¼ˆé˜²é‡å…¥ï¼Œé¿å…åŒå®ä¾‹/æŠ¢ç«¯å£ï¼‰ã€‚
-  goto :already
+echo [1/2] ÊÍ·Å 8000 ¶Ë¿ÚÉÏËùÓĞ¼àÌı£¨Í¬Ê±Çå 0.0.0.0 Óë 127.0.0.1£¬±ÜÃâ rogue ÇÀÕ¼ localhost£©...
+for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr ":8000" ^| findstr "LISTENING"') do (
+    echo   É±µôÕ¼ÓÃ 8000 µÄ PID %%p
+    taskkill /f /t /pid %%p >nul 2>&1
 )
-
-rem æ²¡æœ‰æ ‡å‡†åç«¯ï¼šæ¸…ç†ä¸€åˆ‡ 8000 ç›‘å¬å™¨ï¼ˆå« rogue / ç«¯å£æ®‹ç•™ï¼‰ï¼Œå†å¯åŠ¨å”¯ä¸€æ ‡å‡†å®ä¾‹
-echo [info] æ¸…ç† 8000 æ—§/rogue è¿›ç¨‹...
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8000" ^| findstr "LISTENING"') do taskkill /f /t /pid %%p >nul 2>&1
 powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"(Name='python.exe' or Name='python3.12.exe' or Name='python3.exe') and CommandLine like '%%app.main:app%%'\" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }" >nul 2>&1
 timeout /t 2 /nobreak >nul
 
-echo [start] å¯åŠ¨æ ‡å‡†åç«¯ 0.0.0.0:8000 (--reload)...
+echo [2/2] Æô¶¯±ê×¼ºó¶Ë 0.0.0.0:8000 (--reload) ...
+echo   ¿´µ½ "Uvicorn running on http://0.0.0.0:8000" ¼´Æô¶¯³É¹¦£¬localhost Á÷Á¿½«Á¬µ½±¾±ê×¼ºó¶Ë¡£
+echo   Èô±¨´í£¨Èç No module named app / Address already in use£©£¬Çë°ÑÉÏÃæµÄºìÉ«ÎÄ×Ö·¢ÎÒ¡£
 "E:\budy date\project one\tower_production_system\backend\.venv\Scripts\python.exe" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-:already
 pause
