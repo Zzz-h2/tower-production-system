@@ -33,6 +33,7 @@ OPTIONAL_FIELDS = [
     "plan_end_date",      # 计划交付日期
     "machine_type",       # 机型（v3.1 新增，Excel 有机型列则自动匹配）
     "big_area_person",    # 大区负责人（选填）
+    "contract_count",     # 合同总数（v4.1 新增：独立工序「累计完成/累计发运」的参考计划数，选填）
 ]
 
 # 所有系统字段
@@ -49,6 +50,7 @@ FIELD_LABELS = {
     "plan_end_date": "计划交付日期",
     "machine_type": "机型",
     "big_area_person": "大区负责人",
+    "contract_count": "合同数量",
 }
 
 
@@ -213,6 +215,8 @@ def auto_detect_mapping(excel_headers: list[str]) -> dict[str, str]:
         # 大区负责人（业务专属别名）
         "大区负责人": "big_area_person", "大区": "big_area_person",
         "区域负责人": "big_area_person", "片区负责人": "big_area_person",
+        # v4.1: 合同数量（独立工序参考计划数，非必填）
+        "合同数量": "contract_count", "合同总数": "contract_count",
     }
 
     # 动态别名：匹配「X月计划」「截止X月底出品」等月度变化列名
@@ -389,6 +393,14 @@ def parse_schedule_excel(
                 project_data["last_month_output"] = 0
         except (ValueError, TypeError):
             project_data["last_month_output"] = 0
+
+        try:
+            if project_data.get("contract_count") is not None:
+                project_data["contract_count"] = int(float(project_data["contract_count"]))
+            else:
+                project_data["contract_count"] = None
+        except (ValueError, TypeError):
+            row_errors.append(f"第{row_num}行: 合同数量格式错误，应为整数")
 
         # 日期字段：用 parse_date 兼容多种格式（str/datetime/Timestamp/数字日期）
         from .workday_calendar import parse_date as _parse_date

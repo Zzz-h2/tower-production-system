@@ -73,6 +73,7 @@ def export_projects(month: Optional[str] = None, user: dict = Depends(get_curren
             "project_name": p.get("project_name", ""),
             "machine_type": p.get("machine_type", ""),
             "factory_name": p.get("factory_name", ""),
+            "contract_count": p.get("contract_count"),
             "last_month_output": int(p.get("last_month_output", 0) or 0),
             "monthly_plan": int(p.get("monthly_plan", 0) or 0),
             "progress_pct": float(p.get("progress_pct", 0.0) or 0.0),
@@ -193,7 +194,7 @@ def clear_node_plans(pid: int, user: dict = Depends(require_admin)):
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     require_project_access(project, user)
-    db.insert_node_plans(pid, [])  # 传入空列表会清空该项目所有节点计划
+    db.delete_all_node_plans(pid)  # 彻底清空该项目所有节点计划（含独立工序）
     return {"message": "✅ 已清空该项目的节点计划"}
 
 
@@ -266,7 +267,13 @@ def get_alerts(pid: int, user: dict = Depends(get_current_user)):
     actuals = db.get_node_actuals(pid)
     from ..services.node_service import enrich_rows
     rows = enrich_rows(plans, actuals)
-    focus = [r for r in rows if r["status"] in ("overdue", "warning", "in_progress")]
+    from ..core.config import INDEPENDENT_PROCESS_NAMES
+    # 独立工序（累计完成/累计发运）不参与预警：无日期语义，仅作为参考指标
+    focus = [
+        r for r in rows
+        if r["status"] in ("overdue", "warning", "in_progress")
+        and r["process_name"] not in INDEPENDENT_PROCESS_NAMES
+    ]
     focus.sort(key=lambda r: {"overdue": 0, "warning": 1, "in_progress": 2}[r["status"]])
 
     # 携带节点异常提报（按 node_id 分组，供预警「管理」按钮展示）

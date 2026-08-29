@@ -272,6 +272,8 @@ def parse_and_import(tmp_path: str, file_name: str, field_mapping: Optional[dict
     # 5) 逐行建项目（upsert）→ 新建项目即建项目记录（废弃 processes 初始化与风险写入）
     for row in rows:
         pid, is_new = db.upsert_project(row)
+        # 独立工序节点计划（累计完成总数/累计发运总数）：plan_qty=合同数量，重新导入幂等
+        db.sync_independent_plans(pid, row.get("contract_count"))
 
     # 6) 导入联动（T05）：为本批出现的大区负责人自动开通/更新账号
     #    upsert_user 语义：已存在 → 更新 big_area_name/status='active'，保留原密码哈希；

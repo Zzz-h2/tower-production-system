@@ -9,7 +9,7 @@ from ..schemas import SaveNodeProgressRequest
 from ..services.business_logic import (
     validate_today_quota, split_node_groups,
 )
-from ..core.config import GROUP_LABELS
+from ..core.config import GROUP_LABELS, INDEPENDENT_PROCESS_NAMES
 
 router = APIRouter(prefix="/api/projects", tags=["nodes"])
 
@@ -43,6 +43,8 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
 
     plan_qty_by_id = {p["id"]: int(p["plan_qty"] or 0) for p in proc_nodes}
 
+    is_independent = process_name in INDEPENDENT_PROCESS_NAMES  # 独立工序：不设日期、不限 qty 上限
+
     today = date.today()
     groups = split_node_groups(proc_nodes, actuals, today)
     target_ids = {p["id"] for p in groups[req.group]}
@@ -58,7 +60,7 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                 detail={"code": "NODE_NOT_IN_GROUP", "message": f"节点 {v.node_id} 不属于当前分组 {req.group}"},
             )
         limit = plan_qty_by_id.get(v.node_id, 0)
-        if v.qty > limit:
+        if not is_independent and v.qty > limit:
             raise HTTPException(
                 status_code=400,
                 detail={"code": "QTY_EXCEED_PLAN", "message": f"节点 {v.node_id} 数量不能超过计划数 {limit}"},
@@ -74,11 +76,13 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                 detail={"code": "PREV_PROC_QUOTA_EXCEEDED", "message": err},
             )
 
-    # 写入（只写当前分组，每行独立填报日期；大区账号锁定今日）
+    # 写入（只写当前分组，每行独立填报日期；大区账号锁定今日；独立工序不强制日期）
     saved = 0
     lock_date = user.get("role") == "big_area"
     for v in req.values:
-        if lock_date:
+        if is_independent:
+            rd = v.report_date or today.strftime("%Y-%m-%d")
+        elif lock_date:
             rd = today.strftime("%Y-%m-%d")
         else:
             rd = v.report_date or req.report_date or today.strftime("%Y-%m-%d")

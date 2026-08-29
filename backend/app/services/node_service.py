@@ -3,13 +3,15 @@
 from datetime import date
 
 from .business_logic import judge_node_status, judge_process_card_status, split_node_groups
-from ..core.config import SCHEDULE_PROCESS_NAMES
+from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
 
 
 def enrich_rows(plans: list[dict], actuals: dict, today=None) -> list[dict]:
     """富化节点行：计划信息 + 实际完成 + 五态判定（含完成日期与偏差）。
 
     返回行结构与原 Streamlit 版 rows 一致（前端时间轴/卡片直接使用）。
+    独立工序（累计完成总数/累计发运总数）：无日期语义，仅按 actual vs plan 输出
+    done / in_progress，不走日期判定，避免被误判逾期/预警。
     """
     today = today or date.today()
     rows = []
@@ -18,12 +20,21 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None) -> list[dict]:
         act = actuals.get(nid, {})
         actual_qty = act.get("actual_qty", 0)
         completion_date = act.get("report_date") if actual_qty >= r["plan_qty"] else None
-        st = judge_node_status(r["plan_date"], r["plan_qty"], actual_qty, today, completion_date)
+        if r["process_name"] in INDEPENDENT_PROCESS_NAMES:
+            done = actual_qty >= r["plan_qty"]
+            st = {
+                "status": "done" if done else "in_progress",
+                "label": "🟢 已完成" if done else "🔵 进行中",
+                "level": 0, "lag_qty": 0, "completion_date": completion_date,
+                "deviation_days": 0, "deviation_label": "-", "deviation_color": "#718096",
+            }
+        else:
+            st = judge_node_status(r["plan_date"], r["plan_qty"], actual_qty, today, completion_date)
         rows.append({
             "id": nid,
             "project_id": r["project_id"],
             "process_name": r["process_name"],
-            "plan_date": str(r["plan_date"])[:10],
+            "plan_date": (str(r["plan_date"])[:10] if r.get("plan_date") is not None else ""),
             "plan_qty": r["plan_qty"],
             "actual_qty": actual_qty,
             "report_date": str(act.get("report_date") or "")[:10] or None,
@@ -84,6 +95,33 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
             "current_plan_qty": current_plan,  # 当日计划累计（前端/诊断用）
             "progress_pct": round(min(progress, 100), 1),
             "node_count": len(grp),
+            "independent": False,
+        })
+
+    # 独立工序卡片（累计完成总数/累计发运总数）：追加在 11 道工序之后。
+    # 无日期/前序/异常语义：按 total_actual vs total_plan 直接给 进行中/已完成，不显示任何时间标签。
+    for pn in INDEPENDENT_PROCESS_NAMES:
+        if pn not in proc_groups:
+            continue
+        grp = proc_groups[pn]
+        total_plan = sum(r["plan_qty"] for r in grp)
+        total_actual = sum(r["actual_qty"] for r in grp)
+        done = total_actual >= total_plan
+        status = "done" if done else "in_progress"
+        progress = (total_actual / total_plan * 100) if total_plan else 0
+        processes.append({
+            "process_name": pn,
+            "status": status,
+            "label": "🟢 已完成" if done else "🔵 进行中",
+            "tags": [],
+            "has_today_plan": False,
+            "total_plan": total_plan,
+            "total_plan_qty": total_plan,
+            "total_actual": total_actual,
+            "current_plan_qty": 0,
+            "progress_pct": round(min(progress, 100), 1),
+            "node_count": len(grp),
+            "independent": True,
         })
 
     return {
@@ -111,9 +149,11 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
     rows = enrich_rows(proc_nodes, actuals, today)
     return {
         "process_name": process_name,
+        "is_independent": process_name in INDEPENDENT_PROCESS_NAMES,
         "nodes": rows,
         "groups": {
-            g: [{"id": p["id"], "plan_date": str(p["plan_date"])[:10],
+            g: [{"id": p["id"],
+                 "plan_date": (str(p["plan_date"])[:10] if p.get("plan_date") is not None else ""),
                  "plan_qty": p["plan_qty"],
                  "actual_qty": actuals.get(p["id"], {}).get("actual_qty", 0)}
                 for p in nodes]

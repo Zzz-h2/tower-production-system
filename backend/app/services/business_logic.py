@@ -14,7 +14,7 @@ from datetime import date
 from typing import Optional
 
 from .workday_calendar import parse_date
-from ..core.config import SCHEDULE_PROCESS_NAMES
+from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
 
 
 def prev_process_total(process_name: str, plans_all: list[dict], actuals: dict,
@@ -209,6 +209,9 @@ def _group_nodes(proc_nodes: list[dict], actuals: dict, today) -> dict:
         act = actuals.get(p["id"], {}).get("actual_qty", 0)
         if act >= p["plan_qty"]:
             done_nodes.append(p)
+        elif p.get("plan_date") is None:
+            # 独立工序（无日期语义）：未达标一律归入「今日待填报」，可直接手动填报
+            today_nodes.append(p)
         elif str(p["plan_date"])[:10] == str(today)[:10]:
             today_nodes.append(p)
         elif str(p["plan_date"])[:10] < str(today)[:10]:
@@ -246,6 +249,9 @@ def validate_today_quota(process_name: str, plans_all: list[dict], actuals: dict
     供前端 parseQuotaMsg 解析成「拟报 N 套 / 前序仅 M 套」旧版量化格式。
     """
     proc_idx = SCHEDULE_PROCESS_NAMES.index(process_name) if process_name in SCHEDULE_PROCESS_NAMES else -1
+    # 独立工序（累计完成总数/累计发运总数）：不参与 11 道前序联动校验，直接放行
+    if process_name in INDEPENDENT_PROCESS_NAMES:
+        return None
     if proc_idx < 0:
         return (
             f"【配置缺失】工序「{process_name}」未在排产顺序配置（SCHEDULE_PROCESS_NAMES）中，"
