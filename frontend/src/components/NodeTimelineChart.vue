@@ -3,7 +3,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import * as echarts from 'echarts'
 
 const props = defineProps({
@@ -61,6 +61,21 @@ function render() {
     label: { formatter: '今天', color: '#e53e3e', position: 'end' },
     data: [{ xAxis: todayTs }],
   }
+  // 显式计算 x 轴范围（用数字而非动态函数），保证新数据导入后轴范围一定更新到最新
+  let minTs = Infinity
+  let maxTs = -Infinity
+  for (const r of props.rows) {
+    const t = new Date(r.plan_date).getTime()
+    if (Number.isFinite(t)) {
+      if (t < minTs) minTs = t
+      if (t > maxTs) maxTs = t
+    }
+  }
+  const pad = 2 * 24 * 3600 * 1000  // 前后各留 2 天 padding
+  const fallbackSpan = 30 * 24 * 3600 * 1000
+  const now = Date.now()
+  const xMin = Number.isFinite(minTs) ? minTs - pad : now - fallbackSpan
+  const xMax = Number.isFinite(maxTs) ? maxTs + pad : now + fallbackSpan
   chart.setOption({
     backgroundColor: '#fff',
     tooltip: {
@@ -83,9 +98,8 @@ function render() {
     grid: { left: 120, right: 160, top: 40, bottom: 40, containLabel: true },
     xAxis: {
       type: 'time',
-      // {yyyy}-{MM}-{dd} 才是完整年月日；{m} 是分钟会显示错误刻度
-      min: (value) => value.min - 24 * 3600 * 1000 * 2,   // 最小值前推 2 天
-      max: (value) => value.max + 24 * 3600 * 1000 * 2,   // 最大值后推 2 天
+      min: xMin,
+      max: xMax,
       axisLabel: { color: '#64748b', formatter: '{yyyy}-{MM}-{dd}', rotate: 30 },
       axisLine: { lineStyle: { color: '#cbd5e0' } },
     },
@@ -98,12 +112,27 @@ function render() {
   })
 }
 
+let resizeObserver = null
 onMounted(() => {
   chart = echarts.init(chartRef.value)
   render()
+  // 初始尺寸可能尚未稳定，显式 resize 一次
+  chart.resize()
+  // 容器尺寸变化（height prop 变 / 窗口变 / 侧栏折叠）都强制 ECharts 跟随，
+  // 避免"导入后排产数据变了但画布/范围没刷新"的问题
+  if (window.ResizeObserver && chartRef.value) {
+    resizeObserver = new ResizeObserver(() => chart?.resize())
+    resizeObserver.observe(chartRef.value)
+  }
+})
+watch(() => props.height, () => {
+  // height prop 变化（visible_processes 数量变化触发 timelineHeight 重算）→ 重绘
+  nextTick(() => chart?.resize())
 })
 watch(() => [props.rows, props.processes], render, { deep: true })
 onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
   chart?.dispose()
   chart = null
 })
