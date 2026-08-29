@@ -82,6 +82,12 @@ def insert_node_plans(project_id: int, plans: list[dict]) -> int:
     return _fn(project_id, plans)
 
 
+def delete_all_node_plans(project_id: int) -> None:
+    """彻底清空项目全部节点计划（含独立工序）。"""
+    from database import delete_all_node_plans as _fn
+    _fn(project_id)
+
+
 def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
                        actual_qty: int, report_date: str) -> None:
     """写入/更新单个节点实际进度。"""
@@ -154,6 +160,12 @@ def upsert_project(data: dict):
     """插入或更新项目（四字段唯一键），返回 (project_id, is_new)。"""
     from database import upsert_project as _fn
     return getattr(_fn, "__wrapped__", _fn)(data)
+
+
+def sync_independent_plans(project_id: int, contract_count) -> int:
+    """同步项目两条独立工序节点计划（累计完成总数 / 累计发运总数）。"""
+    from database import sync_independent_plans as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, contract_count)
 
 
 def get_duplicate_project(project_name: str, factory_name: str,

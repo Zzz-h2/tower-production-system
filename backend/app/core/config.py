@@ -45,6 +45,10 @@ SCHEDULE_PROCESS_DAYS = {
     "黑塔": 2, "防腐": 2, "附件安装": 3, "具备验收": 1,
 }
 
+# 独立工序（不参与 11 道排产联动与异常提报）：专项参考指标，无日期语义。
+# plan_qty 由调度令「合同数量」(contract_count) 导入；actual_qty 由用户随时手动填报。
+INDEPENDENT_PROCESS_NAMES = ["累计完成总数", "累计发运总数"]
+
 # 状态语义色（前端渲染与后端响应统一）
 STATUS_COLORS = {
     "done": "#38a169",

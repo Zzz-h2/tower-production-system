@@ -15,7 +15,7 @@ from typing import Optional, Any
 import pymysql
 import pymysql.cursors
 
-from backend.app.core.config import MYSQL_CONFIG
+from backend.app.core.config import MYSQL_CONFIG, INDEPENDENT_PROCESS_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -90,15 +90,17 @@ def insert_project(data: dict) -> int:
         with conn.cursor() as cursor:
             cursor.execute("""
                 INSERT INTO projects 
-                    (project_name, factory_name, last_month_output, monthly_plan, 
+                    (project_name, factory_name, last_month_output, monthly_plan,
+                     contract_count,
                      delivery_person, plan_start_date, plan_end_date,
                      created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 data['project_name'],
                 data['factory_name'],
                 data.get('last_month_output', 0),
                 data['monthly_plan'],
+                data.get('contract_count'),
                 data['delivery_person'],
                 data.get('plan_start_date'),
                 data.get('plan_end_date'),
@@ -134,6 +136,7 @@ def upsert_project(data: dict) -> tuple[int, bool]:
                     UPDATE projects SET
                         last_month_output = %s, monthly_plan = %s,
                         monthly_total_plan = %s,
+                        contract_count = %s,
                         plan_start_date = %s, plan_end_date = %s,
                         big_area_person = %s,
                         updated_at = %s
@@ -142,6 +145,7 @@ def upsert_project(data: dict) -> tuple[int, bool]:
                     data.get('last_month_output', 0),
                     data['monthly_plan'],
                     data.get('monthly_total_plan', data['monthly_plan']),
+                    data.get('contract_count'),
                     data.get('plan_start_date'),
                     data.get('plan_end_date'),
                     data.get('big_area_person', '') or '',
@@ -155,14 +159,15 @@ def upsert_project(data: dict) -> tuple[int, bool]:
                 cursor.execute("""
                     INSERT INTO projects 
                         (project_name, factory_name, last_month_output, monthly_plan,
-                         monthly_total_plan,
+                         monthly_total_plan, contract_count,
                          delivery_person, big_area_person, machine_type, plan_start_date, plan_end_date,
                          created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     data['project_name'], data['factory_name'],
                     data.get('last_month_output', 0), data['monthly_plan'],
                     data.get('monthly_total_plan', data['monthly_plan']),
+                    data.get('contract_count'),
                     data['delivery_person'], data.get('big_area_person', '') or '',
                     machine_type,
                     data.get('plan_start_date'),
@@ -280,7 +285,7 @@ def update_project(project_id: int, data: dict) -> None:
         values = []
         for key in ['project_name', 'factory_name', 'last_month_output', 'monthly_plan',
                      'delivery_person', 'big_area_person', 'plan_start_date', 'plan_end_date', 
-                     'risk_level', 'status', 'remarks']:
+                     'risk_level', 'status', 'remarks', 'contract_count', 'machine_type']:
             if key in data:
                 fields.append(f"{key} = %s")
                 values.append(data[key])
@@ -367,8 +372,9 @@ def insert_node_plans(project_id: int, plans: list[dict]) -> int:
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "DELETE FROM process_node_plans WHERE project_id = %s",
-                (project_id,)
+                "DELETE FROM process_node_plans WHERE project_id = %s "
+                "AND process_name NOT IN (%s, %s)",
+                (project_id, INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]),
             )
             if plans:
                 cursor.executemany("""
@@ -387,6 +393,46 @@ def insert_node_plans(project_id: int, plans: list[dict]) -> int:
     finally:
         conn.close()
 
+
+def delete_all_node_plans(project_id: int) -> None:
+    """彻底清空项目全部节点计划（含两条独立工序），用于重置脏数据。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM process_node_plans WHERE project_id = %s",
+                (project_id,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+
+def sync_independent_plans(project_id: int, contract_count) -> int:
+    """同步项目两条独立工序节点计划（累计完成总数 / 累计发运总数）。
+
+    plan_qty = 调度令「合同数量」(contract_count)；plan_date 为 NULL（无日期语义）。
+    在调度令导入后调用；重新导入时先删后插，保证幂等、不堆叠。
+    """
+    names = INDEPENDENT_PROCESS_NAMES
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM process_node_plans WHERE project_id = %s AND process_name IN (%s, %s)",
+                (project_id, names[0], names[1]),
+            )
+            qty = int(contract_count or 0)
+            cursor.executemany(
+                "INSERT INTO process_node_plans (project_id, process_name, process_order, plan_date, plan_qty) "
+                "VALUES (%s, %s, %s, NULL, %s)",
+                [(project_id, names[0], 90, qty), (project_id, names[1], 91, qty)],
+            )
+            conn.commit()
+            return 2
+    finally:
+        conn.close()
 
 
 def get_node_plans(project_id: int) -> list[dict]:

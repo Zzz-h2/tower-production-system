@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS projects (
     last_month_output   INT DEFAULT 0,
     monthly_plan        INT NOT NULL DEFAULT 0,
     monthly_total_plan  INT DEFAULT 0,
+    contract_count      INT NULL COMMENT '合同总数（调度令「合同数量」导入；独立工序累计完成/累计发运的参考计划数）',
     delivery_person     VARCHAR(191) NOT NULL,
     plan_start_date     VARCHAR(20),
     plan_end_date       VARCHAR(20),
@@ -106,7 +107,7 @@ CREATE TABLE IF NOT EXISTS process_node_plans (
     project_id      INT NOT NULL,
     process_name    VARCHAR(64) NOT NULL,
     process_order   INT NOT NULL DEFAULT 0,
-    plan_date       DATE NOT NULL,
+    plan_date       DATE NULL,
     plan_qty        INT NOT NULL DEFAULT 1,
     UNIQUE KEY uk_proj_proc_date (project_id, process_name, plan_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
