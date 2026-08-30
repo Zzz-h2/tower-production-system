@@ -4,6 +4,7 @@
 T01 只做认证基础；行级隔离注入（业务路由内调用 require_project_access /
 get_scope_big_area 做 scope 过滤）由 T02 完成。
 """
+from datetime import datetime, timezone
 from typing import Optional
 
 import jwt
@@ -37,6 +38,23 @@ def get_current_user(authorization: str = Header(None)) -> dict:
         payload = decode_access_token(token.strip())
     except jwt.PyJWTError:
         raise _unauthorized()
+
+    # 会话空闲校验：JWT 的 iat 视为「最后一次活动时间」，超过阈值即失效。
+    # 放在查库之前，空闲失效时省一次查询；模块级延迟导入以便运行时配置可被覆盖。
+    from ..core.config import IDLE_TIMEOUT_MINUTES
+    if IDLE_TIMEOUT_MINUTES > 0:
+        iat = payload.get("iat")
+        if iat:
+            idle_seconds = int((datetime.now(timezone.utc) - datetime.fromtimestamp(iat, tz=timezone.utc)).total_seconds())
+            if idle_seconds > IDLE_TIMEOUT_MINUTES * 60:
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "code": "IDLE_TIMEOUT",
+                        "message": f"会话已空闲 {idle_seconds // 60} 分钟，请重新登录",
+                        "idle_seconds": idle_seconds,
+                    },
+                )
 
     uid = payload.get("sub")
     if not uid:

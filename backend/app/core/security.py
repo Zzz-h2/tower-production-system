@@ -100,6 +100,23 @@ def create_access_token(user: dict) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def refresh_access_token(payload: dict) -> str:
+    """基于已校验通过的旧 payload 重签 token：iat 刷新为当前时间，exp 顺延。
+
+    用于「用户仍活跃」时续期，使空闲计时重新开始；不改变 sub/username/role/big_area_name。
+    """
+    now = datetime.now(timezone.utc)
+    new_payload = {
+        "sub": payload.get("sub", ""),
+        "username": payload.get("username", ""),
+        "role": payload.get("role", "big_area"),
+        "big_area_name": payload.get("big_area_name", "") or "",
+        "iat": now,
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    }
+    return jwt.encode(new_payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
 def decode_access_token(token: str) -> dict:
     """解码并校验 JWT。
 

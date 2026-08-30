@@ -30,6 +30,10 @@ MYSQL_CONFIG = {
     "charset": "utf8mb4",
 }
 
+# ---------- 会话空闲超时（无操作自动登出）----------
+# 单位：分钟。超过该时长无任何请求即判定会话空闲失效；0 或负数表示不启用空闲校验。
+IDLE_TIMEOUT_MINUTES = int(os.getenv("IDLE_TIMEOUT_MINUTES", "30"))
+
 # ---------- 业务常量（与 config.py 同源） ----------
 # 排产工序顺序（前序联动依据；与「排产计划模板.xlsx」表头列顺序一致）
 SCHEDULE_PROCESS_NAMES = [
