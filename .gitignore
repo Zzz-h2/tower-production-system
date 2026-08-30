@@ -33,7 +33,8 @@ backend/qa_tmp/
 backend/scripts/
 frontend/dist_qa_buildcheck/
 frontend/dist_t05_buildcheck/
-frontend/vite.config.js.timestamp-*.mjs
+# 用 vite*.config.js 通配，覆盖 vite.config.js / vite.cicd.config.js 等所有 vite 配置的临时转译产物
+frontend/vite*.config.js.timestamp-*.mjs
 
 # ---------- 编辑器 / IDE ----------
 .idea/
