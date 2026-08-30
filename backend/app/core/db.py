@@ -6,7 +6,7 @@
 """
 from datetime import date
 
-from .config import MYSQL_CONFIG
+from .config import MYSQL_CONFIG, INDEPENDENT_PROCESS_NAMES
 
 
 def get_connection():
@@ -232,7 +232,13 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT project_id FROM process_node_plans")
+            # 只看 11 道排产工序：排除 dispatch 导入自动创建的两条独立工序（累计完成总数/累计发运总数），
+            # 否则仅做过调度令导入、没导过排产计划的项目也会被误判为"已提报"
+            cur.execute(
+                "SELECT DISTINCT project_id FROM process_node_plans "
+                "WHERE process_name NOT IN (%s, %s)",
+                (INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]),
+            )
             has_schedule_ids = {r["project_id"] for r in cur.fetchall()}
     finally:
         conn.close()
