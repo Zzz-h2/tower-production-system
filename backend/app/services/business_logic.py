@@ -203,14 +203,27 @@ def judge_process_card_status(proc_nodes: list[dict], actuals: dict, today=None)
 
 
 def _group_nodes(proc_nodes: list[dict], actuals: dict, today) -> dict:
-    """按 今日/逾期/未来/已完成 严格互斥分组（与原版口径一致）。"""
+    """按 今日/逾期/未来/已完成 严格互斥分组（与原版口径一致）。
+
+    独立工序（累计完成/累计发运）特殊口径：
+      - plan_date IS NULL → today（合同占位行，可继续填）
+      - plan_date IS NOT NULL → done（每次填报生成的"本次记录"行，date 即填报日期）
+      - 不再走 act >= plan_qty 判定（独立工序每行 plan_qty = 本次填报量，actual = plan，已自洽）
+    """
     today_nodes, overdue_nodes, future_nodes, done_nodes = [], [], [], []
     for p in proc_nodes:
         act = actuals.get(p["id"], {}).get("actual_qty", 0)
-        if act >= p["plan_qty"]:
+        is_independent = p.get("process_name") in INDEPENDENT_PROCESS_NAMES
+        if p.get("plan_date") is None and is_independent:
+            # 独立工序的合同占位行：始终留在「今日待填报」供继续填报
+            today_nodes.append(p)
+        elif p.get("plan_date") is not None and is_independent:
+            # 独立工序的填报记录行：按日期归档到「已完成」
+            done_nodes.append(p)
+        elif act >= p["plan_qty"]:
             done_nodes.append(p)
         elif p.get("plan_date") is None:
-            # 独立工序（无日期语义）：未达标一律归入「今日待填报」，可直接手动填报
+            # 非独立工序且 plan_date 为 NULL（理论上不应出现，兜底）
             today_nodes.append(p)
         elif str(p["plan_date"])[:10] == str(today)[:10]:
             today_nodes.append(p)

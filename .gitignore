@@ -11,6 +11,8 @@ backend/.venv/
 node_modules/
 dist/
 dist_cicd/
+dist_cicd2/
+dist_cicd3/
 frontend/vite.cicd.config.js
 .vite/
 *.local

@@ -13,8 +13,8 @@
         <el-tab-pane label="📋 节点详情" name="detail">
           <div v-for="row in detail.nodes" :key="row.id" class="row-card row-grid-detail">
             <div class="row-bar" :style="{ background: colorOf(row.status) }"></div>
-            <div style="min-width:0;">
-              <div class="row-dates">
+            <div class="row-info">
+              <div v-if="!isIndependent" class="row-dates">
                 <div class="date-block">
                   <span class="date-key">计划</span>
                   <span class="date-val">{{ row.plan_date }}</span>
@@ -25,12 +25,18 @@
                   <span v-else class="date-val date-empty">暂无</span>
                 </div>
               </div>
-              <div style="font-weight:600; white-space:nowrap;">
-                计划 <span class="qty-num">{{ row.plan_qty }}</span> 套 / 实际 <span class="qty-num">{{ row.actual_qty }}</span> 套
+              <div class="row-qty-line">
+                <span class="qty-text">
+                  {{ isIndependent ? '共计' : '计划' }} <span class="qty-num">{{ row.plan_qty }}</span> 套 / {{ isIndependent ? '完成' : '实际' }} <span class="qty-num">{{ row.actual_qty }}</span> 套
+                </span>
+                <span v-if="(row.actual_qty || 0) > 0" class="latest-date">
+                  <span class="ld-key">{{ isIndependent ? '最新完成日期' : '最新填报日期' }}</span>
+                  <span class="ld-val">{{ row.report_date || '—' }}</span>
+                </span>
               </div>
             </div>
             <span class="status-pill" :style="pillStyle(row.status)">{{ row.label }}</span>
-            <div style="font-size:12px; color:#718096; text-align:right; white-space:nowrap;">{{ row.deviation_label }}</div>
+            <div class="deviation-label">{{ row.deviation_label }}</div>
           </div>
         </el-tab-pane>
         <el-tab-pane label="📝 填报进度" name="input" />
@@ -65,22 +71,60 @@
         <el-segmented v-model="activeGroup" :options="groupOptions" block style="margin-bottom:14px;" />
         <div v-if="groupNodes.length === 0" class="empty-hint">当前分组「{{ groupLabel }}」没有可保存的节点。</div>
         <template v-else>
-          <div v-for="node in groupNodes" :key="node.id" class="row-card row-grid">
-            <div class="row-bar" :style="{ background: colorOf(statusOf(node)) }"></div>
-            <div class="cell-plan-date">{{ node.plan_date }}</div>
-            <div class="cell-plan-qty">
-              <span class="qty-num">{{ node.plan_qty }}</span><span class="qty-unit">套</span>
+          <!-- 独立工序（累计完成/累计发运）· 今日待填报：单卡增量输入 -->
+          <div v-if="isIndependent && activeGroup === 'today'" class="fill-card">
+            <div class="fill-card-left">
+              <span class="fill-card-label">本次填报</span>
+              <el-input-number
+                v-model="inputValues[groupNodes[0].id]"
+                :min="0"
+                :max="independentRemaining"
+                size="default"
+                class="fill-card-input"
+              />
+              <span class="fill-card-unit">套</span>
+              <span class="fill-card-pending" :title="`合同 ${independentContract} − 已填报 ${independentFilled} − 本次 ${inputValues[groupNodes[0].id] || 0}`">
+                待完成 <span class="qty-num">{{ independentRemainingAfter }}</span> 套
+              </span>
             </div>
-            <el-input-number
-              class="cell-qty-input"
-              v-model="inputValues[node.id]"
-              :min="0"
-              :max="maxOf(node)"
-              size="small"
-              :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin)"
-            />
-            <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
-            <!-- 填报日期：独立工序（累计完成/累计发运）不设日期，隐藏日期列 -->
+            <div class="fill-card-right">
+              <span class="status-pill" :style="pillStyle('in_progress')">🔵 进行中</span>
+            </div>
+          </div>
+          <!-- 独立工序· 已完成：每条记录一张卡（按日期降序） -->
+          <div v-else-if="isIndependent && activeGroup === 'done'">
+            <div v-for="node in groupNodes" :key="node.id" class="record-card">
+              <div class="record-card-left">
+                <span class="record-card-date">📅 {{ node.plan_date }}</span>
+                <span class="record-card-qty">完成 <span class="qty-num">{{ node.actual_qty || 0 }}</span> 套</span>
+              </div>
+              <div class="record-card-right">
+                <span class="status-pill" :style="pillStyle('done')">🟢 已完成</span>
+              </div>
+            </div>
+          </div>
+          <!-- 11 道排产工序：原有 row-grid 行为 -->
+          <div v-else v-for="node in groupNodes" :key="node.id" class="row-card row-grid">
+            <div class="row-bar" :style="{ background: colorOf(statusOf(node)) }"></div>
+            <div class="row-left-section">
+              <span v-if="!isIndependent" class="cell-plan-date">{{ node.plan_date }}</span>
+              <span class="cell-plan-qty">
+                <span class="qty-num">{{ node.plan_qty }}</span><span class="qty-unit">套</span>
+              </span>
+            </div>
+            <div class="row-center-section">
+              <el-input-number
+                class="cell-qty-input"
+                v-model="inputValues[node.id]"
+                :min="0"
+                :max="maxOf(node)"
+                size="small"
+                :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin && !isIndependent)"
+              />
+              <span v-if="isIndependent" class="cell-pending" :title="`总套数 ${node.plan_qty} − 当前填报 ${inputValues[node.id] ?? node.actual_qty ?? 0}`">
+                待完成 <span class="qty-num">{{ pendingOf(node) }}</span> 套
+              </span>
+            </div>
             <div v-if="!isIndependent" class="cell-report-date">
               <span class="rd-tag" :class="{ 'rd-today': (node.actual_qty || 0) === 0 }">
                 📅 {{ reportDates[node.id] || fmtToday() }}
@@ -94,7 +138,7 @@
                 <template #reference>
                   <el-button
                     size="small"
-                    :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin)"
+                    :disabled="!auth.isAdmin"
                     class="rd-btn"
                   >更改填报日期</el-button>
                 </template>
@@ -113,6 +157,9 @@
                   </div>
                 </div>
               </el-popover>
+            </div>
+            <div class="row-status-section">
+              <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
             </div>
           </div>
         </template>
@@ -212,12 +259,18 @@ function shortItem(group, detail) {
   return `${label}：${clean}`
 }
 
-const groupOptions = [
-  { label: '🔵 今日待填报', value: 'today' },
-  { label: '🔴 逾期未完成', value: 'overdue' },
-  { label: '⚪ 未来计划', value: 'future' },
-  { label: '🟢 已完成', value: 'done' },
-]
+const groupOptions = computed(() => {
+  const all = [
+    { label: '🔵 今日待填报', value: 'today' },
+    { label: '🔴 逾期未完成', value: 'overdue' },
+    { label: '⚪ 未来计划', value: 'future' },
+    { label: '🟢 已完成', value: 'done' },
+  ]
+  // 独立工序（累计完成总数 / 累计发运总数）：无日期语义，
+  // 后端分组里 overdue/future 恒为空，仅保留 today/done
+  if (isIndependent.value) return all.filter(g => g.value === 'today' || g.value === 'done')
+  return all
+})
 const groupLabelMap = { today: '今日待填报', overdue: '逾期未完成', future: '未来计划', done: '已完成' }
 const groupLabel = computed(() => groupLabelMap[activeGroup.value] || activeGroup.value)
 const groupNodes = computed(() => detail.value?.groups?.[activeGroup.value] || [])
@@ -249,6 +302,36 @@ const maxOf = (node) => {
   if (activeGroup.value === 'overdue' || activeGroup.value === 'future') return node.plan_qty
   return node.plan_qty   // today：上限计划数，前端宽松，后端做前序联动校验
 }
+// 独立工序：本次输入后剩余套数（实时反映用户输入）—— 仅用于非独立（11 道排产）
+const pendingOf = (node) => {
+  if (!isIndependent.value) return null
+  const total = Number(node.plan_qty) || 0
+  const cur = Number(inputValues.value[node.id] ?? node.actual_qty ?? 0)
+  return Math.max(0, total - cur)
+}
+
+// 独立工序：合同总数（合同占位行的 plan_qty = contract_count）
+const independentContract = computed(() => {
+  if (!isIndependent.value || !detail.value) return 0
+  const placeholder = detail.value.nodes.find((n) => !n.plan_date)
+  return Number(placeholder?.plan_qty) || 0
+})
+// 独立工序：累计已填报（所有行 actual_qty 之和）
+const independentFilled = computed(() => {
+  if (!detail.value) return 0
+  return detail.value.nodes.reduce((s, n) => s + (Number(n.actual_qty) || 0), 0)
+})
+// 独立工序：剩余可填报
+const independentRemaining = computed(() => {
+  return Math.max(0, independentContract.value - independentFilled.value)
+})
+// 独立工序：本次输入后剩余（取 today tab 占位行的 inputValue，未填视为 0）
+const independentRemainingAfter = computed(() => {
+  const delta = Number(
+    groupNodes.value[0] ? (inputValues.value[groupNodes.value[0].id] ?? 0) : 0
+  ) || 0
+  return Math.max(0, independentRemaining.value - delta)
+})
 
 async function load() {
   if (!props.processName) return
@@ -366,55 +449,166 @@ watch(
 .exc-node-select { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
 .exc-node-label { font-size: 13px; color: #1a365d; font-weight: 600; white-space: nowrap; }
 
-/* 填报进度行：6 列 grid（色条/计划日期/计划套数/数量输入/状态/日期标签+更改按钮） */
-.row-grid {
-  display: grid;
-  grid-template-columns: 6px 130px 110px 120px 110px 280px;
+/* 独立工序·今日待填报：单卡增量输入布局（充足留白） */
+.fill-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin-bottom: 14px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: box-shadow .15s;
+}
+.fill-card:hover { box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08); }
+.fill-card-left {
+  display: flex;
   align-items: center;
   gap: 14px;
-  padding: 14px 18px;
+  flex: 1;
+  min-width: 0;
 }
+.fill-card-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a365d;
+  white-space: nowrap;
+}
+.fill-card-input { width: 160px; }
+.fill-card-input :deep(.el-input-number__decrease),
+.fill-card-input :deep(.el-input-number__increase) { width: 32px; }
+.fill-card-input :deep(.el-input__inner) { text-align: center; font-variant-numeric: tabular-nums; font-size: 15px; }
+.fill-card-unit { color: #718096; font-size: 13px; }
+.fill-card-pending {
+  font-size: 14px;
+  color: #4a5568;
+  white-space: nowrap;
+  padding-left: 14px;
+  border-left: 1px solid #e2e8f0;
+  margin-left: 4px;
+}
+.fill-card-pending .qty-num { color: #e53e3e; font-size: 16px; padding: 0 2px; }
+.fill-card-right { display: flex; align-items: center; }
+
+/* 独立工序·已完成：每条记录一张卡（按日期降序） */
+.record-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 18px 24px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: box-shadow .15s;
+}
+.record-card:hover { box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08); }
+.record-card-left {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex: 1;
+  min-width: 0;
+}
+.record-card-date {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a365d;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 12px;
+  background: #ebf8ff;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.record-card-qty {
+  font-size: 14px;
+  color: #4a5568;
+  white-space: nowrap;
+}
+.record-card-qty .qty-num { color: #38a169; font-size: 16px; padding: 0 2px; }
+.record-card-right { display: flex; align-items: center; }
+
+/* 填报进度行：色条 / 左（日期+套数）/ 中（输入+待完成/已填报）/ 报告日期（非独立）/ 1fr 弹性空间 / 状态（最右） */
+.row-grid {
+  display: grid;
+  grid-template-columns: 6px auto auto auto 1fr;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+}
+.row-left-section { display: flex; align-items: baseline; gap: 14px; white-space: nowrap; }
+.row-center-section { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.row-status-section { display: flex; align-items: center; justify-self: end; }
+
 /* 节点详情行：色条/信息/状态/偏差 */
 .row-grid-detail {
   display: grid;
-  grid-template-columns: 6px 1fr auto 100px;
+  grid-template-columns: 6px 1fr auto auto;
   align-items: center;
   gap: 14px;
-  padding: 14px 18px;
+  padding: 10px 18px;  /* 紧凑化：14 → 10 */
 }
+.row-info { min-width: 0; }
+/* 数量行：左 "共计X/完成Y"  右 "最新完成日期 2026-xx-xx"，紧凑一行 */
+.row-qty-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.latest-date { font-size: 12px; color: #64748b; white-space: nowrap; display: inline-flex; align-items: baseline; gap: 4px; }
+.latest-date .ld-key { color: #718096; font-size: 12px; font-weight: 600; }
+.latest-date .ld-val { color: #1a365d; font-size: 12px; font-variant-numeric: tabular-nums; }
+.deviation-label { font-size: 12px; color: #718096; text-align: right; white-space: nowrap; }
+
 /* 计划/实际日期：左右两列独立块，间距 18px，块最小宽 130px，防止挤压；tabular-nums 防数字抖位 */
-.row-dates { display:flex; gap:18px; align-items:center; }
-.date-block { display:flex; gap:6px; align-items:baseline; min-width:130px; padding:2px 0; }
-.date-key { color:#1a365d; font-size:13px; font-weight:700; }
-.date-val { color:#1a365d; font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; font-size:14px; }
-.date-empty { color:#a0aec0; font-style:italic; font-weight:400; }
-.cell-plan-date { font-size:13px; color:#64748b; white-space:nowrap; }
-.cell-plan-qty { display:inline-flex; align-items:baseline; gap:4px; white-space:nowrap; }
-.qty-num { font-weight:600; font-variant-numeric:tabular-nums; font-size:15px; }
-.qty-unit { color:#718096; font-size:13px; }
-.cell-qty-input { width:120px; }
+.row-dates { display: flex; gap: 18px; align-items: center; }
+.date-block { display: flex; gap: 6px; align-items: baseline; min-width: 130px; padding: 2px 0; }
+.date-key { color: #1a365d; font-size: 13px; font-weight: 700; }
+.date-val { color: #1a365d; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 14px; }
+.date-empty { color: #a0aec0; font-style: italic; font-weight: 400; }
+.cell-plan-date { font-size: 13px; color: #64748b; white-space: nowrap; }
+.cell-plan-qty { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+.qty-num { font-weight: 600; font-variant-numeric: tabular-nums; font-size: 15px; }
+.qty-unit { color: #718096; font-size: 13px; }
+.cell-qty-input { width: 120px; }
 /* 恢复步进按钮后适配：默认组件宽度会被内建样式控制，此处覆盖；步进按钮 28px×2 + 输入区约 64px 可容纳 3 位数 */
 .cell-qty-input :deep(.el-input-number__decrease),
 .cell-qty-input :deep(.el-input-number__increase) { width: 28px; }
-.cell-qty-input :deep(.el-input__inner) { text-align:center; font-variant-numeric:tabular-nums; }
-.cell-status { white-space:nowrap; justify-self:start; }
+.cell-qty-input :deep(.el-input__inner) { text-align: center; font-variant-numeric: tabular-nums; }
+.cell-status { white-space: nowrap; }
+.cell-pending { font-size: 12px; color: #64748b; white-space: nowrap; }
+.cell-done-record { display: inline-flex; align-items: center; font-size: 13px; color: #1a365d; font-weight: 600; white-space: nowrap; }
+.cell-done-date { margin-left: 8px; white-space: nowrap; }
 /* 色条宽度与 grid 第 1 列（6px）对齐，覆盖全局 theme.css 的 .row-card .row-bar{width:4px} */
 .row-grid .row-bar, .row-grid-detail .row-bar { width: 6px; }
-.cell-report-date { display:flex; align-items:center; gap:10px; }
+.cell-report-date { display: flex; align-items: center; gap: 10px; }
 .rd-tag {
-  display:inline-flex; align-items:center; gap:4px;
+  display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 10px; border-radius: 6px;
   background: #ebf8ff; color: #1a365d;
-  font-size:12px; font-weight:600;
-  font-variant-numeric:tabular-nums; min-width:92px; text-align:center;
+  font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums; min-width: 92px; text-align: center;
+  white-space: nowrap;
 }
-.rd-today { background:#f7fafc; color:#2d3748; }   /* 未开始/未填写的「今天」标识稍灰 */
-.rd-btn { padding: 4px 10px; font-size:12px; }
+.rd-today { background: #f7fafc; color: #2d3748; }   /* 未开始/未填写的「今天」标识稍灰 */
+.rd-btn { padding: 4px 10px; font-size: 12px; }
 .rd-picker-panel { padding: 4px 0; }
 .rd-picker-hint { margin-top: 8px; font-size: 11px; color: #64748b; }
-@media (max-width:1100px) {
-  .row-grid { grid-template-columns: 6px 110px 90px 110px 100px 240px; gap:10px; }
-  /* 窄屏第 4 列为 110px，input 宽度同步，避免右侧 10px 溢出 */
+
+@media (max-width: 1100px) {
+  .row-grid { gap: 10px; padding: 10px 14px; }
+  .row-left-section { gap: 10px; }
+  .row-center-section { gap: 8px; }
   .cell-qty-input { width: 110px; }
+  .row-grid-detail { padding: 8px 14px; gap: 10px; }
+  .latest-date { font-size: 11px; }
 }
 </style>

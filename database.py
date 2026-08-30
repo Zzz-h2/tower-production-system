@@ -470,6 +470,59 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
         conn.close()
 
 
+def save_independent_fill(project_id: int, process_name: str,
+                          fill_qty: int, report_date: str) -> int:
+    """独立工序（累计完成/累计发运）每次填报：按日期 find-or-create node_plan + upsert actual。
+
+    - 同一天再次填报：更新该日那条 actual（不会产生新行）
+    - 不同天填报：INSERT 新 node_plan（plan_date=report_date, plan_qty=fill_qty）+ 新 actual
+    - 原 NULL-date 占位行（由 sync_independent_plans 创建）始终保留，作为「合同总数」分母
+
+    Args:
+        project_id: 项目ID
+        process_name: 工序名（必须是 INDEPENDENT_PROCESS_NAMES 之一）
+        fill_qty: 本次填报数量（delta，不是累计）
+        report_date: 'YYYY-MM-DD' 字符串
+
+    Returns:
+        int: 受影响的 node_plan_id
+    """
+    if process_name not in INDEPENDENT_PROCESS_NAMES:
+        raise ValueError(f"非独立工序不支持逐日报表：{process_name}")
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM process_node_plans "
+                "WHERE project_id=%s AND process_name=%s AND plan_date=%s LIMIT 1",
+                (project_id, process_name, report_date),
+            )
+            row = cursor.fetchone()
+            if row:
+                node_plan_id = row['id']
+            else:
+                process_order = 90 if process_name == INDEPENDENT_PROCESS_NAMES[0] else 91
+                cursor.execute(
+                    "INSERT INTO process_node_plans "
+                        "(project_id, process_name, process_order, plan_date, plan_qty) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (project_id, process_name, process_order, report_date, int(fill_qty)),
+                )
+                node_plan_id = cursor.lastrowid
+            cursor.execute("""
+                INSERT INTO node_actual_progress
+                    (project_id, node_plan_id, process_name, actual_qty, report_date)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    actual_qty = VALUES(actual_qty),
+                    report_date = VALUES(report_date)
+            """, (project_id, node_plan_id, process_name, int(fill_qty), report_date))
+            conn.commit()
+            return node_plan_id
+    finally:
+        conn.close()
+
+
 
 def get_node_actuals(project_id: int) -> dict:
     """获取项目全部节点实际进度，返回 {node_plan_id: {"actual_qty": int, "report_date": date}}。"""

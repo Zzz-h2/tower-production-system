@@ -99,14 +99,17 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
         })
 
     # 独立工序卡片（累计完成总数/累计发运总数）：追加在 11 道工序之后。
-    # 无日期/前序/异常语义：按 total_actual vs total_plan 直接给 进行中/已完成，不显示任何时间标签。
+    # total_plan = 合同占位行（plan_date IS NULL）的 plan_qty = contract_count（进度条分母不变）
+    # total_actual = 所有行 actual_qty 之和（每次填报一条；总和 = 累计填报）
     for pn in INDEPENDENT_PROCESS_NAMES:
         if pn not in proc_groups:
             continue
         grp = proc_groups[pn]
-        total_plan = sum(r["plan_qty"] for r in grp)
+        # 合同占位行：plan_date 为 NULL，plan_qty = contract_count
+        placeholder = [r for r in grp if not str(r.get("plan_date") or "")]
+        total_plan = sum(r["plan_qty"] for r in placeholder) if placeholder else sum(r["plan_qty"] for r in grp)
         total_actual = sum(r["actual_qty"] for r in grp)
-        done = total_actual >= total_plan
+        done = total_actual >= total_plan and total_plan > 0
         status = "done" if done else "in_progress"
         progress = (total_actual / total_plan * 100) if total_plan else 0
         processes.append({
@@ -139,7 +142,13 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
 
 
 def build_process_detail(process_name: str, plans: list[dict], actuals: dict, today=None) -> dict:
-    """某工序节点列表：按 今日/逾期/未来/已完成 四组返回（填报弹窗数据源）。"""
+    """某工序节点列表：按 今日/逾期/未来/已完成 四组返回（填报弹窗数据源）。
+
+    独立工序特殊处理：
+      - groups.done 按 plan_date 降序（最新填报在上）
+      - 卡片（build_overview）total_plan = 合同占位行（plan_date IS NULL）的 plan_qty = contract_count
+      - 卡片 total_actual = 所有行 actual_qty 之和（每次填报一条）
+    """
     today = today or date.today()
     proc_nodes = sorted(
         (r for r in plans if r["process_name"] == process_name),
@@ -147,6 +156,15 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
     )
     groups = split_node_groups(proc_nodes, actuals, today)
     rows = enrich_rows(proc_nodes, actuals, today)
+
+    # 独立工序的 done 组按日期降序展示（最新填报在上）
+    if process_name in INDEPENDENT_PROCESS_NAMES:
+        groups['done'] = sorted(
+            groups['done'],
+            key=lambda p: str(p.get('plan_date') or ''),
+            reverse=True,
+        )
+
     return {
         "process_name": process_name,
         "is_independent": process_name in INDEPENDENT_PROCESS_NAMES,

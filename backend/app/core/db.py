@@ -95,6 +95,16 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
     _fn(project_id, node_plan_id, process_name, actual_qty, report_date)
 
 
+def save_independent_fill(project_id: int, process_name: str,
+                          fill_qty: int, report_date: str) -> int:
+    """独立工序（累计完成总数/累计发运总数）逐日填报：按日期 find-or-create node_plan + upsert actual。
+
+    桥接根目录 database.py 的 save_independent_fill（路由层通过本桥接调用）。
+    """
+    from database import save_independent_fill as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, process_name, fill_qty, report_date)
+
+
 # ---------- 项目（复用于项目列表/详情） ----------
 
 def get_all_projects(status_filter=None, big_area_person: str | None = None) -> list[dict]:

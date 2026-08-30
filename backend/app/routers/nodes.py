@@ -31,8 +31,10 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
 
     if req.group not in GROUP_LABELS:
         raise HTTPException(status_code=400, detail={"code": "UNKNOWN_GROUP", "message": f"未知分组：{req.group}"})
-    if req.group == "done" and user.get("role") != "admin":
-        # done 分组对普通用户为「无法编辑」只读模式（前端禁用输入）；admin 可编辑补录
+    if req.group == "done" and user.get("role") != "admin" and process_name not in INDEPENDENT_PROCESS_NAMES:
+        # done 分组对普通用户为「无法编辑」只读模式（前端禁用输入）；admin 可编辑补录。
+        # 独立工序（累计完成/累计发运）例外：每次填报都是新增一条「本次记录」而非修改已有"已完成"记录，
+        # 所以大区账号也允许在 done 分组写入（前端在「已填报」行允许再填一次）。
         raise HTTPException(status_code=400, detail={"code": "DONE_READONLY", "message": "已完成分组不可编辑（无法填报）"})
 
     plans = db.get_node_plans(pid)
@@ -76,14 +78,26 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                 detail={"code": "PREV_PROC_QUOTA_EXCEEDED", "message": err},
             )
 
-    # 写入（只写当前分组，每行独立填报日期；大区账号锁定今日；独立工序不强制日期）
+    # 写入（只写当前分组，每行独立填报日期；大区账号锁定今日；独立工序按日期 find-or-create）
     saved = 0
     lock_date = user.get("role") == "big_area"
     for v in req.values:
         if is_independent:
+            # 独立工序：按日期 find-or-create node_plan + actual（每日一条新行，同日累加到同条）
             rd = v.report_date or today.strftime("%Y-%m-%d")
+            try:
+                datetime.strptime(rd, "%Y-%m-%d")
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "BAD_REPORT_DATE", "message": "report_date 格式必须为 YYYY-MM-DD"},
+                )
+            db.save_independent_fill(pid, process_name, int(v.qty), rd)
+            saved += 1
         elif lock_date:
             rd = today.strftime("%Y-%m-%d")
+            db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd)
+            saved += 1
         else:
             rd = v.report_date or req.report_date or today.strftime("%Y-%m-%d")
             try:
@@ -93,8 +107,8 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                     status_code=400,
                     detail={"code": "BAD_REPORT_DATE", "message": "report_date 格式必须为 YYYY-MM-DD"},
                 )
-        db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd)
-        saved += 1
+            db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd)
+            saved += 1
 
     return {
         "message": f"✅ 已保存 {saved} 个节点进度（工序：{process_name}，{GROUP_LABELS[req.group]}）",
