@@ -92,9 +92,32 @@ export const useAuthStore = defineStore('auth', {
     },
 
     /**
-     * 登出：清空 state 与 localStorage（JWT 无状态，本地清理即可）。
+     * 会话续期：POST /api/auth/touch，成功后用新 token 覆盖本地（user 信息保持不变）。
+     * 失败（如后端判定 IDLE_TIMEOUT 返回 401）直接向上抛，由调用方决定登出时机。
      */
-    logout() {
+    async extendSession() {
+      const res = await http.post('/auth/touch')
+      const token = res.access_token
+      if (token) {
+        this.token = token
+        // 保留原 user 信息：优先复用 localStorage 中已存的用户对象，避免丢字段
+        const saved = readSaved()
+        const user = saved?.user || {
+          username: this.username,
+          role: this.role,
+          big_area_name: this.bigAreaName,
+          label: this.label,
+        }
+        writeSaved(this.token, user)
+      }
+      return res
+    },
+
+    /**
+     * 登出：清空 state 与 localStorage（JWT 无状态，本地清理即可）。
+     * @param {'manual' | 'idle' | 'expired'} reason 登出原因，仅用于区分来源（不传即 'manual'）
+     */
+    logout(reason = 'manual') {
       this.token = ''
       this.username = ''
       this.role = ''
