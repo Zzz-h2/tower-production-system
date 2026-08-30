@@ -20,7 +20,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "https://tower-frontend-cloudbase-d2g5mgnii8ac68cb7.webapps.tcloudbase.com",
-        "https://tower-frontend-cloudbase-d2g5jgnii8ac68cb7.webapps.tcloudbase.com",
+        "https://cloudbase-d2g5mgnii8ac68cb7-1470711810.tcloudbaseapp.com",  # 真实生产前端域名
     ],
     allow_credentials=True,
     allow_methods=["*"],
