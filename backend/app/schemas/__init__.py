@@ -46,3 +46,11 @@ class ProjectUpdateRequest(BaseModel):
     risk_level: Optional[str] = None
     status: Optional[str] = None
     remarks: Optional[str] = None
+
+
+# ---------- 手动完成 ----------
+
+class ManualCompleteRequest(BaseModel):
+    """手动完成：为提前完工但无排产计划的项目补录『附件安装』产出。"""
+    complete_qty: int
+    complete_date: str

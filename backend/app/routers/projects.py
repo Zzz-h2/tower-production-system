@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """项目相关 API：列表（搜索/筛选/分页）、手动添加、详情、节点计划、预警。"""
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from ..core import db
 from ..core.deps import get_current_user, get_scope_big_area, require_admin, require_project_access
-from ..schemas import ProjectUpdateRequest
+from ..schemas import ManualCompleteRequest, ProjectUpdateRequest
 from ..services.node_service import build_overview, build_process_detail, enrich_rows
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -196,6 +196,73 @@ def clear_node_plans(pid: int, user: dict = Depends(require_admin)):
     require_project_access(project, user)
     db.delete_all_node_plans(pid)  # 彻底清空该项目所有节点计划（含独立工序）
     return {"message": "✅ 已清空该项目的节点计划"}
+
+
+@router.post("/{pid}/manual-complete")
+def manual_complete(pid: int, payload: ManualCompleteRequest, user: dict = Depends(require_admin)):
+    """手动完成：为「提前完工但无排产计划」的项目补录『附件安装』完成数量。（仅 admin）"""
+    project = db.get_project_by_id(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
+
+    complete_date = (payload.complete_date or "").strip()
+    try:
+        datetime.strptime(complete_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_DATE", "message": "完成时间格式必须为 YYYY-MM-DD"},
+        )
+
+    try:
+        complete_qty = int(payload.complete_qty)
+    except (TypeError, ValueError):
+        complete_qty = 0
+    if complete_qty <= 0 or complete_qty != payload.complete_qty:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_QTY", "message": "完成套数必须为正整数"},
+        )
+
+    # 剩余上限口径（用户 2026-08-31 澄清）：contract_count = 项目总数；monthly_plan = 本月待完成套数，语义不同，不做回退
+    _total = int(project.get("contract_count") or 0)
+    if _total <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "NO_REMAINING",
+                    "message": "该项目未设置合同总数，无法确定剩余未完成数量，请先在项目中填写合同总数"},
+        )
+    plans = db.get_node_plans(pid)
+    actuals = db.get_node_actuals(pid)
+    att_plans = [n for n in plans if n.get("process_name") == "附件安装"]
+    done = sum(
+        int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0)
+        for n in att_plans
+    )
+    # 同日覆盖：本次提交将「替代」同日期那条记录，它的旧值不该计入已完成（否则报满后想改小会被误拒）
+    same_date = [n for n in att_plans if str(n.get("plan_date") or "")[:10] == complete_date]
+    if same_date:
+        done -= sum(
+            int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0)
+            for n in same_date
+        )
+    remaining = max(0, _total - done)
+
+    if complete_qty > remaining:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "QTY_EXCEED_REMAINING",
+                    "message": f"完成套数不能超过剩余未完成 {remaining} 套"},
+        )
+
+    node_plan_id = db.upsert_manual_complete(pid, complete_qty, complete_date)
+    return {
+        "message": f"✅ 已手动完成 {complete_qty} 套",
+        "node_plan_id": node_plan_id,
+        "completed_sets": done + complete_qty,
+        "remaining_sets": remaining - complete_qty,
+    }
 
 
 @router.put("/{pid}")

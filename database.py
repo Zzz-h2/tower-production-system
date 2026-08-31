@@ -470,6 +470,55 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
         conn.close()
 
 
+def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str) -> int:
+    """手动完成：为项目写入/更新一条『附件安装』节点计划 + 实际完成。
+
+    用于「提前完工但没有排产计划」的项目补录产出。语义：
+    - process_name='附件安装'，process_order=99（区别于排产工序 1-11 与独立工序 90/91）
+    - plan_qty 与 actual_qty **都写 complete_qty**：项目整体进度 progress_pct 的口径是
+      附件安装 SUM(actual)/SUM(plan)（见 backend/app/core/db.py:296-303），只写 actual
+      会让分母为 0、进度恒为 0。
+    - 唯一键 uk_proj_proc_date (project_id, process_name, plan_date)：
+      同一天重复提交 = **覆盖**（plan_qty 更新为本次值），不同日期 = 新增一行（累加）。
+
+    Args:
+        project_id: 项目ID
+        complete_qty: 完成套数（正整数，上限由路由层校验）
+        complete_date: 完成日期 'YYYY-MM-DD'
+
+    Returns:
+        int: 写入/更新的 node_plan_id
+    """
+    complete_date = str(complete_date)[:10]
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO process_node_plans "
+                    "(project_id, process_name, process_order, plan_date, plan_qty) "
+                "VALUES (%s, %s, 99, %s, %s) "
+                "ON DUPLICATE KEY UPDATE plan_qty = VALUES(plan_qty)",
+                (project_id, "附件安装", complete_date, int(complete_qty or 0)),
+            )
+            node_plan_id = cursor.lastrowid
+            if not node_plan_id:
+                # ON DUPLICATE 走 UPDATE 分支时 lastrowid 可能为 0，回查取回 id
+                cursor.execute(
+                    "SELECT id FROM process_node_plans "
+                    "WHERE project_id=%s AND process_name=%s AND plan_date=%s LIMIT 1",
+                    (project_id, "附件安装", complete_date),
+                )
+                row = cursor.fetchone()
+                node_plan_id = row['id'] if row else 0
+            conn.commit()
+    finally:
+        conn.close()
+
+    upsert_node_actual(project_id, node_plan_id, "附件安装",
+                       int(complete_qty or 0), complete_date)
+    return node_plan_id
+
+
 def save_independent_fill(project_id: int, process_name: str,
                           fill_qty: int, report_date: str) -> int:
     """独立工序（累计完成/累计发运）每次填报：按日期 find-or-create node_plan + upsert actual。

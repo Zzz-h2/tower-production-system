@@ -144,10 +144,19 @@
       <el-empty v-if="!uploadedList.length" description="暂无已上传排产计划的项目" :image-size="80" />
     </div>
 
-    <!-- 导入弹窗（复用 ScheduleImport） -->
+    <!-- 导入弹窗（复用 ScheduleImport）+ 手动完成按钮 -->
     <el-dialog v-model="importVisible" :title="`导入排产计划：${importTarget?.project_name || ''}`" width="560px" destroy-on-close>
       <ScheduleImport v-if="importTarget" :pid="String(importTarget.id)" :disabled="!auth.canEdit" @imported="onImported" />
+      <div class="import-dialog-actions">
+        <el-button size="small" :disabled="!auth.isAdmin" title="仅管理员可手动完成" @click="manualVisible = true">
+          手动完成
+        </el-button>
+        <el-button size="small" @click="importVisible = false">关闭</el-button>
+      </div>
     </el-dialog>
+
+    <!-- 手动完成二级弹窗（独立子组件，与导入弹窗平级） -->
+    <ManualCompleteDialog v-model="manualVisible" :project="importTarget" @completed="onManualCompleted" />
   </div>
 </template>
 
@@ -160,6 +169,7 @@ import { fetchProjects } from '../api/node'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
 import ScheduleImport from './ScheduleImport.vue'
+import ManualCompleteDialog from './ManualCompleteDialog.vue'
 
 const router = useRouter()
 const store = useProjectStore()
@@ -213,6 +223,16 @@ async function onImported() {
   await load()
 }
 
+// 手动完成弹窗
+const manualVisible = ref(false)
+async function onManualCompleted() {
+  manualVisible.value = false
+  importVisible.value = false
+  await load()                        // 刷新本页 KPI + 未上传/已上传两个表格
+  await store.loadDashboard()         // 刷新主页面顶部 KPI 卡
+  store.lastNodeSavedAt = Date.now()  // 触发节点预警/异常模块刷新
+}
+
 // 跳详情（节点计划 Tab）
 function goDetail(row) {
   router.push(`/projects/${row.id}`)
@@ -251,4 +271,12 @@ onMounted(() => {
 .st-pill { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
 .proj-link { color: #3182ce; cursor: pointer; font-weight: 500; }
 .proj-link:hover { text-decoration: underline; }
+.import-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
 </style>

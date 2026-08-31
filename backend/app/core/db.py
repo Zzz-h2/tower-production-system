@@ -101,6 +101,15 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
     _fn(project_id, node_plan_id, process_name, actual_qty, report_date)
 
 
+def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str) -> int:
+    """手动完成：按日期 upsert 一条『附件安装』节点计划 + 实际完成，返回 node_plan_id。
+
+    桥接根目录 database.py 的 upsert_manual_complete（路由层通过本桥接调用）。
+    """
+    from database import upsert_manual_complete as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, complete_qty, complete_date)
+
+
 def save_independent_fill(project_id: int, process_name: str,
                           fill_qty: int, report_date: str) -> int:
     """独立工序（累计完成总数/累计发运总数）逐日填报：按日期 find-or-create node_plan + upsert actual。
@@ -301,6 +310,13 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
             for n in att_plans
         )
         p["progress_pct"] = float(round(att_actual_qty / att_plan_qty * 100, 1)) if att_plan_qty else 0.0
+
+        # 已完成 / 剩余套数：复用上面已算好的 att_actual_qty，不新增查询
+        p["completed_sets"] = att_actual_qty
+        # 剩余口径：contract_count = 项目总数（用户口径 2026-08-31 澄清）；
+        # monthly_plan 是「本月待完成套数」，语义不同，**不做回退**
+        _total = int(p.get("contract_count") or 0)
+        p["remaining_sets"] = max(0, _total - att_actual_qty)
 
     # status 按风险等级在内存过滤（all / None / 其它值 → 不过滤）
     if status in ("normal", "warning", "delayed"):

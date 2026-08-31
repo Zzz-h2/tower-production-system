@@ -61,3 +61,7 @@ export const importSchedule = (pid, file) => {
   form.append('file', file)
   return http.post(`/projects/${pid}/import-schedule`, form)
 }
+
+// 手动完成（仅 admin）：为「提前完工但无排产计划」的项目补录『附件安装』产出
+// payload: { complete_qty: int, complete_date: 'YYYY-MM-DD' }；返回 { message, node_plan_id, completed_sets, remaining_sets }
+export const manualComplete = (pid, payload) => http.post(`/projects/${pid}/manual-complete`, payload)
