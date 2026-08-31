@@ -2,10 +2,10 @@
   <el-dialog
     v-model="visible"
     title="手动添加项目"
-    width="520px"
+    width="560px"
     @close="onClose"
   >
-    <el-form ref="formRef" :model="form" :rules="rules" label-width="120px">
+    <el-form ref="formRef" :model="form" :rules="rules" label-width="130px" class="add-project-form">
       <el-form-item label="项目名称" prop="project_name">
         <el-input v-model="form.project_name" placeholder="必填" />
       </el-form-item>
@@ -20,6 +20,9 @@
       </el-form-item>
       <el-form-item label="大区负责人" prop="big_area_person">
         <el-input v-model="form.big_area_person" placeholder="选填" />
+      </el-form-item>
+      <el-form-item label="合同总数" prop="contract_count">
+        <el-input v-model.number="form.contract_count" placeholder="选填，整数" />
       </el-form-item>
       <el-form-item label="本月计划出品" prop="monthly_plan">
         <el-input v-model.number="form.monthly_plan" placeholder="必填，整数" />
@@ -69,13 +72,14 @@ watch(() => props.modelValue, (v) => { visible.value = v })
 const formRef = ref(null)
 const submitting = ref(false)
 
-// 表单初始值（5 必填 + 4 选填）
+// 表单初始值（5 必填 + 5 选填）
 const emptyForm = () => ({
   project_name: '',
   machine_type: '',
   factory_name: '',
   delivery_person: '',
   big_area_person: '',
+  contract_count: null,
   monthly_plan: null,
   last_month_output: null,
   plan_start_date: '',
@@ -117,3 +121,17 @@ async function submit() {
   }
 }
 </script>
+
+<style scoped>
+/* 合理规划各标头与输入框之间的间距，避免堆叠过密 */
+.add-project-form :deep(.el-form-item) {
+  margin-bottom: 22px;
+}
+.add-project-form :deep(.el-form-item:last-child) {
+  margin-bottom: 0;
+}
+.add-project-form :deep(.el-dialog__body) {
+  padding-top: 16px;
+  padding-bottom: 12px;
+}
+</style>

@@ -162,14 +162,14 @@
             <span class="region-cell">{{ row.big_area_person || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="remarks" label="备注" min-width="160" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="remark-cell">{{ row.remarks || '—' }}</span>
-          </template>
-        </el-table-column>
         <el-table-column label="风险状态" width="100">
           <template #default="{ row }">
             <span class="status-pill" :style="riskStyle(row.risk_level)">{{ riskLabel(row.risk_level) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="remarks" label="备注" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="remark-cell">{{ row.remarks || '—' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="230" fixed="right">
