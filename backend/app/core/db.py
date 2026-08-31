@@ -105,6 +105,16 @@ def save_independent_fill(project_id: int, process_name: str,
     return getattr(_fn, "__wrapped__", _fn)(project_id, process_name, fill_qty, report_date)
 
 
+def move_independent_fill_date(project_id: int, process_name: str,
+                               node_plan_id: int, new_report_date: str,
+                               new_qty: int | None = None) -> int:
+    """独立工序「已完成」记录改日期/数量（管理员用）：移动 plan_date + actual.report_date，
+    目标日期已有记录则合并；new_qty 非 None 时同步数量。桥接根目录 database.py 的同名函数。
+    """
+    from database import move_independent_fill_date as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, process_name, node_plan_id, new_report_date, new_qty)
+
+
 # ---------- 项目（复用于项目列表/详情） ----------
 
 def get_all_projects(status_filter=None, big_area_person: str | None = None) -> list[dict]:

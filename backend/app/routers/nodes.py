@@ -83,7 +83,6 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
     lock_date = user.get("role") == "big_area"
     for v in req.values:
         if is_independent:
-            # 独立工序：按日期 find-or-create node_plan + actual（每日一条新行，同日累加到同条）
             rd = v.report_date or today.strftime("%Y-%m-%d")
             try:
                 datetime.strptime(rd, "%Y-%m-%d")
@@ -92,7 +91,24 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                     status_code=400,
                     detail={"code": "BAD_REPORT_DATE", "message": "report_date 格式必须为 YYYY-MM-DD"},
                 )
-            db.save_independent_fill(pid, process_name, int(v.qty), rd)
+            # 「已完成」记录改日期（管理员）：移动该条记录到新日期（后端合并冲突）；
+            # 占位行（plan_date IS NULL）或未改日期：按日期 find-or-create（每日一条新行，同日累加到同条）
+            plan = next((p for p in proc_nodes if p["id"] == v.node_id), None)
+            is_move = (
+                plan is not None
+                and plan.get("plan_date") is not None
+                and rd != str(plan["plan_date"])[:10]
+            )
+            if is_move:
+                if user.get("role") != "admin":
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"code": "DONE_READONLY", "message": "已完成记录的填报日期仅管理员可调整"},
+                    )
+                # 管理员可能同时改了数量和日期 → 移动时同步新数量（后端合并/移动用新 qty）
+                db.move_independent_fill_date(pid, process_name, v.node_id, rd, int(v.qty))
+            else:
+                db.save_independent_fill(pid, process_name, int(v.qty), rd)
             saved += 1
         elif lock_date:
             rd = today.strftime("%Y-%m-%d")

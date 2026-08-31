@@ -11,33 +11,53 @@
     <template v-if="detail">
       <el-tabs v-model="innerMode">
         <el-tab-pane label="📋 节点详情" name="detail">
-          <div v-for="row in detail.nodes" :key="row.id" class="row-card row-grid-detail">
-            <div class="row-bar" :style="{ background: colorOf(row.status) }"></div>
-            <div class="row-info">
-              <div v-if="!isIndependent" class="row-dates">
-                <div class="date-block">
-                  <span class="date-key">计划</span>
-                  <span class="date-val">{{ row.plan_date }}</span>
-                </div>
-                <div class="date-block">
-                  <span class="date-key">实际</span>
-                  <span v-if="(row.actual_qty || 0) > 0" class="date-val">{{ row.report_date || '—' }}</span>
-                  <span v-else class="date-val date-empty">暂无</span>
+          <!-- 独立工序（累计完成总数 / 累计发运总数）：仅渲染一张占位汇总卡
+               「完成」= 所有日报行 actual_qty 之和；每次填报产生的日期行
+               只在「填报进度 → 已完成」分组中展示，不进节点详情主视图。 -->
+          <template v-if="isIndependent">
+            <div class="row-card row-grid-detail">
+              <div class="row-bar" :style="{ background: colorOf(independentStatus.status) }"></div>
+              <div class="row-info">
+                <div class="row-qty-line">
+                  <span class="qty-text">
+                    共计 <span class="qty-num">{{ independentContract }}</span> 套 / 完成 <span class="qty-num">{{ independentFilled }}</span> 套
+                  </span>
+                  <span v-if="latestIndependentDate" class="latest-date">
+                    <span class="ld-key">最新完成日期</span>
+                    <span class="ld-val">{{ latestIndependentDate }}</span>
+                  </span>
                 </div>
               </div>
-              <div class="row-qty-line">
-                <span class="qty-text">
-                  {{ isIndependent ? '共计' : '计划' }} <span class="qty-num">{{ row.plan_qty }}</span> 套 / {{ isIndependent ? '完成' : '实际' }} <span class="qty-num">{{ row.actual_qty }}</span> 套
-                </span>
-                <span v-if="(row.actual_qty || 0) > 0" class="latest-date">
-                  <span class="ld-key">{{ isIndependent ? '最新完成日期' : '最新填报日期' }}</span>
-                  <span class="ld-val">{{ row.report_date || '—' }}</span>
-                </span>
-              </div>
+              <span class="status-pill" :style="pillStyle(independentStatus.status)">{{ independentStatus.label }}</span>
+              <div class="deviation-label">-</div>
             </div>
-            <span class="status-pill" :style="pillStyle(row.status)">{{ row.label }}</span>
-            <div class="deviation-label">{{ row.deviation_label }}</div>
-          </div>
+          </template>
+          <!-- 11 道排产工序：按节点逐行展示（保持原行为，未做任何改动） -->
+          <template v-else>
+            <div v-for="row in detail.nodes" :key="row.id" class="row-card row-grid-detail">
+              <div class="row-bar" :style="{ background: colorOf(row.status) }"></div>
+              <div class="row-info">
+                <div class="row-dates">
+                  <div class="date-block">
+                    <span class="date-key">计划</span>
+                    <span class="date-val">{{ row.plan_date }}</span>
+                  </div>
+                  <div class="date-block">
+                    <span class="date-key">实际</span>
+                    <span v-if="(row.actual_qty || 0) > 0" class="date-val">{{ row.report_date || '—' }}</span>
+                    <span v-else class="date-val date-empty">暂无</span>
+                  </div>
+                </div>
+                <div class="row-qty-line">
+                  <span class="qty-text">
+                    计划 <span class="qty-num">{{ row.plan_qty }}</span> 套 / 实际 <span class="qty-num">{{ row.actual_qty }}</span> 套
+                  </span>
+                </div>
+              </div>
+              <span class="status-pill" :style="pillStyle(row.status)">{{ row.label }}</span>
+              <div class="deviation-label">{{ row.deviation_label }}</div>
+            </div>
+          </template>
         </el-tab-pane>
         <el-tab-pane label="📝 填报进度" name="input" />
         <el-tab-pane v-if="!isIndependent" label="⚠️ 异常提报" name="exception">
@@ -71,7 +91,7 @@
         <el-segmented v-model="activeGroup" :options="groupOptions" block style="margin-bottom:14px;" />
         <div v-if="groupNodes.length === 0" class="empty-hint">当前分组「{{ groupLabel }}」没有可保存的节点。</div>
         <template v-else>
-          <!-- 独立工序（累计完成/累计发运）· 今日待填报：单卡增量输入 -->
+          <!-- 独立工序（累计完成/累计发运）· 今日待填报：单卡增量输入（管理员可改填报日期，大区账号置灰） -->
           <div v-if="isIndependent && activeGroup === 'today'" class="fill-card">
             <div class="fill-card-left">
               <span class="fill-card-label">本次填报</span>
@@ -88,17 +108,89 @@
               </span>
             </div>
             <div class="fill-card-right">
+              <!-- 与 11 道排产工序的「更改填报日期」机制一致：修改本次填报的 report_date（管理员可改，大区账号置灰） -->
+              <div class="cell-report-date">
+                <span class="rd-tag" :class="{ 'rd-today': (reportDates[groupNodes[0].id] || fmtToday()) === fmtToday() }">
+                  📅 {{ reportDates[groupNodes[0].id] || fmtToday() }}
+                </span>
+                <el-popover
+                  placement="left-start"
+                  :width="260"
+                  trigger="click"
+                  v-model:visible="datePickerOpen[groupNodes[0].id]"
+                >
+                  <template #reference>
+                    <el-button
+                      size="small"
+                      :disabled="!auth.isAdmin"
+                      class="rd-btn"
+                    >更改填报日期</el-button>
+                  </template>
+                  <div class="rd-picker-panel">
+                    <el-date-picker
+                      v-model="reportDates[groupNodes[0].id]"
+                      type="date"
+                      value-format="YYYY-MM-DD"
+                      format="YYYY-MM-DD"
+                      :clearable="false"
+                      style="width: 100%;"
+                      @change="onDatePicked(groupNodes[0].id, $event)"
+                    />
+                    <div class="rd-picker-hint">
+                      上次保存：<b>{{ savedDates[groupNodes[0].id] || '无' }}</b>
+                    </div>
+                  </div>
+                </el-popover>
+              </div>
               <span class="status-pill" :style="pillStyle('in_progress')">🔵 进行中</span>
             </div>
           </div>
-          <!-- 独立工序· 已完成：每条记录一张卡（按日期降序） -->
+          <!-- 独立工序· 已完成：每条记录一张卡（按日期降序；管理员可改日期/数量，大区账号置灰） -->
           <div v-else-if="isIndependent && activeGroup === 'done'">
             <div v-for="node in groupNodes" :key="node.id" class="record-card">
               <div class="record-card-left">
-                <span class="record-card-date">📅 {{ node.plan_date }}</span>
-                <span class="record-card-qty">完成 <span class="qty-num">{{ node.actual_qty || 0 }}</span> 套</span>
+                <span class="record-card-date">📅 {{ reportDates[node.id] || node.plan_date }}</span>
+                <el-input-number
+                  v-model="inputValues[node.id]"
+                  :min="0"
+                  size="small"
+                  class="cell-qty-input"
+                  :disabled="!auth.isAdmin"
+                />
+                <span class="qty-unit">套</span>
               </div>
               <div class="record-card-right">
+                <!-- 与 11 道排产工序的「更改填报日期」机制一致：移动该条记录到所选日期（管理员可改，大区账号置灰） -->
+                <div class="cell-report-date">
+                  <el-popover
+                    placement="left-start"
+                    :width="260"
+                    trigger="click"
+                    v-model:visible="datePickerOpen[node.id]"
+                  >
+                    <template #reference>
+                      <el-button
+                        size="small"
+                        :disabled="!auth.isAdmin"
+                        class="rd-btn"
+                      >更改填报日期</el-button>
+                    </template>
+                    <div class="rd-picker-panel">
+                      <el-date-picker
+                        v-model="reportDates[node.id]"
+                        type="date"
+                        value-format="YYYY-MM-DD"
+                        format="YYYY-MM-DD"
+                        :clearable="false"
+                        style="width: 100%;"
+                        @change="onDatePicked(node.id, $event)"
+                      />
+                      <div class="rd-picker-hint">
+                        上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
+                      </div>
+                    </div>
+                  </el-popover>
+                </div>
                 <span class="status-pill" :style="pillStyle('done')">🟢 已完成</span>
               </div>
             </div>
@@ -331,6 +423,23 @@ const independentRemainingAfter = computed(() => {
     groupNodes.value[0] ? (inputValues.value[groupNodes.value[0].id] ?? 0) : 0
   ) || 0
   return Math.max(0, independentRemaining.value - delta)
+})
+// 独立工序：所有日报行（plan_date 非空）最新填报日期 —— 节点详情「最新完成日期」用
+const latestIndependentDate = computed(() => {
+  if (!isIndependent.value || !detail.value) return null
+  const dates = detail.value.nodes
+    .filter((n) => n.plan_date && n.report_date)
+    .map((n) => n.report_date)
+    .sort()
+  return dates.length ? dates[dates.length - 1] : null
+})
+// 独立工序：节点详情汇总卡状态（合同已完成 → done；否则 in_progress；无日期偏差）
+const independentStatus = computed(() => {
+  const done = independentContract.value > 0 && independentFilled.value >= independentContract.value
+  return {
+    status: done ? 'done' : 'in_progress',
+    label: done ? '🟢 已完成' : '🔵 进行中',
+  }
 })
 
 async function load() {

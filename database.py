@@ -523,6 +523,100 @@ def save_independent_fill(project_id: int, process_name: str,
         conn.close()
 
 
+def move_independent_fill_date(project_id: int, process_name: str,
+                               node_plan_id: int, new_report_date: str,
+                               new_qty: int | None = None) -> int:
+    """独立工序（累计完成/累计发运）「已完成」记录改日期/数量（管理员用，后端兜底移动）。
+
+    - 语义是**移动**该条记录的日期（改 node_plan.plan_date + actual.report_date），
+      不是 find-or-create——避免复制出一条新记录导致累计翻倍。
+    - 目标日期已有另一条记录 → **合并**：把源记录 actual_qty 累加到目标行，删除源行。
+    - 目标日期无记录 → 直接改源行 plan_date + report_date。
+    - new_qty 非 None：管理员同时修改了数量 → 用新数量替代源行 DB 值（合并累加/移动更新都用它），
+      并同步 plan_qty 与 actual_qty 保持一致（独立工序记录行 plan_qty = 当次填报量）。
+
+    Args:
+        project_id: 项目ID
+        process_name: 工序名（必须是 INDEPENDENT_PROCESS_NAMES 之一）
+        node_plan_id: 要移动的「已完成」记录行 id
+        new_report_date: 目标日期 'YYYY-MM-DD'
+        new_qty: 新数量（管理员改了数量时传入；只改日期时传 None）
+
+    Returns:
+        int: 移动/合并后存活的 node_plan_id
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # 1) 源行必须存在且属于该项目+工序
+            cursor.execute(
+                "SELECT id, plan_qty FROM process_node_plans "
+                "WHERE id=%s AND project_id=%s AND process_name=%s",
+                (node_plan_id, project_id, process_name),
+            )
+            src = cursor.fetchone()
+            if not src:
+                raise ValueError(f"独立工序记录 {node_plan_id} 不存在（project={project_id}, process={process_name}）")
+            # 2) 源记录的实际数量：管理员传了新数量则优先用新值，否则用 DB 源行 actual（兜底 plan_qty）
+            if new_qty is not None:
+                src_qty = int(new_qty)
+            else:
+                cursor.execute(
+                    "SELECT actual_qty FROM node_actual_progress "
+                    "WHERE node_plan_id=%s AND project_id=%s",
+                    (node_plan_id, project_id),
+                )
+                src_act = cursor.fetchone()
+                src_qty = int(src_act["actual_qty"] if src_act else src["plan_qty"] or 0)
+            # 3) 目标日期是否已有另一条记录
+            cursor.execute(
+                "SELECT id FROM process_node_plans "
+                "WHERE project_id=%s AND process_name=%s AND plan_date=%s AND id != %s LIMIT 1",
+                (project_id, process_name, new_report_date, node_plan_id),
+            )
+            tgt = cursor.fetchone()
+            if tgt:
+                # 合并：qty 累加到目标行（actual + plan 同步），删除源行（actual + plan）
+                cursor.execute(
+                    "UPDATE node_actual_progress SET actual_qty=actual_qty+%s, report_date=%s "
+                    "WHERE node_plan_id=%s AND project_id=%s",
+                    (src_qty, new_report_date, tgt["id"], project_id),
+                )
+                cursor.execute(
+                    "UPDATE process_node_plans SET plan_qty=plan_qty+%s WHERE id=%s",
+                    (src_qty, tgt["id"]),
+                )
+                cursor.execute("DELETE FROM node_actual_progress WHERE node_plan_id=%s", (node_plan_id,))
+                cursor.execute("DELETE FROM process_node_plans WHERE id=%s", (node_plan_id,))
+                conn.commit()
+                return tgt["id"]
+            # 4) 无冲突：移动（改 plan_date；数量有变则同步 plan_qty + actual_qty）
+            if new_qty is not None:
+                cursor.execute(
+                    "UPDATE process_node_plans SET plan_date=%s, plan_qty=%s WHERE id=%s",
+                    (new_report_date, src_qty, node_plan_id),
+                )
+                cursor.execute(
+                    "UPDATE node_actual_progress SET report_date=%s, actual_qty=%s "
+                    "WHERE node_plan_id=%s AND project_id=%s",
+                    (new_report_date, src_qty, node_plan_id, project_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE process_node_plans SET plan_date=%s WHERE id=%s",
+                    (new_report_date, node_plan_id),
+                )
+                cursor.execute(
+                    "UPDATE node_actual_progress SET report_date=%s "
+                    "WHERE node_plan_id=%s AND project_id=%s",
+                    (new_report_date, node_plan_id, project_id),
+                )
+            conn.commit()
+            return node_plan_id
+    finally:
+        conn.close()
+
+
 
 def get_node_actuals(project_id: int) -> dict:
     """获取项目全部节点实际进度，返回 {node_plan_id: {"actual_qty": int, "report_date": date}}。"""
