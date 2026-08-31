@@ -820,6 +820,64 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
         conn.close()
 
 
+def get_ranking_summary_by_month(month: str, big_area_person: str | None = None) -> list[dict]:
+    """出品排名总览：按交付负责人汇总「当月(调度令月份=projects.created_at 年月)」项目。
+
+    口径（与「生产进度总览」页面联动一致）：
+    - 累计计划套数 total_plan = SUM(projects.monthly_plan)（项目级「本月计划出品」之和，
+      对应生产进度总览页面各项目「本月计划」列的总和）
+    - 累计完成套数 total_actual = SUM(附件安装工序节点 actual_qty)（名下项目附件安装实际完成量）
+    - project_count = 当月项目数
+
+    big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
+    排除 delivery_person 为空 / 纯数字（脏数据），避免汇总失真。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            ba_sql = " AND p.big_area_person = %s" if big_area_person else ""
+            sql = f"""
+                SELECT plan.delivery_person,
+                       plan.total_plan,
+                       plan.project_count,
+                       COALESCE(act.total_actual, 0) AS total_actual
+                FROM (
+                    SELECT p.delivery_person,
+                           SUM(p.monthly_plan) AS total_plan,
+                           COUNT(*) AS project_count
+                    FROM projects p
+                    WHERE DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
+                      AND p.delivery_person IS NOT NULL AND TRIM(p.delivery_person) <> ''
+                      AND p.delivery_person NOT REGEXP '^[0-9]+$'
+                      {ba_sql}
+                    GROUP BY p.delivery_person
+                ) plan
+                LEFT JOIN (
+                    SELECT p.delivery_person, SUM(nap.actual_qty) AS total_actual
+                    FROM projects p
+                    JOIN process_node_plans pnp ON pnp.project_id = p.id
+                         AND pnp.process_name = '附件安装'
+                    JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id
+                    WHERE DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
+                      AND p.delivery_person IS NOT NULL AND TRIM(p.delivery_person) <> ''
+                      AND p.delivery_person NOT REGEXP '^[0-9]+$'
+                      {ba_sql}
+                    GROUP BY p.delivery_person
+                ) act ON act.delivery_person = plan.delivery_person
+                ORDER BY plan.total_plan DESC
+            """
+            params = [month]
+            if big_area_person:
+                params.append(big_area_person)
+            params.append(month)
+            if big_area_person:
+                params.append(big_area_person)
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 # ============================================================
 # 用户表（v5.0：大区行级数据隔离）
 # users.username = 大区名（与 Excel 严格一致）；admin 的 big_area_name 为空

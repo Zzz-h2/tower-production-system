@@ -57,6 +57,12 @@ def get_attachment_plans_by_month(month_start: str, month_end: str, month: str |
     return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, month, big_area_person)
 
 
+def get_ranking_summary_by_month(month: str, big_area_person: str | None = None) -> list[dict]:
+    """出品排名总览聚合：累计计划套数=SUM(monthly_plan)；累计完成套数=SUM(附件安装 actual)。"""
+    from database import get_ranking_summary_by_month as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month, big_area_person)
+
+
 def get_actuals_by_node_ids(node_ids: list[int]) -> dict:
     """批量取节点实际进度：{node_plan_id: actual_qty}（消除 N+1）。"""
     from database import get_actuals_by_node_ids as _fn

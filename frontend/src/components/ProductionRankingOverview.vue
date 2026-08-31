@@ -12,7 +12,7 @@
           @change="load"
         />
         <el-button type="primary" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <span class="hint">统计口径：附件安装工序 · 按排产月份归类</span>
+        <span class="hint">统计口径：累计计划套数=项目「本月计划出品」之和；累计完成套数=附件安装实际完成；按调度令月份归类</span>
       </div>
     </div>
 

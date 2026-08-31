@@ -27,36 +27,32 @@ def _month_range(month: str) -> tuple[str, str]:
 def get_production_ranking(month: str, big_area_person: str | None = None) -> list[dict]:
     """返回按完成率降序的负责人排名列表。month 形如 '2026-08'。
 
-    口径（三页联动一致）：项目集合按 projects.created_at 年月（调度令月份）筛选，
-    累计计划/完成按该月内『附件安装』节点汇总；负责人由 SQL JOIN 直接带回。
+    口径（与「生产进度总览」页面联动一致，2026-08-31 修正）：
+    - 累计计划套数 total_plan = 名下所有项目「本月计划出品」(projects.monthly_plan) 之和；
+      月份 = 调度令月份（projects.created_at 年月），与项目列表/看板同口径。
+    - 累计完成套数 total_actual = 名下所有项目「附件安装」工序实际完成量
+      (node_actual_progress.actual_qty) 之和。
+    - 完成率 = 累计完成套数 / 累计计划套数 × 100%；分母为 0 → None（前端显示 —）。
+    - project_count = 当月项目数。
+    排名：完成率降序（None 排最后）→ 计划套数降序 → 负责人升序。
     big_area_person: 大区负责人（大区行级隔离；admin 传 None 看全量）。
     """
-    ns, ne = _month_range(month)
-
-    plans = db.get_attachment_plans_by_month(ns, ne, month, big_area_person)   # 1 次查询（含 delivery_person）
-    node_ids = [p["id"] for p in plans]
-    actuals = db.get_actuals_by_node_ids(node_ids)            # 1 次查询
-
-    # 按负责人聚合（内存，杜绝 N+1）
-    agg: dict[str, dict] = {}
-    for p in plans:
-        person = str(p.get("delivery_person") or "").strip()
-        if not person:
-            continue
-        a = agg.setdefault(person, {"plan": 0, "actual": 0, "projects": set()})
-        a["plan"] += int(p["plan_qty"] or 0)
-        a["actual"] += actuals.get(int(p["id"]), 0)
-        a["projects"].add(int(p["project_id"]))
+    summary = db.get_ranking_summary_by_month(month, big_area_person)   # 1 次查询（已按人聚合）
 
     rows = []
-    for person, v in agg.items():
-        rate = round(v["actual"] / v["plan"] * 100, 1) if v["plan"] else None
+    for r in summary:
+        person = str(r.get("delivery_person") or "").strip()
+        if not person:
+            continue
+        plan = int(r.get("total_plan") or 0)
+        actual = int(r.get("total_actual") or 0)
+        rate = round(actual / plan * 100, 1) if plan else None
         rows.append({
             "delivery_person": person,
-            "total_plan": v["plan"],
-            "total_actual": v["actual"],
+            "total_plan": plan,
+            "total_actual": actual,
             "completion_rate": rate,   # None 表示分母为零
-            "project_count": len(v["projects"]),
+            "project_count": int(r.get("project_count") or 0),
         })
 
     # 排序：完成率降序（None 排最后）→ 计划套数降序 → 负责人升序
