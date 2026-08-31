@@ -24,7 +24,7 @@
           <span class="icon"></span><span class="block-title">工序节点计划时间轴</span>
           <span class="block-subtitle">圆点按状态着色，红色竖线为今天</span>
         </div>
-        <NodeTimelineChart v-if="overview" :rows="overview.timeline" :processes="overview.visible_processes" :height="timelineHeight" />
+        <NodeTimelineChart v-if="overview" :rows="overview.timeline" :processes="overview.visible_processes" :height="timelineHeight" @visible-change="visibleProcessCount = $event" />
       </div>
 
       <!-- 工序卡片网格 -->
@@ -74,6 +74,14 @@ const store = useProjectStore()
 const auth = useAuthStore()   // 普通账号禁用导入排产（仅管理员可导入）
 const overview = computed(() => store.overview)
 
+// 时间轴当前可见工序数（由子组件图例隐藏时回传），用于实时重算时间轴高度
+const visibleProcessCount = ref(0)
+watch(
+  () => overview.value?.visible_processes,
+  (vp) => { visibleProcessCount.value = (vp || []).length },
+  { immediate: true },
+)
+
 // 是否有节点计划数据
 const hasNodes = computed(() => (overview.value?.kpis?.node_count || 0) > 0)
 
@@ -84,7 +92,7 @@ const kpis = [
   { key: 'done_count', label: '达标节点', color: '#38a169' },
   { key: 'overdue_count', label: '逾期节点', color: '#e53e3e' },
 ]
-const timelineHeight = computed(() => Math.max(480, 85 * Math.max((overview.value?.visible_processes || []).length, 1)))
+const timelineHeight = computed(() => Math.max(480, 85 * Math.max(visibleProcessCount.value, 1)))
 
 // 弹窗状态：mode = detail | input
 const dialogVisible = ref(false)
