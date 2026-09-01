@@ -14,7 +14,9 @@
       </el-form>
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="login-err" />
       <div class="login-tip">
-        管理员账号请联系管理员开通；大区账号由调度令导入自动开通，初始密码见系统公告
+        普通用户登陆请使用：大区负责人姓名+dq@123456<br />
+        例如：张三+dq@123456<br />
+        有任何问题请联系：张恒-15353262798
       </div>
     </el-card>
   </div>
