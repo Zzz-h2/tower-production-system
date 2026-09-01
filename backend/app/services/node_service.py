@@ -2,7 +2,8 @@
 """节点计划聚合服务：把原始行富化为前端所需的「时间轴 / 工序卡片 / 分组」数据。"""
 from datetime import date
 
-from .business_logic import judge_node_status, judge_process_card_status, split_node_groups
+from .business_logic import (judge_node_status, judge_process_card_status, split_node_groups,
+                             compute_real_overdue)
 from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
 
 
@@ -43,7 +44,7 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None) -> list[dict]:
     return rows
 
 
-def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None) -> dict:
+def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None, monthly_plan: int = 0) -> dict:
     """节点计划总览：指标 + 工序卡片 + 时间轴 + 分组数据。
 
     - kpis: 总套数/工序数/节点总数/达标节点/逾期节点
@@ -60,7 +61,7 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
     per_proc_sets = {pn: sum(r["plan_qty"] for r in grp) for pn, grp in proc_groups.items()}
     total_sets = max(per_proc_sets.values()) if per_proc_sets else 0
     done_count = sum(1 for r in rows if r["status"] == "done")
-    overdue_count = sum(1 for r in rows if r["status"] == "overdue")
+    overdue_count = len(compute_real_overdue(rows, monthly_plan))
 
     processes = []
     for pn in SCHEDULE_PROCESS_NAMES:
@@ -69,7 +70,7 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
         grp = proc_groups[pn]
         # 工序卡片状态：双维度判定（总套数完成度 + 当日计划完成度），
         # 替代原节点级 level 汇总——只有全部套数完成才显示"已完成"
-        proc_status = judge_process_card_status(grp, actuals, today)
+        proc_status = judge_process_card_status(grp, actuals, today, monthly_plan)
         total_plan = sum(r["plan_qty"] for r in grp)
         total_actual = sum(r["actual_qty"] for r in grp)
         current_plan = sum(

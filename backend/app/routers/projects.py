@@ -10,6 +10,7 @@ from ..core import db
 from ..core.deps import get_current_user, get_scope_big_area, require_admin, require_project_access
 from ..schemas import ManualCompleteRequest, ProjectUpdateRequest
 from ..services.node_service import build_overview, build_process_detail, enrich_rows
+from ..services.business_logic import compute_real_overdue
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -166,8 +167,8 @@ def get_project(pid: int, user: dict = Depends(get_current_user)):
 
     today_s = str(date.today())
 
-    # 1) 历史逾期
-    has_overdue = any(r["status"] == "overdue" for r in rows)
+    # 1) 历史逾期（只统计「真逾期」：工序累计完成 < 调度令本月计划）
+    has_overdue = bool(compute_real_overdue(rows, int(project.get("monthly_plan") or 0)))
 
     # 2) 今日计划且未完成（未来日期的 in_progress 不算预警）
     has_today_unfinished = any(
@@ -312,7 +313,7 @@ def get_node_plans_overview(pid: int, user: dict = Depends(get_current_user)):
     require_project_access(project, user)
     plans = db.get_node_plans(pid)
     actuals = db.get_node_actuals(pid)
-    return build_overview(pid, plans, actuals)
+    return build_overview(pid, plans, actuals, monthly_plan=int(project.get("monthly_plan") or 0))
 
 
 @router.get("/{pid}/nodes/{process_name}")

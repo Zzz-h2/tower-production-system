@@ -372,9 +372,11 @@ const isIndependent = computed(() => !!detail.value?.is_independent)
 
 const statusColors = {
   done: '#38a169', pending: '#718096', in_progress: '#3182ce', warning: '#3182ce', overdue: '#e53e3e',
+  matches_dispatch: '#38a169',
 }
 const statusBgs = {
   done: '#f0fff4', pending: '#f7fafc', in_progress: '#ebf8ff', warning: '#ebf8ff', overdue: '#fff5f5',
+  matches_dispatch: '#f0fff4',
 }
 const colorOf = (s) => statusColors[s] || '#718096'
 const pillStyle = (s) => ({ background: statusBgs[s] || '#f7fafc', color: statusColors[s] || '#718096' })

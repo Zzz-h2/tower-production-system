@@ -257,6 +257,7 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
 
     # 风险等级 + 整体进度：基于 node_plans + node_actuals 实时计算（弃用 processes 表）
     from ..services.node_service import enrich_rows
+    from ..services.business_logic import compute_real_overdue
     today_s = str(date.today())
 
     # 一次性批量查询（消除 N+1：原逻辑每项目 2 次 DB 往返 → 现在全程仅 3 次）
@@ -287,7 +288,8 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
 
         # 风险等级：历史逾期 > 今日未完成 > 正常
         # （未来日期的 in_progress「提前进行中」不算预警；今日 in_progress 须 actual < plan 才算）
-        has_overdue = any(r["status"] == "overdue" for r in nodes)
+        # 逾期判定规则：只统计「真逾期」（工序累计完成 < 调度令本月计划 的逾期节点）
+        has_overdue = bool(compute_real_overdue(nodes, int(p.get("monthly_plan") or 0)))
         has_today_unfinished = any(
             r["status"] == "in_progress"
             and str(r["plan_date"])[:10] == today_s

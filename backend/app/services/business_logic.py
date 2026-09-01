@@ -129,12 +129,46 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
     }
 
 
-def judge_process_card_status(proc_nodes: list[dict], actuals: dict, today=None) -> dict:
+def compute_real_overdue(rows: list[dict], monthly_plan: int) -> list[dict]:
+    """计算「真逾期」节点列表（逾期判定规则变更后口径）。
+
+    真逾期 = 节点状态为 overdue **且** 该节点所属工序的累计完成套数 < 调度令本月计划数。
+    即：某工序已完成/到达套数已达调度令计划时，其后续超产套数的逾期不再算作「延期」。
+
+    ⚠️ 边界（用户 2026-09-01 选定方案 B）：
+    monthly_plan <= 0（项目无调度令计划数据）时**回退原有逻辑**——所有 overdue 节点都算真逾期。
+    原因：没有月计划阈值就无法判断什么是"超产"，若返回空集会漏报真实延期。
+    此处与 judge_process_card_status 的 monthly_plan<=0 分支保持一致（卡片仍显示"已逾期"），
+    保证项目级风险等级与工序卡片状态不打架。
+
+    Args:
+        rows: enrich_rows() 产出的节点行列表（每行含 process_name / actual_qty / status）
+        monthly_plan: 调度令本月计划数（projects.monthly_plan）；
+                      <=0 表示无调度令计划 → 回退原有逻辑，返回全部 overdue 节点
+
+    Returns:
+        list[dict]: 真逾期节点行（可能为空列表）
+    """
+    all_overdue = [r for r in rows if r["status"] == "overdue"]
+    if monthly_plan <= 0:
+        # 无调度令计划 → 无法判定"超产"，回退原有逻辑（避免漏报延期）
+        return all_overdue
+    proc_actual: dict[str, int] = {}
+    for r in rows:
+        proc_actual[r["process_name"]] = proc_actual.get(r["process_name"], 0) + int(r["actual_qty"] or 0)
+    return [
+        r for r in all_overdue
+        if proc_actual.get(r["process_name"], 0) < monthly_plan
+    ]
+
+
+def judge_process_card_status(proc_nodes: list[dict], actuals: dict, today=None, monthly_plan: int = 0) -> dict:
     """工序卡片状态：主状态(总进度) + 附加标签(时间维度偏差)。
 
     主状态（总进度）：
     - done_early 提前完成: 总实际 ≥ 总计划 且 所有 plan_date > today
     - done        已完成:   总实际 ≥ 总计划
+    - matches_dispatch 符合调度令进度: 存在历史逾期但总实际 >= 调度令本月计划（monthly_plan>0）
     - overdue     已逾期:   存在 plan_date < today 且 actual < plan（严格历史逾期，不含今天）
     - in_progress 进行中:   0 < 总实际 < 总计划 且无历史逾期
     - pending     未开始:   总实际 == 0 且无历史逾期
@@ -162,6 +196,10 @@ def judge_process_card_status(proc_nodes: list[dict], actuals: dict, today=None)
         < int(n["plan_qty"] or 0)
     ]
     has_overdue = bool(overdue_nodes)
+
+    # 逾期判定规则：本月计划达成后，超产套数的逾期不再显示「延期」
+    if has_overdue and monthly_plan > 0 and total_actual >= monthly_plan:
+        return {"status": "matches_dispatch", "label": "✅ 符合调度令进度", "tags": []}
 
     # 部分完成节点：截至今天(含)已有进度但未达到计划数量
     partial_nodes = [
