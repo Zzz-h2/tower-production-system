@@ -45,20 +45,32 @@ export const importDispatch = (file, mapping) => {
   return http.post('/projects/import-dispatch', form)
 }
 
-// 节点计划
-export const fetchNodePlans = (pid) => http.get(`/projects/${pid}/node-plans`)
-export const fetchProcessNodes = (pid, processName) =>
-  http.get(`/projects/${pid}/nodes/${encodeURIComponent(processName)}`)
+// 节点计划（多负责人 v6.0：params 可带 { manager } 切到单人视图，缺省为汇总视图）
+export const fetchNodePlans = (pid, params = {}) =>
+  http.get(`/projects/${pid}/node-plans`, { params })
+export const fetchProcessNodes = (pid, processName, params = {}) =>
+  http.get(`/projects/${pid}/nodes/${encodeURIComponent(processName)}`, { params })
 export const saveNodeProgress = (pid, processName, payload) =>
   http.post(`/projects/${pid}/nodes/${encodeURIComponent(processName)}/save`, payload)
+
+// 多负责人管理（v6.0）
+export const fetchProjectManagers = (pid) => http.get(`/projects/${pid}/managers`)
+export const setManagerMonthlyPlan = (pid, manager, monthlyPlan) =>
+  http.put(`/projects/${pid}/managers/${encodeURIComponent(manager)}/monthly-plan`, {
+    monthly_plan: monthlyPlan,
+  })
 
 // 预警
 export const fetchAlerts = (pid) => http.get(`/projects/${pid}/alerts`)
 
-// Excel 导入（排产，既有接口，勿改）
-export const importSchedule = (pid, file) => {
+// Excel 导入（排产）。多负责人 v6.0：可带 manager（归属负责人）+ monthlyPlan（该负责人本月计划数）
+export const importSchedule = (pid, file, manager, monthlyPlan) => {
   const form = new FormData()
   form.append('file', file)
+  if (manager) form.append('manager', String(manager))
+  if (monthlyPlan !== undefined && monthlyPlan !== null) {
+    form.append('monthly_plan', String(monthlyPlan))
+  }
   return http.post(`/projects/${pid}/import-schedule`, form)
 }
 

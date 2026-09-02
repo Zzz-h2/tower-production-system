@@ -153,8 +153,9 @@ export const useProjectStore = defineStore('project', {
       this.current = await fetchProject(pid)
       return this.current
     },
-    async loadOverview(pid) {
-      this.overview = await fetchNodePlans(pid)
+    async loadOverview(pid, manager) {
+      const params = manager ? { manager } : {}
+      this.overview = await fetchNodePlans(pid, params)
       return this.overview
     },
   },

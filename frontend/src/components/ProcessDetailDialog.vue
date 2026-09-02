@@ -277,6 +277,7 @@ const props = defineProps({
   pid: { type: String, required: true },
   processName: { type: String, default: '' },
   mode: { type: String, default: 'detail' },
+  manager: { type: String, default: '' },   // 多负责人 v6.0：仅查看/提报该负责人名下节点
 })
 const emit = defineEmits(['update:modelValue', 'saved'])
 const store = useProjectStore()
@@ -446,7 +447,8 @@ const independentStatus = computed(() => {
 
 async function load() {
   if (!props.processName) return
-  detail.value = await fetchProcessNodes(props.pid, props.processName)
+  const params = props.manager ? { manager: props.manager } : {}
+  detail.value = await fetchProcessNodes(props.pid, props.processName, params)
   inputValues.value = {}
   reportDates.value = {}
   Object.keys(detail.value.groups).forEach((g) => {
@@ -494,7 +496,7 @@ async function save() {
     // 并发提交；任一组失败也汇总已成功的部分，避免无提示
     const settled = await Promise.allSettled(
       groupsToSave.map(([g, values]) =>
-        saveNodeProgress(props.pid, props.processName, { group: g, values }),
+        saveNodeProgress(props.pid, props.processName, { group: g, values, manager: props.manager || undefined }),
       ),
     )
     const ok = settled.filter((r) => r.status === 'fulfilled')

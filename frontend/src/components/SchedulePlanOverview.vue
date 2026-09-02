@@ -144,16 +144,39 @@
       <el-empty v-if="!uploadedList.length" description="暂无已上传排产计划的项目" :image-size="80" />
     </div>
 
-    <!-- 导入弹窗（复用 ScheduleImport）+ 手动完成按钮 -->
+    <!-- 导入弹窗（复用 ScheduleImport）+ 手动完成 / 多负责人管理 按钮 -->
     <el-dialog v-model="importVisible" :title="`导入排产计划：${importTarget?.project_name || ''}`" width="560px" destroy-on-close>
-      <ScheduleImport v-if="importTarget" :pid="String(importTarget.id)" :disabled="!auth.canEdit" @imported="onImported" />
+      <el-alert
+        v-if="importManagers.length > 1"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom:12px;"
+        title="该项目有多位负责人：请先选择本次导入归属的负责人，再上传 Excel"
+      />
+      <el-select
+        v-if="importManagers.length > 1"
+        v-model="importManager"
+        placeholder="选择本次导入归属的负责人"
+        filterable
+        style="width:100%; margin-bottom:12px;"
+      >
+        <el-option v-for="m in importManagers" :key="m.manager" :label="m.manager" :value="m.manager" />
+      </el-select>
+      <ScheduleImport v-if="importTarget" :pid="String(importTarget.id)" :manager="importManager" :disabled="!auth.canEdit" @imported="onImported" />
       <div class="import-dialog-actions">
+        <el-button size="small" :disabled="!auth.canEdit" title="多负责人分别导入排产 / 申报本月计划" @click="openMultiManager">
+          多负责人管理
+        </el-button>
         <el-button size="small" :disabled="!auth.isAdmin" title="仅管理员可手动完成" @click="manualVisible = true">
           手动完成
         </el-button>
         <el-button size="small" @click="importVisible = false">关闭</el-button>
       </div>
     </el-dialog>
+
+    <!-- 多负责人管理弹窗（列出拆分后的负责人，分别导入 / 申报计划 / 查看） -->
+    <MultiManagerDialog v-model="multiManagerVisible" :project="importTarget" @imported="onImported" />
 
     <!-- 手动完成二级弹窗（独立子组件，与导入弹窗平级） -->
     <ManualCompleteDialog v-model="manualVisible" :project="importTarget" @completed="onManualCompleted" />
@@ -165,11 +188,12 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import { fetchProjects } from '../api/node'
+import { fetchProjects, fetchProjectManagers } from '../api/node'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
 import ScheduleImport from './ScheduleImport.vue'
 import ManualCompleteDialog from './ManualCompleteDialog.vue'
+import MultiManagerDialog from './MultiManagerDialog.vue'
 
 const router = useRouter()
 const store = useProjectStore()
@@ -213,9 +237,22 @@ function applyFilter() { /* computed 自动响应 */ }
 // 导入弹窗
 const importVisible = ref(false)
 const importTarget = ref(null)
+const importManager = ref('')        // 多负责人 v6.0：本次导入归属的负责人（仅多负责人项目需选）
+const importManagers = ref([])       // 该项目的负责人清单（供导入弹窗下拉选择）
 function openImport(row) {
   importTarget.value = row
+  importManager.value = ''
+  importManagers.value = []
   importVisible.value = true
+  fetchProjectManagers(String(row.id))
+    .then((res) => { importManagers.value = res.managers || [] })
+    .catch(() => { importManagers.value = [] })
+}
+
+// 多负责人管理弹窗（从导入弹窗内触发，复用同一 importTarget）
+const multiManagerVisible = ref(false)
+function openMultiManager() {
+  multiManagerVisible.value = true
 }
 async function onImported() {
   importVisible.value = false

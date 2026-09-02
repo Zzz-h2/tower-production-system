@@ -1,7 +1,36 @@
 <template>
   <div>
-    <!-- 导入排产计划入口（对齐原版：节点计划 Tab 最上方） -->
-    <ScheduleImport :pid="pid" :disabled="!auth.canEdit" @imported="onImported" />
+    <!-- 多负责人（v6.0）：负责人视图筛选器。默认「全部（汇总）」展示所有负责人工序总和 -->
+    <div class="block-card mm-filter" v-if="managerOptions.length">
+      <span class="mm-label">负责人视图：</span>
+      <el-select
+        v-model="selectedManager"
+        placeholder="全部（汇总）"
+        clearable
+        style="width: 200px;"
+        @change="reload"
+      >
+        <el-option label="全部（汇总）" value="" />
+        <el-option v-for="m in managerOptions" :key="m.manager" :label="m.manager" :value="m.manager" />
+      </el-select>
+      <span class="mm-hint" v-if="selectedManager">
+        当前仅查看「<b>{{ selectedManager }}</b>」名下节点（计划数按其申报值 {{ currentManagerPlan }}）
+      </span>
+      <span class="mm-hint" v-else>展示所有负责人导入工序的总和</span>
+    </div>
+
+    <!-- 导入排产计划入口（对齐原版：节点计划 Tab 最上方）。
+         多负责人 v6.0：把「负责人视图」当前选中的负责人透传给导入，使其归属到该负责人名下；
+         未选（汇总视图）且项目为多负责人时，后端会返回 400 提示先选负责人。 -->
+    <ScheduleImport :pid="pid" :manager="selectedManager" :disabled="!auth.canEdit" @imported="onImported" />
+    <el-alert
+      v-if="selectedManager && managerOptions.length > 1"
+      type="info"
+      :closable="false"
+      show-icon
+      style="margin-top:10px;"
+      :title="`当前导入将归属到负责人「${selectedManager}」名下（仅覆盖该负责人排产工序）`"
+    />
 
     <!-- 顶部指标 KPI 卡 -->
     <div class="block-card" v-if="overview">
@@ -55,6 +84,7 @@
       :pid="pid"
       :process-name="activeProcess"
       :mode="dialogMode"
+      :manager="selectedManager"
       @saved="onSaved"
     />
   </div>
@@ -62,6 +92,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
 import ScheduleImport from './ScheduleImport.vue'
@@ -72,7 +103,16 @@ import ProcessDetailDialog from './ProcessDetailDialog.vue'
 const props = defineProps({ pid: { type: String, required: true } })
 const store = useProjectStore()
 const auth = useAuthStore()   // 普通账号禁用导入排产（仅管理员可导入）
+const route = useRoute()
 const overview = computed(() => store.overview)
+
+// 多负责人（v6.0）：负责人视图筛选（'' = 汇总）。可选负责人分别查看 / 提报
+const selectedManager = ref('')
+const managerOptions = computed(() => overview.value?.managers || [])
+const currentManagerPlan = computed(() => {
+  const m = managerOptions.value.find((x) => x.manager === selectedManager.value)
+  return m ? (m.monthly_plan || 0) : 0
+})
 
 // 时间轴当前可见工序数（由子组件图例隐藏时回传），用于实时重算时间轴高度
 const visibleProcessCount = ref(0)
@@ -103,22 +143,29 @@ const onOpenProcess = ({ process_name, mode }) => {
   dialogMode.value = mode || 'detail'
   dialogVisible.value = true
 }
-const onSaved = () => {
-  dialogVisible.value = false
-  // 刷新节点计划总览（工序卡片/时间轴）
-  store.loadOverview(props.pid)
-  // 刷新顶部项目信息卡：风险等级 + 整体进度（附件安装）
+// 统一刷新：按当前负责人筛选重载总览 + 头部信息卡 + 触发预警刷新
+function reload() {
+  store.loadOverview(props.pid, selectedManager.value || undefined)
   store.loadDetail(props.pid)
-  // 触发节点预警 Tab 实时刷新
   store.lastNodeSavedAt = Date.now()
 }
+const onSaved = () => {
+  dialogVisible.value = false
+  reload()
+}
 const onImported = () => {
-  store.loadOverview(props.pid)   // Excel 导入成功后刷新节点计划总览
-  store.lastNodeSavedAt = Date.now()   // 触发节点预警/异常模块自动刷新（排产变化 → 预警重算）
+  reload()   // Excel 导入成功后刷新节点计划总览（含负责人筛选）
 }
 
-onMounted(() => store.loadOverview(props.pid))
-watch(() => props.pid, () => store.loadOverview(props.pid))
+onMounted(() => {
+  // 支持从多负责人管理弹窗「查看」携带 ?manager= 直达单人视图
+  selectedManager.value = (route.query.manager && String(route.query.manager)) || ''
+  reload()
+})
+watch(() => props.pid, () => {
+  selectedManager.value = ''
+  reload()
+})
 </script>
 
 <style scoped>
@@ -143,4 +190,16 @@ watch(() => props.pid, () => store.loadOverview(props.pid))
 .empty-icon { font-size: 48px; margin-bottom: 12px; }
 .empty-title { font-size: 18px; font-weight: 600; color: #1a365d; margin-bottom: 8px; }
 .empty-desc { font-size: 14px; line-height: 1.8; }
+
+/* 多负责人视图筛选器 */
+.mm-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.mm-label { font-size: 14px; font-weight: 600; color: #1a365d; white-space: nowrap; }
+.mm-hint { font-size: 12px; color: #718096; }
+.mm-hint b { color: #3182ce; }
 </style>

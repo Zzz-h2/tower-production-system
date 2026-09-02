@@ -31,6 +31,8 @@ import { importSchedule } from '../api/node'
 const props = defineProps({
   pid: { type: String, required: true },
   disabled: { type: Boolean, default: false },   // 外部控制是否禁用（普通账号仅管理员可导入）
+  manager: { type: String, default: '' },          // 多负责人 v6.0：本次导入归属的负责人
+  managerMonthlyPlan: { type: [Number, String], default: 0 },  // 该负责人申报的本月计划数
 })
 const emit = defineEmits(['imported'])
 
@@ -39,7 +41,12 @@ const uploading = ref(false)
 async function doUpload({ file }) {
   uploading.value = true
   try {
-    const res = await importSchedule(props.pid, file)
+    const res = await importSchedule(
+      props.pid,
+      file,
+      props.manager || undefined,
+      props.managerMonthlyPlan || 0,
+    )
     ElMessage.success(res.message || '导入成功')
     const warnText = (res.warnings || []).map((w) => `⚠️ ${w}`).join('<br/>')
     if (warnText) {

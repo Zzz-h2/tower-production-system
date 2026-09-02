@@ -12,7 +12,7 @@
           @change="load"
         />
         <el-button type="primary" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <span class="hint">统计口径：累计计划套数=项目「本月计划出品」之和；累计完成套数=附件安装实际完成；按调度令月份归类</span>
+        <span class="hint">统计口径：多负责人按单人分别排名；累计计划套数=各负责人申报的本月计划数之和；累计完成套数=附件安装实际完成；按调度令月份归类</span>
       </div>
     </div>
 
@@ -49,9 +49,9 @@
             <span v-else>{{ row.rank }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="交付负责人" prop="delivery_person" min-width="140">
+        <el-table-column label="负责人" prop="manager" min-width="140">
           <template #default="{ row }">
-            <span style="font-weight:600; color:#1a365d;">{{ row.delivery_person }}</span>
+            <span style="font-weight:600; color:#1a365d;">{{ row.manager }}</span>
           </template>
         </el-table-column>
         <el-table-column label="项目数" prop="project_count" width="90" align="center" />
@@ -156,9 +156,9 @@ const detailVisible = ref(false)
 const detailPerson = ref('')
 const detailRows = ref([])
 async function openDetail(row) {
-  detailPerson.value = row.delivery_person
+  detailPerson.value = row.manager
   try {
-    const res = await fetchProductionRankingDetail(store.filters.month, row.delivery_person)
+    const res = await fetchProductionRankingDetail(store.filters.month, row.manager)
     detailRows.value = res || []
   } catch (e) {
     ElMessage.error('加载明细失败')
