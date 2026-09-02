@@ -25,9 +25,13 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
     - group=done：已完成分组为「无法编辑」只读模式，后端直接拒绝写操作（不接受减少/修改）；
     - 填报日期：大区账号强制锁定为今日（防历史回填），管理员可按节点指定历史日期。
     - 业务校验一律返回 400 + {code,message} 结构，前端可读友好文案。
+    - v6.0 多负责人：req.manager 非空时，只加载/校验/写入该负责人名下的节点，
+      各负责人提报相互独立、互不影响；实际写入的 manager 以节点计划行自身的值为准（防跨负责人误写）。
     """
     project = db.get_project_by_id(pid)
     require_project_access(project, user)
+
+    mgr = (req.manager or "").strip() or None   # 本次填报归属负责人（空=汇总/不区分）
 
     if req.group not in GROUP_LABELS:
         raise HTTPException(status_code=400, detail={"code": "UNKNOWN_GROUP", "message": f"未知分组：{req.group}"})
@@ -37,13 +41,17 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
         # 所以大区账号也允许在 done 分组写入（前端在「已填报」行允许再填一次）。
         raise HTTPException(status_code=400, detail={"code": "DONE_READONLY", "message": "已完成分组不可编辑（无法填报）"})
 
-    plans = db.get_node_plans(pid)
+    # 多负责人：只取该负责人名下的节点计划（前序联动校验也随之限定在其内部，互不干扰）
+    plans = db.get_node_plans(pid, mgr)
     actuals = db.get_node_actuals(pid)
     proc_nodes = [p for p in plans if p["process_name"] == process_name]
     if not proc_nodes:
-        raise HTTPException(status_code=404, detail=f"工序「{process_name}」无节点")
+        tip = f"（负责人：{mgr}）" if mgr else ""
+        raise HTTPException(status_code=404, detail=f"工序「{process_name}」无节点{tip}")
 
     plan_qty_by_id = {p["id"]: int(p["plan_qty"] or 0) for p in proc_nodes}
+    # 写入时的负责人以节点计划行自身的值为准（权威来源），避免前端传错导致串档
+    plan_manager_by_id = {p["id"]: p.get("manager") for p in proc_nodes}
 
     is_independent = process_name in INDEPENDENT_PROCESS_NAMES  # 独立工序：不设日期、不限 qty 上限
 
@@ -108,11 +116,13 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                 # 管理员可能同时改了数量和日期 → 移动时同步新数量（后端合并/移动用新 qty）
                 db.move_independent_fill_date(pid, process_name, v.node_id, rd, int(v.qty))
             else:
-                db.save_independent_fill(pid, process_name, int(v.qty), rd)
+                db.save_independent_fill(pid, process_name, int(v.qty), rd,
+                                         plan_manager_by_id.get(v.node_id))
             saved += 1
         elif lock_date:
             rd = today.strftime("%Y-%m-%d")
-            db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd)
+            db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd,
+                                  plan_manager_by_id.get(v.node_id))
             saved += 1
         else:
             rd = v.report_date or req.report_date or today.strftime("%Y-%m-%d")
@@ -123,7 +133,8 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                     status_code=400,
                     detail={"code": "BAD_REPORT_DATE", "message": "report_date 格式必须为 YYYY-MM-DD"},
                 )
-            db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd)
+            db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd,
+                                  plan_manager_by_id.get(v.node_id))
             saved += 1
 
     return {

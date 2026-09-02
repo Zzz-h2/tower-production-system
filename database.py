@@ -357,13 +357,18 @@ def get_config(key: str) -> Optional[str]:
 # 全部走 MySQL，pymysql 风格：%s 占位、显式 cursor。
 # ============================================================
 
-def insert_node_plans(project_id: int, plans: list[dict]) -> int:
-    """先清空该项目全部节点计划，再批量插入新计划（覆盖式导入）。
+def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None) -> int:
+    """清空该项目（指定负责人名下）的节点计划，再批量插入新计划（覆盖式导入）。
+
+    多负责人（v6.0）：manager 非 None 时，删除与插入都**只作用于该负责人名下**，
+    实现「各负责人分别导入、互不覆盖、互不影响」；
+    manager 为 None 时保持历史行为——清空该项目全部排产工序行（兼容未拆分的老数据/老调用）。
 
     Args:
         project_id: 项目ID
         plans: list[dict]，每项含
             process_name(str) / process_order(int) / plan_date('YYYY-MM-DD') / plan_qty(int)
+        manager: 归属负责人姓名；None=不区分负责人（历史行为）
 
     Returns:
         int: 实际插入的节点计划条数
@@ -371,22 +376,32 @@ def insert_node_plans(project_id: int, plans: list[dict]) -> int:
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
+            # 删除范围：指定 manager 时只删该负责人名下的排产工序行（不含独立工序 90/91）
+            del_sql = (
                 "DELETE FROM process_node_plans WHERE project_id = %s "
-                "AND process_name NOT IN (%s, %s)",
-                (project_id, INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]),
+                "AND process_name NOT IN (%s, %s)"
             )
+            del_args: list = [project_id, INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]]
+            if manager is not None:
+                # 指定负责人：只替换该负责人名下的排产工序行。
+                # 同时吸收「历史未拆分(NULL)行」——避免同一批数据既算在 NULL 又算在新负责人名下
+                # 导致汇总视图 plan_qty 翻倍。首个导入的负责人会接管这些历史行。
+                del_sql += " AND (manager <=> %s OR manager IS NULL)"
+                del_args.append(str(manager).strip())
+            cursor.execute(del_sql, tuple(del_args))
+
             if plans:
                 cursor.executemany("""
                     INSERT INTO process_node_plans
-                        (project_id, process_name, process_order, plan_date, plan_qty)
-                    VALUES (%s, %s, %s, %s, %s)
+                        (project_id, process_name, process_order, plan_date, plan_qty, manager)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                 """, [(
                     project_id,
                     str(p['process_name']).strip(),
                     int(p.get('process_order', 0) or 0),
                     str(p['plan_date'])[:10],          # 统一 'YYYY-MM-DD' 字符串
                     int(p.get('plan_qty', 1) or 1),
+                    (str(manager).strip() if manager is not None else None),
                 ) for p in plans])
             conn.commit()
             return len(plans)
@@ -435,36 +450,195 @@ def sync_independent_plans(project_id: int, contract_count) -> int:
         conn.close()
 
 
-def get_node_plans(project_id: int) -> list[dict]:
-    """获取项目的全部工序节点计划，按 工序顺序 + 计划日期 排序。"""
+def get_node_plans(project_id: int, manager: str | None = None) -> list[dict]:
+    """获取项目的工序节点计划，按 工序顺序 + 计划日期 排序。
+
+    多负责人（v6.0）：
+      - manager=None（默认）→ 返回该项目**全部**行（汇总视图口径，含历史 NULL 行）
+      - manager='张三'      → 只返回该负责人名下行（单人视图口径，历史 NULL 行不可见）
+
+    Args:
+        project_id: 项目ID
+        manager: 负责人姓名；None=不区分负责人（汇总）
+
+    Returns:
+        list[dict]: 节点计划行
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT * FROM process_node_plans
-                WHERE project_id = %s
-                ORDER BY process_order, plan_date
-            """, (project_id,))
+            sql = "SELECT * FROM process_node_plans WHERE project_id = %s"
+            args: list = [project_id]
+            if manager is not None:
+                sql += " AND manager <=> %s"
+                args.append(str(manager).strip())
+            sql += " ORDER BY process_order, plan_date"
+            cursor.execute(sql, tuple(args))
             return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()
 
 
+# ============================================================
+# v6.0 多负责人管理：负责人拆分 / 月度计划 / 负责人列表
+# ============================================================
+
+def split_managers(delivery_person: str | None) -> list[str]:
+    """把「交付负责人」字段按 '/'（含全角'／'）拆分为负责人列表。
+
+    边界处理：
+      - 空/None         → []（项目列表仍原样展示原始字符串，此处仅用于详情/排名拆分）
+      - 单人无分隔符    → ['张三']（行为等同原版）
+      - 多人 '张三/李四' → ['张三', '李四']
+      - 重复 '张三/张三' → ['张三']（去重，保序）
+      - 空片段 '张三/'  → 忽略空片段
+
+    Args:
+        delivery_person: projects.delivery_person 原始值
+
+    Returns:
+        list[str]: 去重保序的负责人姓名列表
+    """
+    raw = str(delivery_person or "").strip()
+    if not raw:
+        return []
+    # 统一全角斜杠 → 半角
+    normalized = raw.replace("／", "/")
+    result: list[str] = []
+    for part in normalized.split("/"):
+        name = part.strip()
+        if name and name not in result:      # 去空 + 去重（保序）
+            result.append(name)
+    return result
+
+
+def upsert_manager_monthly_plan(project_id: int, manager: str, monthly_plan: int) -> None:
+    """写入/更新「某负责人 对 某项目」的本月计划数（方案P：独立申报，不校验求和）。
+
+    Args:
+        project_id: 项目ID
+        manager: 负责人姓名
+        monthly_plan: 该负责人申报的本月计划数（非负整数）
+    """
+    if not str(manager or "").strip():
+        raise ValueError("负责人姓名不能为空")
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO project_manager_plans (project_id, manager, monthly_plan)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE monthly_plan = VALUES(monthly_plan)
+            """, (project_id, str(manager).strip(), max(0, int(monthly_plan or 0))))
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def get_manager_monthly_plan_map(project_id: int) -> dict[str, int]:
+    """取项目各负责人的本月计划数映射：{负责人: monthly_plan}。
+
+    未申报的负责人不会出现在结果里（调用方用 .get(m, 0) 取默认值 0）。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT manager, monthly_plan FROM project_manager_plans WHERE project_id = %s",
+                (project_id,),
+            )
+            return {row["manager"]: int(row["monthly_plan"] or 0) for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def list_project_managers(project_id: int) -> list[dict]:
+    """列出项目的负责人清单及其导入/计划概况（供「多负责人管理」弹窗使用）。
+
+    负责人来源（取并集，保序：先 delivery_person 拆分结果，再补 DB 中已存在但未在
+    delivery_person 里的负责人，避免调度令改名后旧数据负责人「消失」）：
+      1. projects.delivery_person 按 '/' 拆分
+      2. process_node_plans 中该项目已出现的 manager 值（非空）
+
+    Returns:
+        list[dict]，每项：
+          manager(str)       负责人姓名
+          monthly_plan(int)  该负责人申报的本月计划数（未申报=0）
+          plan_rows(int)     该负责人名下已导入的排产工序节点行数（不含独立工序 90/91）
+          has_imported(bool) 是否已导入过排产计划
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # 1) projects.delivery_person
+            cursor.execute(
+                "SELECT delivery_person FROM projects WHERE id = %s", (project_id,)
+            )
+            proj = cursor.fetchone()
+            names = split_managers(proj["delivery_person"] if proj else "")
+
+            # 2) 已入库的 manager（排除独立工序行，只看排产工序）
+            cursor.execute("""
+                SELECT DISTINCT manager FROM process_node_plans
+                WHERE project_id = %s
+                  AND manager IS NOT NULL AND manager <> ''
+                  AND process_name NOT IN (%s, %s)
+                ORDER BY manager
+            """, (project_id, INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]))
+            for r in cursor.fetchall():
+                nm = str(r["manager"]).strip()
+                if nm and nm not in names:
+                    names.append(nm)
+
+            # 3) 各负责人已导入行数
+            row_counts: dict[str, int] = {}
+            if names:
+                cursor.execute("""
+                    SELECT manager, COUNT(*) AS c FROM process_node_plans
+                    WHERE project_id = %s
+                      AND process_name NOT IN (%s, %s)
+                      AND manager IS NOT NULL
+                    GROUP BY manager
+                """, (project_id, INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]))
+                row_counts = {str(r["manager"]).strip(): int(r["c"]) for r in cursor.fetchall()}
+
+            plan_map = get_manager_monthly_plan_map(project_id)
+            return [
+                {
+                    "manager": nm,
+                    "monthly_plan": int(plan_map.get(nm, 0)),
+                    "plan_rows": int(row_counts.get(nm, 0)),
+                    "has_imported": int(row_counts.get(nm, 0)) > 0,
+                }
+                for nm in names
+            ]
+    finally:
+        conn.close()
+
+
 def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
-                       actual_qty: int, report_date: str) -> None:
-    """插入或更新节点实际完成套数（唯一键 uk_proj_node，同节点可重复修改）。"""
+                       actual_qty: int, report_date: str,
+                       manager: str | None = None) -> None:
+    """插入或更新节点实际完成套数（唯一键 uk_proj_node，同节点可重复修改）。
+
+    多负责人（v6.0）：manager 记录该条实际完成归属的负责人，与对应 node_plan 行一致。
+    uk_proj_node (project_id, node_plan_id) 已天然按负责人隔离（不同负责人有不同的 node_plan_id），
+    故 manager 列在此作为冗余标注，便于单人视图直接过滤、无需回查 plan 表。
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute("""
                 INSERT INTO node_actual_progress
-                    (project_id, node_plan_id, process_name, actual_qty, report_date)
-                VALUES (%s, %s, %s, %s, %s)
+                    (project_id, node_plan_id, process_name, actual_qty, report_date, manager)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     actual_qty = VALUES(actual_qty),
-                    report_date = VALUES(report_date)
+                    report_date = VALUES(report_date),
+                    manager = VALUES(manager)
             """, (project_id, node_plan_id, str(process_name).strip(),
-                  int(actual_qty or 0), str(report_date)[:10]))
+                  int(actual_qty or 0), str(report_date)[:10],
+                  (str(manager).strip() if manager is not None else None)))
             conn.commit()
     finally:
         conn.close()
@@ -520,32 +694,43 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
 
 
 def save_independent_fill(project_id: int, process_name: str,
-                          fill_qty: int, report_date: str) -> int:
+                          fill_qty: int, report_date: str,
+                          manager: str | None = None) -> int:
     """独立工序（累计完成/累计发运）每次填报：按日期 find-or-create node_plan + upsert actual。
 
     - 同一天再次填报：更新该日那条 actual（不会产生新行）
     - 不同天填报：INSERT 新 node_plan（plan_date=report_date, plan_qty=fill_qty）+ 新 actual
     - 原 NULL-date 占位行（由 sync_independent_plans 创建）始终保留，作为「合同总数」分母
 
+    多负责人（v6.0）：manager 非 None 时，find-or-create 与 upsert 都限定在该负责人名下，
+    保证不同负责人同一天的填报各自独立、互不覆盖。
+
     Args:
         project_id: 项目ID
         process_name: 工序名（必须是 INDEPENDENT_PROCESS_NAMES 之一）
         fill_qty: 本次填报数量（delta，不是累计）
         report_date: 'YYYY-MM-DD' 字符串
+        manager: 归属负责人姓名；None=不区分负责人
 
     Returns:
         int: 受影响的 node_plan_id
     """
     if process_name not in INDEPENDENT_PROCESS_NAMES:
         raise ValueError(f"非独立工序不支持逐日报表：{process_name}")
+    mgr_val = str(manager).strip() if manager is not None else None
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
+            find_sql = (
                 "SELECT id FROM process_node_plans "
-                "WHERE project_id=%s AND process_name=%s AND plan_date=%s LIMIT 1",
-                (project_id, process_name, report_date),
+                "WHERE project_id=%s AND process_name=%s AND plan_date=%s"
             )
+            find_args: list = [project_id, process_name, report_date]
+            if manager is not None:
+                find_sql += " AND manager <=> %s"
+                find_args.append(mgr_val)
+            find_sql += " LIMIT 1"
+            cursor.execute(find_sql, tuple(find_args))
             row = cursor.fetchone()
             if row:
                 node_plan_id = row['id']
@@ -553,19 +738,20 @@ def save_independent_fill(project_id: int, process_name: str,
                 process_order = 90 if process_name == INDEPENDENT_PROCESS_NAMES[0] else 91
                 cursor.execute(
                     "INSERT INTO process_node_plans "
-                        "(project_id, process_name, process_order, plan_date, plan_qty) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (project_id, process_name, process_order, report_date, int(fill_qty)),
+                        "(project_id, process_name, process_order, plan_date, plan_qty, manager) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (project_id, process_name, process_order, report_date, int(fill_qty), mgr_val),
                 )
                 node_plan_id = cursor.lastrowid
             cursor.execute("""
                 INSERT INTO node_actual_progress
-                    (project_id, node_plan_id, process_name, actual_qty, report_date)
-                VALUES (%s, %s, %s, %s, %s)
+                    (project_id, node_plan_id, process_name, actual_qty, report_date, manager)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     actual_qty = VALUES(actual_qty),
-                    report_date = VALUES(report_date)
-            """, (project_id, node_plan_id, process_name, int(fill_qty), report_date))
+                    report_date = VALUES(report_date),
+                    manager = VALUES(manager)
+            """, (project_id, node_plan_id, process_name, int(fill_qty), report_date, mgr_val))
             conn.commit()
             return node_plan_id
     finally:
@@ -850,21 +1036,122 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
     conn = get_connection()
     try:
         with conn.cursor() as cur:
+            # 多负责人（v6.0）：person 现按「单个负责人姓名」解释。
+            # 匹配：该负责人名下行（n.manager = person），或旧数据未拆分时
+            # 整项目归属（n.manager IS NULL 且 p.delivery_person = person）。
             sql = """
                 SELECT n.id, n.project_id, n.process_name, n.plan_date, n.plan_qty,
                        p.project_name, p.machine_type, p.factory_name
                 FROM process_node_plans n
                 JOIN projects p ON p.id = n.project_id
-                WHERE p.delivery_person = %s
+                WHERE (n.manager = %s OR (n.manager IS NULL AND p.delivery_person = %s))
                   AND n.plan_date >= %s AND n.plan_date < %s
             """
-            params = [person, month_start, month_end]
+            params = [person, person, month_start, month_end]
             if big_area_person:
                 sql += " AND p.big_area_person = %s"
                 params.append(big_area_person)
             sql += " ORDER BY p.id, n.process_order, n.plan_date"
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_ranking_manager_rows_by_month(month: str,
+                                      big_area_person: str | None = None) -> list[dict]:
+    """出品排名（v6.0 多负责人）：返回当月每个 (项目 × 负责人) 的计划/完成明细行。
+
+    与 get_ranking_summary_by_month 的区别：后者按 delivery_person 原样聚合成一行
+    （如「张三/李四」算一个人）；本函数按 '/' 拆分后，每位负责人各占一行，
+    使出品排名能把多位负责人的数据分别展示、分别排名。
+
+    口径：
+      - manager：delivery_person 按 '/' 拆分后的单个姓名（去重保序）；
+        若 delivery_person 为空/脏数据，则回退为原样单人（保持旧行为，不丢数据）。
+      - total_plan：该负责人申报的本月计划数（project_manager_plans.monthly_plan）；
+        单人项目且未申报时，回退用 projects.monthly_plan（向后兼容旧数据）。
+      - total_actual：该负责人名下『附件安装』工序实际完成量之和（按 pnp.manager 归属）。
+      - project_id / delivery_person / project_monthly_plan：便于上层追溯与前端展示。
+
+    big_area_person 非 None 时追加大区行级隔离。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            ba_sql = " AND p.big_area_person = %s" if big_area_person else ""
+            params: list = [month]
+            if big_area_person:
+                params.append(big_area_person)
+
+            # 1) 当月项目（调度令月份 = created_at 年月）
+            cur.execute(f"""
+                SELECT p.id AS project_id,
+                       p.delivery_person,
+                       p.monthly_plan AS project_monthly_plan
+                FROM projects p
+                WHERE DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
+                  AND p.delivery_person IS NOT NULL AND TRIM(p.delivery_person) <> ''
+                  AND p.delivery_person NOT REGEXP '^[0-9]+$'
+                  {ba_sql}
+                ORDER BY p.id
+            """, params)
+            projects = [dict(r) for r in cur.fetchall()]
+            if not projects:
+                return []
+
+            pids = [int(p["project_id"]) for p in projects]
+            ph = ", ".join(["%s"] * len(pids))
+
+            # 2) 各负责人申报的本月计划数
+            cur.execute(f"""
+                SELECT project_id, manager, monthly_plan
+                FROM project_manager_plans
+                WHERE project_id IN ({ph})
+            """, pids)
+            declared: dict[tuple[int, str], int] = {}
+            for r in cur.fetchall():
+                declared[(int(r["project_id"]), str(r["manager"]).strip())] = int(r["monthly_plan"] or 0)
+
+            # 3) 各负责人名下『附件安装』实际完成量
+            cur.execute(f"""
+                SELECT pnp.project_id, pnp.manager, SUM(nap.actual_qty) AS total_actual
+                FROM process_node_plans pnp
+                JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id
+                WHERE pnp.project_id IN ({ph})
+                  AND pnp.process_name = '附件安装'
+                  AND pnp.manager IS NOT NULL
+                GROUP BY pnp.project_id, pnp.manager
+            """, pids)
+            actuals: dict[tuple[int, str], int] = {}
+            for r in cur.fetchall():
+                actuals[(int(r["project_id"]), str(r["manager"]).strip())] = int(r["total_actual"] or 0)
+
+            # 4) 拆分并组装 (项目 × 负责人) 行
+            rows: list[dict] = []
+            for p in projects:
+                pid = int(p["project_id"])
+                raw_person = str(p["delivery_person"] or "").strip()
+                names = split_managers(raw_person) or ([raw_person] if raw_person else [])
+                proj_plan = int(p["project_monthly_plan"] or 0)
+                for nm in names:
+                    key = (pid, nm)
+                    if key in declared:
+                        plan = declared[key]
+                    elif len(names) == 1:
+                        # 单人项目且未单独申报 → 回退用项目整体计划数（向后兼容）
+                        plan = proj_plan
+                    else:
+                        plan = 0
+                    rows.append({
+                        "project_id": pid,
+                        "delivery_person": raw_person,
+                        "project_monthly_plan": proj_plan,
+                        "manager": nm,
+                        "total_plan": plan,
+                        "total_actual": int(actuals.get(key, 0)),
+                    })
+            return rows
     finally:
         conn.close()
 

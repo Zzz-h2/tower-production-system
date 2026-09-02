@@ -304,24 +304,90 @@ def delete_project(pid: int, user: dict = Depends(require_admin)):
     return {"message": f"✅ 项目「{project['project_name']}」已删除", "id": pid}
 
 
-@router.get("/{pid}/node-plans")
-def get_node_plans_overview(pid: int, user: dict = Depends(get_current_user)):
-    """节点计划总览（指标 / 工序卡片 / 时间轴 / 可见工序）。行级隔离：非本大区项目返回 404。"""
+@router.get("/{pid}/managers")
+def list_project_managers(pid: int, user: dict = Depends(get_current_user)):
+    """项目的负责人清单（供「多负责人管理」弹窗 / 详情筛选器使用）。行级隔离：非本大区项目返回 404。
+
+    返回：{project_id, delivery_person, managers: [{manager, monthly_plan, plan_rows, has_imported}]}
+    """
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     require_project_access(project, user)
-    plans = db.get_node_plans(pid)
+    return {
+        "project_id": pid,
+        "delivery_person": project.get("delivery_person") or "",
+        "project_monthly_plan": int(project.get("monthly_plan") or 0),
+        "managers": db.list_project_managers(pid),
+    }
+
+
+class ManagerPlanRequest(BaseModel):
+    """设置某负责人对本项目的本月计划数。"""
+    monthly_plan: int
+
+
+@router.put("/{pid}/managers/{manager}/monthly-plan")
+def set_manager_monthly_plan(pid: int, manager: str, payload: ManagerPlanRequest,
+                             user: dict = Depends(require_admin)):
+    """写入/更新「某负责人 对 某项目」申报的本月计划数（方案P：独立申报，不校验求和）。（仅 admin）"""
+    project = db.get_project_by_id(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
+    mgr = (manager or "").strip()
+    if not mgr:
+        raise HTTPException(status_code=400, detail="负责人姓名不能为空")
+    val = int(payload.monthly_plan or 0)
+    if val < 0:
+        raise HTTPException(status_code=400, detail="本月计划数不能为负")
+    db.upsert_manager_monthly_plan(pid, mgr, val)
+    return {"message": f"✅ 已设置负责人「{mgr}」本月计划数为 {val}", "manager": mgr, "monthly_plan": val}
+
+
+@router.get("/{pid}/node-plans")
+def get_node_plans_overview(pid: int, manager: Optional[str] = None,
+                            user: dict = Depends(get_current_user)):
+    """节点计划总览（指标 / 工序卡片 / 时间轴 / 可见工序）。行级隔离：非本大区项目返回 404。
+
+    多负责人（v6.0）：
+      - manager 为空   → 汇总视图：全部负责人数据，月计划用 projects.monthly_plan 判定；
+      - manager='张三' → 单人视图：仅该负责人名下行，月计划用其申报值判定。
+    """
+    project = db.get_project_by_id(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
+
+    mgr = manager.strip() if manager and manager.strip() else None
+    plans = db.get_node_plans(pid, mgr)
+    # actuals 按 node_plan_id 索引：plans 已按负责人过滤，多余 actual 项不会被引用，无需再过滤
     actuals = db.get_node_actuals(pid)
-    return build_overview(pid, plans, actuals, monthly_plan=int(project.get("monthly_plan") or 0))
+
+    if mgr:
+        # 单人视图：用该负责人自己申报的本月计划数
+        monthly_plan = int(db.get_manager_monthly_plan_map(pid).get(mgr, 0))
+    else:
+        # 汇总视图：用项目整体本月计划数
+        monthly_plan = int(project.get("monthly_plan") or 0)
+
+    result = build_overview(pid, plans, actuals, monthly_plan=monthly_plan)
+    result["manager"] = mgr                          # 当前口径（null=汇总）
+    result["managers"] = db.list_project_managers(pid)  # 供前端渲染筛选器
+    return result
 
 
 @router.get("/{pid}/nodes/{process_name}")
-def get_process_nodes(pid: int, process_name: str, user: dict = Depends(get_current_user)):
-    """某工序节点列表（四分组 + 富化行）。行级隔离：非本大区项目返回 404。"""
+def get_process_nodes(pid: int, process_name: str, manager: Optional[str] = None,
+                      user: dict = Depends(get_current_user)):
+    """某工序节点列表（四分组 + 富化行）。行级隔离：非本大区项目返回 404。
+
+    多负责人（v6.0）：带 manager 时只看该负责人名下的该工序节点（单独查看 / 单独提报）。
+    """
     project = db.get_project_by_id(pid)
     require_project_access(project, user)
-    plans = db.get_node_plans(pid)
+    mgr = manager.strip() if manager and manager.strip() else None
+    plans = db.get_node_plans(pid, mgr)
     actuals = db.get_node_actuals(pid)
     return build_process_detail(process_name, plans, actuals)
 

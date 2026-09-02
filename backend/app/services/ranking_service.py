@@ -25,44 +25,64 @@ def _month_range(month: str) -> tuple[str, str]:
 
 
 def get_production_ranking(month: str, big_area_person: str | None = None) -> list[dict]:
-    """返回按完成率降序的负责人排名列表。month 形如 '2026-08'。
+    """返回按完成率降序的负责人排名列表（v6.0 多负责人：每位负责人独立一行）。
 
-    口径（与「生产进度总览」页面联动一致，2026-08-31 修正）：
-    - 累计计划套数 total_plan = 名下所有项目「本月计划出品」(projects.monthly_plan) 之和；
-      月份 = 调度令月份（projects.created_at 年月），与项目列表/看板同口径。
-    - 累计完成套数 total_actual = 名下所有项目「附件安装」工序实际完成量
-      (node_actual_progress.actual_qty) 之和。
+    month 形如 '2026-08'。
+
+    口径（与「生产进度总览」页面联动一致）：
+    - 数据源切换为 db.get_ranking_manager_rows_by_month：先按 (项目 × 负责人) 拆分，
+      再在本函数按『负责人』聚合（同一负责人名下多个项目汇总），
+      使「张三/李四」这类多负责人在出品排名中各占一行、分别排名。
+    - total_plan / total_actual 已按负责人归属（见 get_ranking_manager_rows_by_month 口径）。
     - 完成率 = 累计完成套数 / 累计计划套数 × 100%；分母为 0 → None（前端显示 —）。
-    - project_count = 当月项目数。
+    - project_count = 该负责人当月涉及的项目数（去重）。
     排名：完成率降序（None 排最后）→ 计划套数降序 → 负责人升序。
     big_area_person: 大区负责人（大区行级隔离；admin 传 None 看全量）。
+
+    返回字段：manager / delivery_person(=manager 兼容别名) / total_plan / total_actual /
+              completion_rate / project_count / rank。
     """
-    summary = db.get_ranking_summary_by_month(month, big_area_person)   # 1 次查询（已按人聚合）
+    manager_rows = db.get_ranking_manager_rows_by_month(month, big_area_person)
+
+    # 按负责人聚合：同一负责人名下跨多个项目汇总
+    agg: dict[str, dict] = {}
+    for r in manager_rows:
+        mgr = str(r.get("manager") or "").strip()
+        if not mgr:
+            continue
+        bucket = agg.setdefault(mgr, {
+            "manager": mgr,
+            "total_plan": 0,
+            "total_actual": 0,
+            "project_ids": set(),
+        })
+        bucket["total_plan"] += int(r.get("total_plan") or 0)
+        bucket["total_actual"] += int(r.get("total_actual") or 0)
+        bucket["project_ids"].add(int(r.get("project_id")))
 
     rows = []
-    for r in summary:
-        person = str(r.get("delivery_person") or "").strip()
-        if not person:
-            continue
-        plan = int(r.get("total_plan") or 0)
-        actual = int(r.get("total_actual") or 0)
+    for mgr, b in agg.items():
+        plan = b["total_plan"]
+        actual = b["total_actual"]
         rate = round(actual / plan * 100, 1) if plan else None
         rows.append({
-            "delivery_person": person,
+            "manager": mgr,
+            "delivery_person": mgr,   # 兼容前端旧字段名
             "total_plan": plan,
             "total_actual": actual,
             "completion_rate": rate,   # None 表示分母为零
-            "project_count": int(r.get("project_count") or 0),
+            "project_count": len(b["project_ids"]),
         })
 
     # 排序：完成率降序（None 排最后）→ 计划套数降序 → 负责人升序
     rows.sort(key=lambda r: (
         -(r["completion_rate"] if r["completion_rate"] is not None else -1),
         -r["total_plan"],
-        r["delivery_person"],
+        r["manager"],
     ))
     for i, r in enumerate(rows, 1):
         r["rank"] = i
+        r.pop("project_ids", None)
     return rows
 
 

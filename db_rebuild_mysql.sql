@@ -6,6 +6,7 @@
 -- ============================================================
 
 -- ---------- 第 1 步：DROP 旧表（先子后父，避免 FK 约束报错）----------
+DROP TABLE IF EXISTS project_manager_plans;
 DROP TABLE IF EXISTS milestones;
 DROP TABLE IF EXISTS node_exceptions;
 DROP TABLE IF EXISTS node_actual_progress;
@@ -109,7 +110,8 @@ CREATE TABLE IF NOT EXISTS process_node_plans (
     process_order   INT NOT NULL DEFAULT 0,
     plan_date       DATE NULL,
     plan_qty        INT NOT NULL DEFAULT 1,
-    UNIQUE KEY uk_proj_proc_date (project_id, process_name, plan_date)
+    manager         VARCHAR(64) NULL COMMENT '归属负责人（多负责人项目按 / 拆分后逐位导入；NULL=历史/未拆分数据）',
+    UNIQUE KEY uk_proj_proc_date_mgr (project_id, process_name, plan_date, manager)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 表6：node_actual_progress（节点实际进度）
@@ -120,6 +122,7 @@ CREATE TABLE IF NOT EXISTS node_actual_progress (
     process_name    VARCHAR(64) NOT NULL,
     actual_qty      INT NOT NULL DEFAULT 0,
     report_date     DATE NOT NULL,
+    manager         VARCHAR(64) NULL COMMENT '归属负责人（与对应 node_plan 行一致）',
     updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_proj_node (project_id, node_plan_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -143,6 +146,17 @@ CREATE TABLE IF NOT EXISTS node_exceptions (
   INDEX idx_project_id (project_id),
   INDEX idx_node_id (node_id),
   INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 表8：project_manager_plans（多负责人月度计划，v6.0 多负责人管理新增）
+-- 记录「每位负责人 对 某项目」各自申报的本月计划数（方案P：不强制求和 = projects.monthly_plan）
+CREATE TABLE IF NOT EXISTS project_manager_plans (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    project_id      INT NOT NULL,
+    manager         VARCHAR(64) NOT NULL COMMENT '负责人姓名（delivery_person 按 / 拆分后的单个姓名）',
+    monthly_plan    INT NOT NULL DEFAULT 0 COMMENT '该负责人对本项目的本月计划数（独立申报）',
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_pid_mgr (project_id, manager)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 性能索引

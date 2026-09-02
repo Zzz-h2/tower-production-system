@@ -26,10 +26,14 @@ def get_connection():
 
 # ---------- 节点计划 / 实际进度（v4.0 表） ----------
 
-def get_node_plans(project_id: int) -> list[dict]:
-    """查询工序节点计划（含 id/project_id/process_name/plan_date/plan_qty/process_order）。"""
+def get_node_plans(project_id: int, manager: str | None = None) -> list[dict]:
+    """查询工序节点计划（含 id/project_id/process_name/plan_date/plan_qty/process_order/manager）。
+
+    多负责人（v6.0）：manager=None 返回该项目全部行（汇总视图）；
+    manager='张三' 只返回该负责人名下行（单人视图）。
+    """
     from database import get_node_plans as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, manager)
 
 
 def get_node_actuals(project_id: int) -> dict:
@@ -82,10 +86,14 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
     return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, person, big_area_person)
 
 
-def insert_node_plans(project_id: int, plans: list[dict]) -> int:
-    """批量写入节点计划（先清空该项目旧计划再写入，与原版一致）。"""
+def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None) -> int:
+    """批量写入节点计划（覆盖式）。
+
+    多负责人（v6.0）：manager 非 None 时只覆盖该负责人名下的排产工序行（并吸收历史 NULL 行），
+    实现各负责人分别导入、互不覆盖。manager=None 保持历史行为（清空该项目全部排产工序行）。
+    """
     from database import insert_node_plans as _fn
-    return _fn(project_id, plans)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, plans, manager)
 
 
 def delete_all_node_plans(project_id: int) -> None:
@@ -95,10 +103,12 @@ def delete_all_node_plans(project_id: int) -> None:
 
 
 def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
-                       actual_qty: int, report_date: str) -> None:
-    """写入/更新单个节点实际进度。"""
+                       actual_qty: int, report_date: str,
+                       manager: str | None = None) -> None:
+    """写入/更新单个节点实际进度。多负责人（v6.0）：manager 标注归属负责人。"""
     from database import upsert_node_actual as _fn
-    _fn(project_id, node_plan_id, process_name, actual_qty, report_date)
+    getattr(_fn, "__wrapped__", _fn)(project_id, node_plan_id, process_name,
+                                     actual_qty, report_date, manager)
 
 
 def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str) -> int:
@@ -111,13 +121,16 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
 
 
 def save_independent_fill(project_id: int, process_name: str,
-                          fill_qty: int, report_date: str) -> int:
+                          fill_qty: int, report_date: str,
+                          manager: str | None = None) -> int:
     """独立工序（累计完成总数/累计发运总数）逐日填报：按日期 find-or-create node_plan + upsert actual。
 
     桥接根目录 database.py 的 save_independent_fill（路由层通过本桥接调用）。
+    多负责人（v6.0）：manager 非 None 时限定在该负责人名下 find-or-create，互不覆盖。
     """
     from database import save_independent_fill as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, process_name, fill_qty, report_date)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, process_name, fill_qty,
+                                            report_date, manager)
 
 
 def move_independent_fill_date(project_id: int, process_name: str,
@@ -128,6 +141,46 @@ def move_independent_fill_date(project_id: int, process_name: str,
     """
     from database import move_independent_fill_date as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_id, process_name, node_plan_id, new_report_date, new_qty)
+
+
+# ---------- 多负责人管理（v6.0） ----------
+
+def split_managers(delivery_person: str | None) -> list[str]:
+    """把「交付负责人」按 '/'（含全角'／'）拆分为负责人列表（去空+去重+保序）。"""
+    from database import split_managers as _fn
+    return getattr(_fn, "__wrapped__", _fn)(delivery_person)
+
+
+def upsert_manager_monthly_plan(project_id: int, manager: str, monthly_plan: int) -> None:
+    """写入/更新「某负责人 对 某项目」的本月计划数（方案P：独立申报，不校验求和）。"""
+    from database import upsert_manager_monthly_plan as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, manager, monthly_plan)
+
+
+def get_manager_monthly_plan_map(project_id: int) -> dict[str, int]:
+    """取项目各负责人本月计划数映射：{负责人: monthly_plan}（未申报者不在结果中）。"""
+    from database import get_manager_monthly_plan_map as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id)
+
+
+def list_project_managers(project_id: int) -> list[dict]:
+    """列出项目负责人清单及概况（供「多负责人管理」弹窗使用）。
+
+    每项：manager / monthly_plan / plan_rows / has_imported
+    """
+    from database import list_project_managers as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id)
+
+
+def get_ranking_manager_rows_by_month(month: str,
+                                      big_area_person: str | None = None) -> list[dict]:
+    """出品排名（v6.0 多负责人）：返回当月每个 (项目 × 负责人) 的计划/完成明细行。
+
+    与 get_ranking_summary_by_month 的区别：按 '/' 拆分后，每位负责人各占一行，
+    使出品排名能把多位负责人的数据分别展示、分别排名。桥接根目录 database.py 同名函数。
+    """
+    from database import get_ranking_manager_rows_by_month as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month, big_area_person)
 
 
 # ---------- 项目（复用于项目列表/详情） ----------
