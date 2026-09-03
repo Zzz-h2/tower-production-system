@@ -28,6 +28,15 @@
             style="width: 100%"
           />
         </el-form-item>
+        <el-form-item v-if="managers.length > 1" label="负责人" required>
+          <el-select
+            v-model="form.manager"
+            placeholder="选择本次完成归属的负责人"
+            style="width: 100%"
+          >
+            <el-option v-for="m in managers" :key="m" :label="m" :value="m" />
+          </el-select>
+        </el-form-item>
       </el-form>
       <div class="mc-summary">
         合同总数 <b>{{ project?.contract_count || 0 }}</b> 套 · 已完成 <b>{{ project?.completed_sets || 0 }}</b> 套 · 剩余未完成 <b>{{ project?.remaining_sets || 0 }}</b> 套
@@ -59,17 +68,41 @@ function fmtToday() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
+// 把「交付负责人」按 '/'（含全角'／'）拆分为负责人列表（去空+去重+保序），对齐后端 split_managers
+function splitManagers(dp) {
+  if (!dp) return []
+  const seen = new Set()
+  const out = []
+  for (const part of String(dp).split(/[/／]/)) {
+    const s = part.trim()
+    if (s && !seen.has(s)) {
+      seen.add(s)
+      out.push(s)
+    }
+  }
+  return out
+}
+
 const formRef = ref(null)
-const form = ref({ qty: 1, date: fmtToday() })
+const form = ref({ qty: 1, date: fmtToday(), manager: null })
 const submitting = ref(false)
 
-const canSubmit = computed(() => Number.isInteger(Number(form.value.qty)) && Number(form.value.qty) > 0 && !!form.value.date)
+// 多负责人项目才需要前端选择归属负责人；单负责人后端会自动取 delivery_person
+const managers = computed(() => splitManagers(props.project?.delivery_person))
+
+const canSubmit = computed(
+  () =>
+    Number.isInteger(Number(form.value.qty)) &&
+    Number(form.value.qty) > 0 &&
+    !!form.value.date &&
+    (managers.value.length <= 1 || !!form.value.manager),
+)
 
 watch(
   () => props.modelValue,
   (open) => {
     if (!open) return
-    form.value = { qty: 1, date: fmtToday() }
+    form.value = { qty: 1, date: fmtToday(), manager: null }
     formRef.value?.clearValidate?.()
   },
 )
@@ -77,15 +110,20 @@ watch(
 async function submit() {
   if (!props.project) return
   if (!canSubmit.value) {
-    ElMessage.warning('请填写正整数完成套数')
+    ElMessage.warning(managers.value.length > 1 ? '请选择归属的负责人' : '请填写正整数完成套数')
     return
   }
   submitting.value = true
   try {
-    const res = await manualComplete(props.project.id, {
+    const payload = {
       complete_qty: form.value.qty,
       complete_date: form.value.date,
-    })
+    }
+    // 多负责人项目：显式带上选择的负责人，否则后端按 400 拒绝
+    if (managers.value.length > 1 && form.value.manager) {
+      payload.manager = form.value.manager
+    }
+    const res = await manualComplete(props.project.id, payload)
     ElMessage.success(res.message || '✅ 已手动完成')
     emit('completed')
     emit('update:modelValue', false)
