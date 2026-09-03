@@ -257,10 +257,100 @@
         </template>
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
           <el-button @click="innerMode = 'detail'">← 返回详情</el-button>
+          <el-button
+            type="warning"
+            plain
+            :disabled="!auth.canFill || groupNodes.length === 0"
+            @click="openBatchDialog"
+          >
+            ⚡ 一键提报（{{ groupNodes.length }}）
+          </el-button>
           <el-button type="primary" :disabled="!auth.canFill" @click="save" :loading="saving">💾 保存节点进度</el-button>
         </div>
       </template>
     </template>
+
+    <!-- 一键提报弹窗（嵌套） -->
+    <el-dialog
+      v-model="batchDialogVisible"
+      title="⚡ 一键提报"
+      width="560px"
+      :close-on-click-modal="false"
+      append-to-body
+      @closed="batchSubmitting = false"
+    >
+      <div class="batch-body">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 16px;"
+        >
+          本次将对分组「<b>{{ groupLabel }}</b>」下的 <b>{{ eligibleBatchCount }}</b> 条节点执行一键填报。
+          填报数量将自动填到该节点的计划数（{{ batchMode === 'today' ? `填报日期统一为今天 ${fmtToday()}` : '填报日期 = 节点原计划日期' }}）。
+          <span v-if="batchSkippedCount > 0" style="color:#e53e3e;">
+            （另有 {{ batchSkippedCount }} 条无计划日期的节点将被跳过）
+          </span>
+        </el-alert>
+
+        <!-- 选项 A：按今日日期完成（全员可用） -->
+        <div
+          class="batch-option"
+          :class="{ 'opt-active': batchMode === 'today' }"
+          @click="batchMode = 'today'"
+        >
+          <div class="opt-row">
+            <el-radio v-model="batchMode" value="today" :disabled="batchSubmitting">
+              <span class="opt-title">⚡ 按今日日期完成</span>
+            </el-radio>
+          </div>
+          <div class="opt-desc">
+            将所有节点统一按今天的日期（{{ fmtToday() }}）批量填报实际数。<br/>
+            <span style="color:#718096;">📌 注：填报日期晚于计划日期的，仍会处于「逾期」状态——适用场景：当日批量补录。</span>
+          </div>
+        </div>
+
+        <!-- 选项 B：按计划日期完成（仅管理员） -->
+        <div
+          class="batch-option"
+          :class="[
+            { 'opt-active': batchMode === 'plan' },
+            { 'opt-disabled': !auth.isAdmin },
+          ]"
+          @click="auth.isAdmin && !batchSubmitting && (batchMode = 'plan')"
+        >
+          <div class="opt-row">
+            <el-radio v-model="batchMode" value="plan" :disabled="!auth.isAdmin || batchSubmitting">
+              <span class="opt-title">📅 按计划日期完成</span>
+            </el-radio>
+            <el-tag v-if="!auth.isAdmin" size="small" type="warning" effect="dark">🔒 仅管理员</el-tag>
+          </div>
+          <div class="opt-desc">
+            将所有节点按各自原计划的日期批量填报实际数。<br/>
+            <span style="color:#718096;">📌 填报后不产生逾期（填报日期 = 节点计划日期）。</span>
+          </div>
+          <div v-if="!auth.isAdmin" class="opt-disabled-hint">
+            普通用户不可使用：避免填报日期与计划日期不一致造成数据失真。
+          </div>
+        </div>
+
+        <div v-if="eligibleBatchCount === 0" class="batch-empty">
+          当前分组没有可执行一键提报的节点。
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="batchDialogVisible = false" :disabled="batchSubmitting">取消</el-button>
+        <el-button
+          type="primary"
+          :disabled="batchSubmitting || !batchMode || eligibleBatchCount === 0"
+          :loading="batchSubmitting"
+          @click="executeBatchReport"
+        >
+          {{ batchSubmitting ? '提报中...' : `确认提报（${eligibleBatchCount} 条）` }}
+        </el-button>
+      </template>
+    </el-dialog>
   </el-dialog>
 </template>
 
@@ -279,7 +369,8 @@ const props = defineProps({
   mode: { type: String, default: 'detail' },
   manager: { type: String, default: '' },   // 多负责人 v6.0：仅查看/提报该负责人名下节点
 })
-const emit = defineEmits(['update:modelValue', 'saved'])
+// refresh：仅要求父级刷新总览，不关闭本弹窗（一键提报用）；saved：保存后由父级关闭并刷新
+const emit = defineEmits(['update:modelValue', 'saved', 'refresh'])
 const store = useProjectStore()
 const auth = useAuthStore() // canFill 决定填报/日期是否可编辑（admin 或大区账号；后端已按大区隔离）
 
@@ -555,6 +646,82 @@ watch(
     }
   },
 )
+
+// === 一键提报（弹窗态 + 执行） ===
+const batchDialogVisible = ref(false)
+// 'today' = 统一填报今天；'plan' = 填报日期 = 节点原计划日期（仅管理员可用）
+const batchMode = ref('today')
+const batchSubmitting = ref(false)
+// 一键提报只对「有计划日期」的节点生效；独立工序占位行无 plan_date，会被跳过
+const eligibleBatchNodes = computed(() => groupNodes.value.filter((n) => !!n.plan_date))
+const eligibleBatchCount = computed(() => eligibleBatchNodes.value.length)
+const batchSkippedCount = computed(
+  () => Math.max(0, groupNodes.value.length - eligibleBatchCount.value),
+)
+
+// ⚠️ Element Plus 的 ElMessage.xxx(options) 只接受「单个 options 对象」：
+// 第二参数会被当成 Vue 的 appContext，导致 createComponentInstance 内
+// Object.create(appContext.provides) 收到 undefined → 抛
+// "Object prototype may only be an Object or null: undefined"。
+// 这里统一走单参对象写法，并对提示层做兜底，避免它打断后续 UI / 数据更新。
+function safeToast(type, options) {
+  try {
+    ;(ElMessage[type] || ElMessage)(options)
+  } catch (err) {
+    console.warn('[ProcessDetailDialog] 消息提示渲染失败：', err)
+  }
+}
+
+function openBatchDialog() {
+  if (groupNodes.value.length === 0) return
+  // 默认选中「按今日日期」（全员可用）；若分组全无 plan_date 则禁用确认按钮（eligibleCount=0）
+  batchMode.value = 'today'
+  batchSubmitting.value = false
+  batchDialogVisible.value = true
+}
+
+async function executeBatchReport() {
+  if (!batchMode.value || eligibleBatchCount.value === 0) return
+  batchSubmitting.value = true
+  try {
+    const today = fmtToday()
+    const usePlanDate = batchMode.value === 'plan'
+    const values = eligibleBatchNodes.value.map((n) => ({
+      node_id: n.id,
+      qty: Number(n.plan_qty) || 0,
+      report_date: usePlanDate ? n.plan_date : today,
+    }))
+    // 复用现有批量保存接口：单个分组一次性提交
+    const res = await saveNodeProgress(props.pid, props.processName, {
+      group: activeGroup.value,
+      values,
+      manager: props.manager || undefined,
+    })
+    const saved = res?.saved ?? values.length
+    const dateLabel = usePlanDate ? '按各节点原计划日期' : today
+    let msg = `✅ 一键提报成功：共提交 ${saved} 条节点进度（填报日期：${dateLabel}）`
+    if (batchSkippedCount.value > 0) msg += `；已跳过 ${batchSkippedCount.value} 条无计划日期节点`
+
+    // 先关弹窗 + 刷新数据，最后才弹提示：保证提示层即使出异常也不影响 UI 与数据
+    batchDialogVisible.value = false
+    await load()        // 本弹窗内节点列表局部刷新（弹窗保持打开，便于继续操作）
+    emit('refresh')     // 父级总览（工序卡片 / 时间轴 / 排名）同步刷新
+    safeToast('success', { message: msg, duration: 4500, showClose: true })
+  } catch (e) {
+    const detail = e?.response?.data?.detail
+    const code = detail && typeof detail === 'object' ? detail.code : null
+    const msg = detail?.message || e?.message || '一键提报失败'
+    const headline = CODE_FRIENDLY[code] || `⚠️ 一键提报失败${code ? `（${code}）` : ''}`
+    safeToast('error', {
+      dangerouslyUseHTMLString: true,
+      message: `<div style="line-height:1.6; max-width:520px;"><b>${esc(headline)}</b><div style="margin-top:4px; color:#4a5568; font-size:13px;">${esc(msg)}</div></div>`,
+      duration: 6000,
+      showClose: true,
+    })
+  } finally {
+    batchSubmitting.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -715,6 +882,58 @@ watch(
 .rd-btn { padding: 4px 10px; font-size: 12px; }
 .rd-picker-panel { padding: 4px 0; }
 .rd-picker-hint { margin-top: 8px; font-size: 11px; color: #64748b; }
+
+/* 一键提报弹窗 */
+.batch-body { padding: 4px 0; }
+.batch-option {
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background: #ffffff;
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.batch-option:hover { border-color: #cbd5e0; }
+.batch-option.opt-active {
+  border-color: #1a365d;
+  background: #f0f4f9;
+  box-shadow: 0 0 0 3px rgba(26, 54, 93, 0.08);
+}
+.batch-option.opt-disabled {
+  background: #f7fafc;
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+.batch-option.opt-disabled:hover { border-color: #e2e8f0; }
+.batch-option.opt-disabled .opt-row { color: #a0aec0; }
+.opt-row { display: flex; align-items: center; gap: 10px; }
+.opt-title { font-weight: 600; font-size: 15px; color: #1a365d; padding-left: 2px; }
+.opt-desc {
+  margin-top: 8px;
+  margin-left: 24px;       /* 缩进对齐 radio 文字 */
+  font-size: 13px;
+  line-height: 1.7;
+  color: #4a5568;
+}
+.opt-disabled-hint {
+  margin-top: 6px;
+  margin-left: 24px;
+  font-size: 12px;
+  color: #e53e3e;
+  background: #fff5f5;
+  border-left: 3px solid #e53e3e;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.batch-empty {
+  text-align: center;
+  padding: 14px;
+  color: #718096;
+  font-size: 13px;
+  background: #f7fafc;
+  border-radius: 8px;
+}
 
 @media (max-width: 1100px) {
   .row-grid { gap: 10px; padding: 10px 14px; }

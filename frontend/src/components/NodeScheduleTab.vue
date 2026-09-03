@@ -86,6 +86,7 @@
       :mode="dialogMode"
       :manager="selectedManager"
       @saved="onSaved"
+      @refresh="reload"
     />
   </div>
 </template>
