@@ -368,17 +368,25 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
         project_id: 项目ID
         plans: list[dict]，每项含
             process_name(str) / process_order(int) / plan_date('YYYY-MM-DD') / plan_qty(int)
+            可选 actual_qty(int)：仅由排产导入的「已完成」文本识别产出（此时 plan_qty 与
+            actual_qty 均=完成套数），存在时会同步写入 node_actual_progress。
+            不带 actual_qty 的普通导入**行为完全不变**（不产生任何额外 SQL）。
         manager: 归属负责人姓名；None=不区分负责人（历史行为）
 
     Returns:
         int: 实际插入的节点计划条数
     """
+    mgr_val = str(manager).strip() if manager is not None else None
+    # 「已完成」识别项：仅由排产导入的「已完成」文本识别产出，带 actual_qty 的计划行
+    actual_items = [p for p in plans if int(p.get('actual_qty') or 0) > 0]
+    # 回填完成量队列：(node_plan_id, process_name, actual_qty, report_date)
+    pending_actuals: list[tuple[int, str, int, str]] = []
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
             # 删除范围：指定 manager 时只删该负责人名下的排产工序行（不含独立工序 90/91）
-            del_sql = (
-                "DELETE FROM process_node_plans WHERE project_id = %s "
+            del_cond = (
+                "project_id = %s "
                 "AND process_name NOT IN (%s, %s)"
             )
             del_args: list = [project_id, INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]]
@@ -386,9 +394,28 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                 # 指定负责人：只替换该负责人名下的排产工序行。
                 # 同时吸收「历史未拆分(NULL)行」——避免同一批数据既算在 NULL 又算在新负责人名下
                 # 导致汇总视图 plan_qty 翻倍。首个导入的负责人会接管这些历史行。
-                del_sql += " AND (manager <=> %s OR manager IS NULL)"
+                del_cond += " AND (manager <=> %s OR manager IS NULL)"
                 del_args.append(str(manager).strip())
-            cursor.execute(del_sql, tuple(del_args))
+
+            # 覆盖式导入会重建 plan 行（新 id），旧 plan 行对应的完成量若不清理会成为孤儿行。
+            # 只在本次导入含「已完成」项时执行（普通导入零多余 SQL）。
+            stale_plan_ids: list[int] = []
+            if actual_items:
+                cursor.execute(
+                    f"SELECT id FROM process_node_plans WHERE {del_cond}", tuple(del_args)
+                )
+                stale_plan_ids = [int(r['id']) for r in cursor.fetchall()]
+
+            cursor.execute(f"DELETE FROM process_node_plans WHERE {del_cond}", tuple(del_args))
+
+            if stale_plan_ids:
+                # 只删「本次刚被覆盖掉的 plan 行」挂着的完成量，不动其他任何实际进度
+                ids_ph = ",".join(["%s"] * len(stale_plan_ids))
+                cursor.execute(
+                    f"DELETE FROM node_actual_progress "
+                    f"WHERE project_id = %s AND node_plan_id IN ({ids_ph})",
+                    (project_id, *stale_plan_ids),
+                )
 
             if plans:
                 cursor.executemany("""
@@ -401,12 +428,35 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                     int(p.get('process_order', 0) or 0),
                     str(p['plan_date'])[:10],          # 统一 'YYYY-MM-DD' 字符串
                     int(p.get('plan_qty', 1) or 1),
-                    (str(manager).strip() if manager is not None else None),
+                    mgr_val,
                 ) for p in plans])
             conn.commit()
-            return len(plans)
+
+            # 「已完成」文本识别回填：只有带 actual_qty 的项才走这段，
+            # 普通导入（无 actual_qty）零额外 SQL、零行为变化。
+            # 先 commit 再回查 id（upsert_node_actual 走独立连接，未提交的行看不见）。
+            for p in plans:
+                qty = int(p.get('actual_qty') or 0)
+                if qty <= 0:
+                    continue
+                proc_name = str(p['process_name']).strip()
+                plan_date = str(p['plan_date'])[:10]
+                cursor.execute(
+                    "SELECT id FROM process_node_plans "
+                    "WHERE project_id = %s AND process_name = %s AND plan_date = %s "
+                    "  AND manager <=> %s LIMIT 1",   # <=> : NULL 安全等值（manager IS NULL 也能匹配）
+                    (project_id, proc_name, plan_date, mgr_val),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    continue
+                pending_actuals.append((int(row['id']), proc_name, qty, plan_date))
     finally:
         conn.close()
+
+    for node_plan_id, proc_name, qty, report_date in pending_actuals:
+        upsert_node_actual(project_id, node_plan_id, proc_name, qty, report_date, mgr_val)
+    return len(plans)
 
 
 def delete_all_node_plans(project_id: int) -> None:
