@@ -691,22 +691,52 @@ async function executeBatchReport() {
       qty: Number(n.plan_qty) || 0,
       report_date: usePlanDate ? n.plan_date : today,
     }))
-    // 复用现有批量保存接口：单个分组一次性提交
+    // 复用现有批量保存接口：单个分组一次性提交；partial_ok=部分成功模式
+    // （前序联动校验失败的节点由后端跳过并返回明细，不再整批 400）
     const res = await saveNodeProgress(props.pid, props.processName, {
       group: activeGroup.value,
       values,
       manager: props.manager || undefined,
+      partial_ok: true,
     })
     const saved = res?.saved ?? values.length
+    const skipped = Array.isArray(res?.skipped) ? res.skipped : []
     const dateLabel = usePlanDate ? '按各节点原计划日期' : today
-    let msg = `✅ 一键提报成功：共提交 ${saved} 条节点进度（填报日期：${dateLabel}）`
-    if (batchSkippedCount.value > 0) msg += `；已跳过 ${batchSkippedCount.value} 条无计划日期节点`
+
+    // 跳过明细：按「前序工序 · 原因」聚合 + 完整明细滚动列表
+    let detailHtml = ''
+    if (skipped.length) {
+      const buckets = {}
+      skipped.forEach((s) => {
+        const reason = /【前一工序未开始】/.test(s.message || '') ? '前序未开始' : '数量超限'
+        const m = (s.message || '').match(/(?:前置|前一)工序「(.+?)」/)
+        const prev = m ? m[1] : '前序'
+        const key = `${prev} · ${reason}`
+        buckets[key] = (buckets[key] || 0) + 1
+      })
+      const summary = Object.entries(buckets)
+        .map(([k, c]) => `${k} ×${c}`)
+        .join('；')
+      const rows = skipped
+        .map((s) => `<div>📅 ${esc(s.plan_date || '-')}：${esc(s.message || '')}</div>`)
+        .join('')
+      detailHtml = `
+        <div style="margin-top:8px; color:#b7791f; font-weight:600;">⏭ 跳过 ${skipped.length} 条：${esc(summary)}</div>
+        <div style="margin-top:4px; max-height:180px; overflow-y:auto; font-size:12px; color:#4a5568; line-height:1.7;">${rows}</div>`
+    }
 
     // 先关弹窗 + 刷新数据，最后才弹提示：保证提示层即使出异常也不影响 UI 与数据
     batchDialogVisible.value = false
     await load()        // 本弹窗内节点列表局部刷新（弹窗保持打开，便于继续操作）
     emit('refresh')     // 父级总览（工序卡片 / 时间轴 / 排名）同步刷新
-    safeToast('success', { message: msg, duration: 4500, showClose: true })
+    safeToast('success', {
+      dangerouslyUseHTMLString: true,
+      message: `<div style="line-height:1.6; max-width:540px;"><b>✅ 一键提报完成：成功提交 ${saved} 条（填报日期：${esc(dateLabel)}）</b>${
+        batchSkippedCount.value > 0 ? `<div style="margin-top:2px; color:#718096; font-size:13px;">另跳过 ${batchSkippedCount.value} 条无计划日期节点</div>` : ''
+      }${detailHtml}</div>`,
+      duration: 8000,
+      showClose: true,
+    })
   } catch (e) {
     const detail = e?.response?.data?.detail
     const code = detail && typeof detail === 'object' ? detail.code : null

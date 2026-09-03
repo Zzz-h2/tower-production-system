@@ -22,6 +22,7 @@ class SaveNodeProgressRequest(BaseModel):
     values: list[NodeValue]
     report_date: Optional[str] = None  # 新增：填报日期 YYYY-MM-DD；为空则用服务端当天
     manager: Optional[str] = None      # v6.0 多负责人：本次填报归属的负责人（空=汇总/不区分）
+    partial_ok: bool = False           # 一键提报部分成功模式：前序联动校验失败的节点跳过而非整批 400
 
 
 # ---------- Excel 导入 ----------

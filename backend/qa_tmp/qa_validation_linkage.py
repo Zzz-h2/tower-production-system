@@ -86,15 +86,28 @@ results.append(assert_match("黑塔 应被「前一工序未开始 门框焊接�
 results.append(assert_match("错误信息应点名「门框焊接」", err, "门框焊接"))
 results.append(assert_match("文案应含旧版量化 前序累计实际仅 0 套", err, "前序累计实际仅 0 套"))
 
-# 场景 B —— 门框焊接开工后，黑塔填 3 应通过
-print("\n[B] 门框焊接已开工后，黑塔填报 3")
+# 场景 B —— 累计口径（2026-09-03 修复 pid=60 防腐超填后更新预期）：
+# 旧口径「单条 qty ≤ 前序累计」允许一批多条逐条 1≤1 全过、合计超额，已废弃。
+# 新口径：填报后「本工序累计（存量+本批）」≤「前序累计实际」。
+print("\n[B] 门框焊接=3、黑塔存量2（未超额），增量填 1 → 累计 3≤3 应通过")
 actuals_ok = dict(actuals_screenshot)
-actuals_ok[701] = {"actual_qty": 3}  # 门框焊接第一个节点开工 3
+actuals_ok[701] = {"actual_qty": 3}   # 门框焊接累计 3
+actuals_ok[801] = {"actual_qty": 2}   # 黑塔存量修正为不超额形态
 err = validate_today_quota(
     "黑塔", plans, actuals_ok,
-    [{"id": 802, "plan_date": "2026-09-20"}], {802: 3},
+    [{"id": 802, "plan_date": "2026-09-20"}], {802: 1},
 )
-results.append(assert_match("门框焊接已开工，黑塔填 3 应通过", err, None))
+results.append(assert_match("门框焊接=3、黑塔存量2、填1（累计3≤3）应通过", err, None))
+
+print("\n[B2] 存量已超填（黑塔4 > 门框焊接3，pid=60 同款），再填 1 → 应拒绝")
+actuals_b2 = dict(actuals_ok)
+actuals_b2[801] = {"actual_qty": 4}   # 黑塔存量超填
+err = validate_today_quota(
+    "黑塔", plans, actuals_b2,
+    [{"id": 802, "plan_date": "2026-09-20"}], {802: 1},
+)
+results.append(assert_match("存量超填时任何新增都应拒绝（累计口径）", err, "数量校验未通过"))
+results.append(assert_match("文案应含「累计将达 5 套」", err, "累计将达 5 套"))
 
 # 场景 C —— 累计上限仍生效（门框焊接开了 1，但黑塔拟填 100 → 累计才 4+1+3=8）
 print("\n[C] 累计上限：门框焊接开了，黑塔拟填 100（累计不足）")

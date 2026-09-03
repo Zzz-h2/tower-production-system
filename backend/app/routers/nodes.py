@@ -7,7 +7,7 @@ from ..core import db
 from ..core.deps import get_current_user, require_project_access
 from ..schemas import SaveNodeProgressRequest
 from ..services.business_logic import (
-    validate_today_quota, split_node_groups,
+    validate_today_quota, validate_today_quota_nodes, split_node_groups,
 )
 from ..core.config import GROUP_LABELS, INDEPENDENT_PROCESS_NAMES
 
@@ -77,19 +77,41 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
             )
         input_values[v.node_id] = v.qty
 
-    # 业务前序联动校验：today / overdue / future 三组都跑（done 仍只读、不可改）
+    # 业务前序联动校验：today / overdue / future 三组都跑（done 仍只读、不可改）。
+    # partial_ok=True（一键提报部分成功模式）：前序联动逐节点校验，失败节点跳过而非
+    # 整批 400，跳过明细随响应返回；分组归属 / 数量上限等请求构造类校验仍整批拒绝。
+    skipped_details: list[dict] = []
+    values_to_write = req.values
     if req.group in ("today", "overdue", "future"):
-        err = validate_today_quota(process_name, plans, actuals, groups[req.group], input_values)
-        if err:
-            raise HTTPException(
-                status_code=400,
-                detail={"code": "PREV_PROC_QUOTA_EXCEEDED", "message": err},
+        if req.partial_ok:
+            node_errors = validate_today_quota_nodes(
+                process_name, plans, actuals, groups[req.group], input_values,
             )
+            if node_errors:
+                plan_date_by_id = {p["id"]: str(p.get("plan_date") or "")[:10] for p in groups[req.group]}
+                skipped_details = [
+                    {
+                        "node_id": nid,
+                        "plan_date": plan_date_by_id.get(nid, ""),
+                        "qty": int(input_values.get(nid, 0) or 0),
+                        "message": node_errors[nid],
+                    }
+                    for nid in node_errors
+                ]
+                values_to_write = [v for v in req.values if v.node_id not in node_errors]
+        else:
+            err = validate_today_quota(process_name, plans, actuals, groups[req.group], input_values)
+            if err:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "PREV_PROC_QUOTA_EXCEEDED", "message": err},
+                )
 
     # 写入（只写当前分组，每行独立填报日期；大区账号锁定今日；独立工序按日期 find-or-create）
+    # partial_ok 模式下只写通过前序联动校验的节点
     saved = 0
     lock_date = user.get("role") == "big_area"
-    for v in req.values:
+    for v in values_to_write:
         if is_independent:
             rd = v.report_date or today.strftime("%Y-%m-%d")
             try:
@@ -137,8 +159,14 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                                   plan_manager_by_id.get(v.node_id))
             saved += 1
 
-    return {
-        "message": f"✅ 已保存 {saved} 个节点进度（工序：{process_name}，{GROUP_LABELS[req.group]}）",
+    message = f"✅ 已保存 {saved} 个节点进度（工序：{process_name}，{GROUP_LABELS[req.group]}）"
+    if req.partial_ok and skipped_details:
+        message += f"；跳过 {len(skipped_details)} 条（前序联动校验未通过）"
+    resp = {
+        "message": message,
         "saved": saved,
         "group": req.group,
     }
+    if req.partial_ok:
+        resp["skipped"] = skipped_details
+    return resp
