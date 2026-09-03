@@ -52,6 +52,11 @@ class ProjectUpdateRequest(BaseModel):
 # ---------- 手动完成 ----------
 
 class ManualCompleteRequest(BaseModel):
-    """手动完成：为提前完工但无排产计划的项目补录『附件安装』产出。"""
+    """手动完成：为提前完工但无排产计划的项目补录『附件安装』产出。
+
+    manager：归属负责人（v6.0 多负责人）。单负责人项目由路由层自动推导；
+    多负责人项目（delivery_person 含 '/'）必须显式指定，否则 400。
+    """
     complete_qty: int
     complete_date: str
+    manager: Optional[str] = None

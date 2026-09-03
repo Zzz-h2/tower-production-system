@@ -111,13 +111,15 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
                                      actual_qty, report_date, manager)
 
 
-def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str) -> int:
+def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str,
+                           manager: str | None = None) -> int:
     """手动完成：按日期 upsert 一条『附件安装』节点计划 + 实际完成，返回 node_plan_id。
 
-    桥接根目录 database.py 的 upsert_manual_complete（路由层通过本桥接调用）。
+    manager（v6.0 多负责人）必须写入，否则出品排名按 pnp.manager IS NOT NULL
+    过滤会漏掉手动完成数据。桥接根目录 database.py 的 upsert_manual_complete。
     """
     from database import upsert_manual_complete as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, complete_qty, complete_date)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, complete_qty, complete_date, manager)
 
 
 def save_independent_fill(project_id: int, process_name: str,

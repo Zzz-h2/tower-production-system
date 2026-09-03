@@ -644,7 +644,8 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
         conn.close()
 
 
-def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str) -> int:
+def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str,
+                           manager: str | None = None) -> int:
     """手动完成：为项目写入/更新一条『附件安装』节点计划 + 实际完成。
 
     用于「提前完工但没有排产计划」的项目补录产出。语义：
@@ -654,25 +655,32 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
       会让分母为 0、进度恒为 0。
     - 唯一键 uk_proj_proc_date (project_id, process_name, plan_date)：
       同一天重复提交 = **覆盖**（plan_qty 更新为本次值），不同日期 = 新增一行（累加）。
+    - ⚠️ manager（v6.0 多负责人）：**必须写入**。出品排名的完成侧统计按
+      ``pnp.manager IS NOT NULL`` 过滤并按 manager 归属（get_ranking_manager_rows_by_month），
+      manager=NULL 的行会被排名整体漏掉（2026-09-03 修复的根因）。
+      同日覆盖时同步更新 manager（管理员可改归属）。
 
     Args:
         project_id: 项目ID
         complete_qty: 完成套数（正整数，上限由路由层校验）
         complete_date: 完成日期 'YYYY-MM-DD'
+        manager: 归属负责人（路由层推导：单负责人项目自动取 delivery_person；
+                 多负责人项目必须显式指定）
 
     Returns:
         int: 写入/更新的 node_plan_id
     """
     complete_date = str(complete_date)[:10]
+    mgr = (str(manager).strip() if manager else None) or None
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO process_node_plans "
-                    "(project_id, process_name, process_order, plan_date, plan_qty) "
-                "VALUES (%s, %s, 99, %s, %s) "
-                "ON DUPLICATE KEY UPDATE plan_qty = VALUES(plan_qty)",
-                (project_id, "附件安装", complete_date, int(complete_qty or 0)),
+                    "(project_id, process_name, process_order, plan_date, plan_qty, manager) "
+                "VALUES (%s, %s, 99, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE plan_qty = VALUES(plan_qty), manager = VALUES(manager)",
+                (project_id, "附件安装", complete_date, int(complete_qty or 0), mgr),
             )
             node_plan_id = cursor.lastrowid
             if not node_plan_id:

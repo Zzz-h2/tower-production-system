@@ -207,6 +207,23 @@ def manual_complete(pid: int, payload: ManualCompleteRequest, user: dict = Depen
         raise HTTPException(status_code=404, detail="项目不存在")
     require_project_access(project, user)
 
+    # ---- 负责人解析与校验（v6.0 多负责人；手动完成必须归属，否则排名漏统计）----
+    managers = db.split_managers(project.get("delivery_person"))
+    mgr = payload.manager.strip() if (payload.manager and payload.manager.strip()) else None
+    if len(managers) > 1:
+        if not mgr:
+            raise HTTPException(
+                status_code=400,
+                detail=f"该项目有 {len(managers)} 位负责人（{'/'.join(managers)}），请先选择本次手动完成归属的负责人",
+            )
+        if mgr not in managers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"负责人「{mgr}」不在该项目的负责人名单内（{'/'.join(managers)}）",
+            )
+    elif len(managers) == 1:
+        mgr = mgr or managers[0]
+
     complete_date = (payload.complete_date or "").strip()
     try:
         datetime.strptime(complete_date, "%Y-%m-%d")
@@ -257,10 +274,11 @@ def manual_complete(pid: int, payload: ManualCompleteRequest, user: dict = Depen
                     "message": f"完成套数不能超过剩余未完成 {remaining} 套"},
         )
 
-    node_plan_id = db.upsert_manual_complete(pid, complete_qty, complete_date)
+    node_plan_id = db.upsert_manual_complete(pid, complete_qty, complete_date, mgr)
     return {
         "message": f"✅ 已手动完成 {complete_qty} 套",
         "node_plan_id": node_plan_id,
+        "manager": mgr,
         "completed_sets": done + complete_qty,
         "remaining_sets": remaining - complete_qty,
     }
