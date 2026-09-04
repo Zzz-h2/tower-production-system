@@ -336,11 +336,13 @@ def validate_today_quota_nodes(process_name: str, plans_all: list[dict], actuals
             continue
 
         # === 硬卡 1：下料→钢板到货；其他→紧邻前序 ===
+        # ⚠️ 不按 plan_date 过滤前驱 actuals：actuals 是事实（已完成套数），即使前驱的 plan_date
+        # 晚于 target_pd（如"排产导入·已完成"识别产物 plan_date=导入当天），只要 actual_qty>0
+        # 就表示该套数已真实完成，可作为后续工序的前置可用量。
         prev_proc_name = steel_name if is_cutting else SCHEDULE_PROCESS_NAMES[proc_idx - 1]
         prev_started = any(
             int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0) > 0
             and pl["process_name"] == prev_proc_name
-            and str(pl["plan_date"])[:10] <= target_pd
             for pl in plans_all
         )
         if not prev_started:
@@ -353,19 +355,25 @@ def validate_today_quota_nodes(process_name: str, plans_all: list[dict], actuals
 
         # === 硬卡 2（累计口径）：填报后「本工序截至 target_pd 的累计」不得超过「前序截至 target_pd 的累计实际」。
         # 旧口径只比单条 qty ≤ 前序累计，一批多条逐条判 1≤1 全过、合计却超额（pid=60 防腐 3>黑塔 1 即此漏洞）。
+        # ⚠️ 前驱 actuals 同样不按 plan_date 过滤（理由同上），仅 steel_plan_total 保留过滤——后者是
+        # 排程计划量，用于"前驱是否按计划全部到货"判定，决定是否放行多填。
         if is_cutting:
             # 下料专属：钢板到货「全部完成」则放行多填（满足提前到货实际）
             steel_total = sum(
                 int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0)
                 for pl in plans_all
                 if pl["process_name"] == steel_name
-                and str(pl["plan_date"])[:10] <= target_pd
             )
+            # steel_plan_total 仍按 plan_date 过滤，但"已完成"导入的 plan（plan_date=导入当天 > target_pd、
+            # actual_qty>0）也计入"已完成计划量"——其 plan_qty 是用户已确认的承诺量，应参与"是否全部到货"判定。
             steel_plan_total = sum(
                 int(pl.get("plan_qty", 0) or 0)
                 for pl in plans_all
                 if pl["process_name"] == steel_name
-                and str(pl["plan_date"])[:10] <= target_pd
+                and (
+                    str(pl["plan_date"])[:10] <= target_pd
+                    or int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0) > 0
+                )
             )
             total_after = _total_after(target_pd)
             if steel_total < steel_plan_total and total_after > steel_total:
@@ -383,7 +391,6 @@ def validate_today_quota_nodes(process_name: str, plans_all: list[dict], actuals
                 int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0)
                 for pl in plans_all
                 if pl["process_name"] == prev_proc_name
-                and str(pl["plan_date"])[:10] <= target_pd
             )
             total_after = _total_after(target_pd)
             if total_after > prev_total:
