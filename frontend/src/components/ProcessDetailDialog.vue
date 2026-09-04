@@ -32,9 +32,9 @@
               <div class="deviation-label">-</div>
             </div>
           </template>
-          <!-- 11 道排产工序：按节点逐行展示（保持原行为，未做任何改动） -->
+          <!-- 11 道排产工序：按节点逐行展示（分页展开，避免 60+ 行一次性渲染卡顿） -->
           <template v-else>
-            <div v-for="row in detail.nodes" :key="row.id" class="row-card row-grid-detail">
+            <div v-for="row in displayedDetailNodes" :key="row.id" class="row-card row-grid-detail">
               <div class="row-bar" :style="{ background: colorOf(row.status) }"></div>
               <div class="row-info">
                 <div class="row-dates">
@@ -56,6 +56,17 @@
               </div>
               <span class="status-pill" :style="pillStyle(row.status)">{{ row.label }}</span>
               <div class="deviation-label">{{ row.deviation_label }}</div>
+            </div>
+            <!-- 展开更多按钮 -->
+            <div v-if="detail.nodes.length > PAGE_SIZE && !showAllDetail" class="expand-more">
+              <el-button link type="primary" @click="showAllDetail = true">
+                ⬇ 展开更多（还有 {{ detail.nodes.length - PAGE_SIZE }} 条）
+              </el-button>
+            </div>
+            <div v-else-if="detail.nodes.length > PAGE_SIZE && showAllDetail" class="expand-more">
+              <el-button link type="primary" @click="showAllDetail = false">
+                ⬆ 收起（仅显示前 {{ PAGE_SIZE }} 条）
+              </el-button>
             </div>
           </template>
         </el-tab-pane>
@@ -195,8 +206,8 @@
               </div>
             </div>
           </div>
-          <!-- 11 道排产工序：原有 row-grid 行为 -->
-          <div v-else v-for="node in groupNodes" :key="node.id" class="row-card row-grid">
+          <!-- 11 道排产工序：原有 row-grid 行为（分页展开，避免大量 row-card 一次性渲染导致卡顿） -->
+          <div v-else v-for="node in displayedGroupNodes" :key="node.id" class="row-card row-grid">
             <div class="row-bar" :style="{ background: colorOf(statusOf(node)) }"></div>
             <div class="row-left-section">
               <span v-if="!isIndependent" class="cell-plan-date">{{ node.plan_date }}</span>
@@ -253,6 +264,17 @@
             <div class="row-status-section">
               <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
             </div>
+          </div>
+          <!-- 展开更多按钮：超过 PAGE_SIZE 时显示，避免一次性渲染大量 row-card -->
+          <div v-if="groupNodes.length > PAGE_SIZE && !showAllFill" class="expand-more">
+            <el-button link type="primary" @click="showAllFill = true">
+              ⬇ 展开更多（还有 {{ groupNodes.length - PAGE_SIZE }} 条）
+            </el-button>
+          </div>
+          <div v-else-if="groupNodes.length > PAGE_SIZE && showAllFill" class="expand-more">
+            <el-button link type="primary" @click="showAllFill = false">
+              ⬆ 收起（仅显示前 {{ PAGE_SIZE }} 条）
+            </el-button>
           </div>
         </template>
         <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
@@ -458,6 +480,23 @@ const groupOptions = computed(() => {
 const groupLabelMap = { today: '今日待填报', overdue: '逾期未完成', future: '未来计划', done: '已完成' }
 const groupLabel = computed(() => groupLabelMap[activeGroup.value] || activeGroup.value)
 const groupNodes = computed(() => detail.value?.groups?.[activeGroup.value] || [])
+
+// 分页展开：节点数超过 PAGE_SIZE 时默认只渲染前 PAGE_SIZE 条，避免大量 row-card 一次性渲染导致卡顿
+const PAGE_SIZE = 20
+const showAllFill = ref(false)
+const showAllDetail = ref(false)
+const displayedGroupNodes = computed(() =>
+  showAllFill.value || groupNodes.value.length <= PAGE_SIZE
+    ? groupNodes.value
+    : groupNodes.value.slice(0, PAGE_SIZE)
+)
+const displayedDetailNodes = computed(() =>
+  showAllDetail.value || (detail.value?.nodes?.length || 0) <= PAGE_SIZE
+    ? (detail.value?.nodes || [])
+    : (detail.value?.nodes || []).slice(0, PAGE_SIZE)
+)
+// 切换分组时重置展开状态
+watch(activeGroup, () => { showAllFill.value = false })
 
 // 独立工序（累计完成总数/累计发运总数）：无日期语义 → 隐藏日期列与异常提报页签
 const isIndependent = computed(() => !!detail.value?.is_independent)
@@ -900,6 +939,8 @@ async function executeBatchReport() {
 /* 色条宽度与 grid 第 1 列（6px）对齐，覆盖全局 theme.css 的 .row-card .row-bar{width:4px} */
 .row-grid .row-bar, .row-grid-detail .row-bar { width: 6px; }
 .cell-report-date { display: flex; align-items: center; gap: 10px; }
+/* 展开更多按钮：分页展开区域，置中、淡灰背景，与 row-card 视觉区隔 */
+.expand-more { text-align: center; padding: 12px 0 4px; margin-top: 4px; border-top: 1px dashed #e2e8f0; }
 .rd-tag {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 10px; border-radius: 6px;
