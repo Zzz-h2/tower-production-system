@@ -9,7 +9,7 @@
             {{ auth.label || (auth.isAdmin ? '管理员' : '普通账号') }}
           </el-tag>
           <el-tag v-if="auth.isBigArea && auth.bigAreaName" size="small" type="warning">
-            {{ auth.bigAreaName }}
+            {{ auth.bigAreaName === 'ALL' ? '全部大区' : auth.bigAreaName }}
           </el-tag>
         </span>
         <el-button size="small" @click="onLogout">退出登录</el-button>

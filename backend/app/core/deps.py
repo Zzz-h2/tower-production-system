@@ -85,8 +85,14 @@ def require_admin(user: dict = Depends(get_current_user)) -> dict:
 
 
 def get_scope_big_area(user: dict = Depends(get_current_user)) -> Optional[str]:
-    """推导数据隔离范围：admin → None（全量）；big_area → 大区名。"""
+    """推导数据隔离范围：admin / 全区哨兵(``big_area_name='ALL'``) → None（全量）；big_area → 大区名。
+
+    - ``'ALL'`` 为「全区大区」哨兵：角色仍是 ``big_area``（无 admin 专属权），但可见全部项目，
+      用于团队成员统一查看所有项目进展（"能看全部、但非管理员"）。
+    """
     if user.get("role") == "admin":
+        return None
+    if str(user.get("big_area_name") or "") == "ALL":
         return None
     return user.get("big_area_name")
 
@@ -102,6 +108,10 @@ def require_project_access(project: Optional[dict], user: dict) -> None:
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     if user.get("role") == "admin":
+        return
+    # 「全区大区」哨兵（big_area_name='ALL'）：角色仍是 big_area（无 admin 专属权），
+    # 但可见全部项目详情，用于团队成员统一查看所有项目进展。
+    if str(user.get("big_area_name") or "") == "ALL":
         return
     if str(project.get("big_area_person") or "") != str(user.get("big_area_name") or ""):
         raise HTTPException(status_code=404, detail="项目不存在")
