@@ -48,9 +48,22 @@ async function doUpload({ file }) {
       props.managerMonthlyPlan || 0,
     )
     ElMessage.success(res.message || '导入成功')
-    const warnText = (res.warnings || []).map((w) => `⚠️ ${w}`).join('<br/>')
-    if (warnText) {
-      ElMessage.warning({ message: warnText, duration: 6000, dangerouslyUseHTMLString: true })
+    // 大文件兜底：warnings 可能多达数百条（62 套 × 11 工序），巨型 toast 会糊满整页导致"页面显示错误"。
+    // 只展示前 10 条 + 汇总条数，完整明细在浏览器控制台可查。
+    const warnings = res.warnings || []
+    if (warnings.length) {
+      const MAX_SHOW = 10
+      const shown = warnings.slice(0, MAX_SHOW).map((w) => `⚠️ ${w}`)
+      if (warnings.length > MAX_SHOW) {
+        shown.push(`…等共 ${warnings.length} 条提示（其余从略，详见控制台）`)
+        console.warn('[ScheduleImport] 完整提示列表:', warnings)
+      }
+      ElMessage.warning({
+        message: shown.join('<br/>'),
+        duration: 8000,
+        showClose: true,
+        dangerouslyUseHTMLString: true,
+      })
     }
     emit('imported')   // 父组件刷新节点计划总览
   } catch (e) {

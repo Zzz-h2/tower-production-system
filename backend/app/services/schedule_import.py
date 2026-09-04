@@ -40,7 +40,7 @@ import re
 import sys
 import unicodedata
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 # 兼容两种运行方式：
@@ -159,6 +159,33 @@ def _is_set_no(value) -> bool:
     return bool(re.fullmatch(r"第?\s*\d+", s))  # 纯数字/第N 序号
 
 
+# Excel 序列日期：以 1899-12-30 为第 0 天（兼容 Excel 1900 闰年 bug 的业界约定）。
+# 合理年份区间 20000~80000 ≈ 1954-10 ~ 2119-01；区间外的数值（如 0/1/工时/数量）不当日期处理。
+_EXCEL_EPOCH = datetime(1899, 12, 30)
+_EXCEL_SERIAL_MIN = 20000
+_EXCEL_SERIAL_MAX = 80000
+
+
+def _excel_serial_to_date(val):
+    """数值型单元格按 Excel 序列日期解析；不在合理区间返回 None。
+
+    背景（缺陷根因）：日期单元格若为「常规」格式，openpyxl/pandas 读出的是原始序列数
+    （如 46173 = 2026-06-08）。pd.to_datetime(46173) 会把整数当**纳秒**解析 → 1970-01-01，
+    且不报错，导致全部计划静默坍缩到 epoch。数值必须先走 Excel 序列换算。
+    """
+    if isinstance(val, bool):
+        return None
+    if not isinstance(val, (int, float)):
+        return None
+    try:
+        serial = float(val)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not (_EXCEL_SERIAL_MIN <= serial <= _EXCEL_SERIAL_MAX):
+        return None
+    return (_EXCEL_EPOCH + timedelta(days=serial)).date()
+
+
 def _find_header_row(rows: list[list]) -> Optional[int]:
     """定位工序名行：该行包含至少一个 SCHEDULE_PROCESS_NAMES 工序名。"""
     for r_idx, row in enumerate(rows):
@@ -256,6 +283,18 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
             cell = _cell_str(val)
             if not cell:
                 continue  # 空单元格 → 该套该工序无计划日期，跳过
+            # 数值型单元格：Excel 序列日期（如 46173=2026-06-08），绝不能交给 pd.to_datetime
+            # （整数会被当纳秒解析成 1970-01-01 且不报错）。见 _excel_serial_to_date 注释。
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                serial_date = _excel_serial_to_date(val)
+                if serial_date is not None:
+                    node_items.append((pn, serial_date.strftime('%Y-%m-%d')))
+                    continue
+                errors.append(
+                    f"第{excel_row_num}行 工序「{pn}」数值 {val} 不是有效的 Excel 日期序列号"
+                    f"（已保持原状态跳过，请检查单元格是否为日期格式）"
+                )
+                continue
             try:
                 parsed = pd.to_datetime(val, errors="raise")
             except (ValueError, TypeError) as e:  # noqa: PERF203
