@@ -86,14 +86,34 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
     return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, person, big_area_person)
 
 
-def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None) -> int:
+def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None,
+                      durations: list[dict] | None = None) -> int:
     """批量写入节点计划（覆盖式）。
 
     多负责人（v6.0）：manager 非 None 时只覆盖该负责人名下的排产工序行（并吸收历史 NULL 行），
     实现各负责人分别导入、互不覆盖。manager=None 保持历史行为（清空该项目全部排产工序行）。
+    durations：按「套」的工序计划时长/相对下料偏移（工序时间规则升级用），与 plan 行同范围覆盖式重建。
     """
     from database import insert_node_plans as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, plans, manager)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, plans, manager, durations)
+
+
+def get_project_process_durations(project_id: int, manager: str | None = None) -> dict:
+    """读取项目「按套工序时长/偏移」并按 (工序, 计划日) 归并（无数据返回 {}）。"""
+    from database import get_project_process_durations as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, manager)
+
+
+def get_project_process_durations_batch(project_ids: list[int]) -> dict[int, dict]:
+    """批量读取多项目「按套工序时长/偏移」并归并（消除列表页 N+1）。"""
+    from database import get_project_process_durations_batch as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_ids)
+
+
+def get_actuals_rich_by_node_ids(node_ids: list[int]) -> dict:
+    """批量取节点实际进度（含 report_date）：{node_plan_id: {actual_qty, report_date}}。"""
+    from database import get_actuals_rich_by_node_ids as _fn
+    return getattr(_fn, "__wrapped__", _fn)(node_ids)
 
 
 def delete_all_node_plans(project_id: int) -> None:
@@ -258,6 +278,12 @@ def sync_independent_plans(project_id: int, contract_count) -> int:
     return getattr(_fn, "__wrapped__", _fn)(project_id, contract_count)
 
 
+def update_independent_contract_qty(project_id: int, contract_count) -> int:
+    """非破坏性同步独立工序「合同占位行」的 plan_qty（只改 plan_date IS NULL 的占位行）。"""
+    from database import update_independent_contract_qty as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, contract_count)
+
+
 def get_duplicate_project(project_name: str, factory_name: str,
                           delivery_person: str, machine_type: str):
     """四字段组合查重：名称+厂家+负责人+机型 全部一致才算重复。"""
@@ -319,6 +345,7 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     all_pids = [p["id"] for p in rows]
     plans_map = get_node_plans_batch(all_pids)      # 1 次查询
     actuals_map = get_node_actuals_batch(all_pids)  # 1 次查询
+    durations_map = get_project_process_durations_batch(all_pids)   # 1 次查询（工序时间规则升级）
 
     conn = get_connection()
     try:
@@ -339,7 +366,7 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         p["has_schedule_plan"] = pid in has_schedule_ids
         plans = plans_map.get(pid, [])
         actuals = actuals_map.get(pid, {})
-        nodes = enrich_rows(plans, actuals)
+        nodes = enrich_rows(plans, actuals, durations=durations_map.get(pid))
 
         # 风险等级：历史逾期 > 今日未完成 > 正常
         # （未来日期的 in_progress「提前进行中」不算预警；今日 in_progress 须 actual < plan 才算）

@@ -168,6 +168,7 @@ function saveSetting() {
 
 const STATUS_TEXT = {
   done: '已完成', done_early: '提前完成', overdue: '已逾期',
+  waiting_material: '待下料',
   in_progress: '进行中', pending: '未开始',
 }
 const statusText = (s) => STATUS_TEXT[s] || '未开始'
@@ -175,6 +176,7 @@ const statusStyle = (s) => {
   const m = {
     done: { c: '#38a169', b: '#f0fff4' }, done_early: { c: '#0ea5e9', b: '#e0f2fe' },
     overdue: { c: '#e53e3e', b: '#fff5f5' }, in_progress: { c: '#3182ce', b: '#ebf4ff' },
+    waiting_material: { c: '#a0aec0', b: '#f7fafc' },
     pending: { c: '#718096', b: '#f7fafc' },
   }
   const x = m[s] || m.pending

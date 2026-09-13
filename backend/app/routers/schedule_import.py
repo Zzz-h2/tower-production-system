@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 
 from ..core import db
 from ..core.deps import require_admin, require_project_access
-from ..services.schedule_import import parse_upload
+from ..services.schedule_import import parse_upload_full
 
 router = APIRouter(prefix="/api/projects", tags=["import"])
 
@@ -48,9 +48,9 @@ async def import_schedule(pid: int, file: UploadFile = File(...),
         mgr = mgr or managers[0]      # 单人项目自动归属，无需前端强制选择
 
     content = await file.read()
-    plans, warnings = parse_upload(content, file.filename)
+    plans, warnings, durations = parse_upload_full(content, file.filename)
 
-    success = db.insert_node_plans(pid, plans, mgr)
+    success = db.insert_node_plans(pid, plans, mgr, durations)
 
     # 该负责人申报的本月计划数（仅负责人明确时记录）
     plan_val = int(monthly_plan or 0)

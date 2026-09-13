@@ -357,7 +357,8 @@ def get_config(key: str) -> Optional[str]:
 # 全部走 MySQL，pymysql 风格：%s 占位、显式 cursor。
 # ============================================================
 
-def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None) -> int:
+def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None,
+                      durations: list[dict] | None = None) -> int:
     """清空该项目（指定负责人名下）的节点计划，再批量插入新计划（覆盖式导入）。
 
     多负责人（v6.0）：manager 非 None 时，删除与插入都**只作用于该负责人名下**，
@@ -397,16 +398,46 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                 del_cond += " AND (manager <=> %s OR manager IS NULL)"
                 del_args.append(str(manager).strip())
 
-            # 覆盖式导入会重建 plan 行（新 id），旧 plan 行对应的完成量若不清理会成为孤儿行。
-            # 只在本次导入含「已完成」项时执行（普通导入零多余 SQL）。
-            stale_plan_ids: list[int] = []
-            if actual_items:
-                cursor.execute(
-                    f"SELECT id FROM process_node_plans WHERE {del_cond}", tuple(del_args)
-                )
-                stale_plan_ids = [int(r['id']) for r in cursor.fetchall()]
+            # 覆盖式重导入会重建 plan 行（新 id）。为**不丢失已填报进度**：
+            # ① 删除前按 (process_name, plan_date, manager) 快照既有实际进度；
+            # ② 重建后按同键把进度回挂到新行（行未被改动的进度不丢）；
+            # ③ 清理旧 plan 行（含历史遗留孤儿）的 actual。
+            snap_cond = "pnp.project_id = %s AND pnp.process_name NOT IN (%s, %s)"
+            snap_args: list = [project_id, INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]]
+            if manager is not None:
+                snap_cond += " AND (pnp.manager <=> %s OR pnp.manager IS NULL)"
+                snap_args.append(str(manager).strip())
+            cursor.execute(
+                "SELECT pnp.process_name, pnp.plan_date, pnp.manager, nap.actual_qty, nap.report_date "
+                "FROM process_node_plans pnp JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id "
+                f"WHERE {snap_cond}", tuple(snap_args))
+            progress_snapshot: dict = {}
+            for r in cursor.fetchall():
+                if not r.get('plan_date'):
+                    continue
+                # 键只用 (process_name, plan_date)：删除范围内同一键可能同时存在
+                # 「本负责人行」与被吸收的「历史 NULL 行」，优先保留本负责人的进度
+                key = (str(r['process_name']).strip(), str(r['plan_date'])[:10])
+                prev = progress_snapshot.get(key)
+                if prev is None or r['manager'] == mgr_val:
+                    progress_snapshot[key] = (
+                        int(r['actual_qty'] or 0),
+                        (str(r['report_date'])[:10] if r['report_date'] else None),
+                    )
+
+            # 待删旧 plan 行 id（用于删除后清理其 actual，避免孤儿行堆积）
+            cursor.execute(f"SELECT id FROM process_node_plans WHERE {del_cond}", tuple(del_args))
+            stale_plan_ids: list[int] = [int(r['id']) for r in cursor.fetchall()]
 
             cursor.execute(f"DELETE FROM process_node_plans WHERE {del_cond}", tuple(del_args))
+
+            # 工序时长表（按套）与 plan 行同范围覆盖式重建，避免重导残留孤儿行
+            dur_cond = "project_id = %s"
+            dur_args: list = [project_id]
+            if manager is not None:
+                dur_cond += " AND (manager <=> %s OR manager IS NULL)"
+                dur_args.append(str(manager).strip())
+            cursor.execute(f"DELETE FROM project_process_durations WHERE {dur_cond}", tuple(dur_args))
 
             if stale_plan_ids:
                 # 只删「本次刚被覆盖掉的 plan 行」挂着的完成量，不动其他任何实际进度
@@ -430,6 +461,22 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                     int(p.get('plan_qty', 1) or 1),
                     mgr_val,
                 ) for p in plans])
+
+            # 按「套」写入工序计划时长/相对下料偏移（无 durations → 零额外 SQL）
+            if durations:
+                cursor.executemany("""
+                    INSERT INTO project_process_durations
+                        (project_id, manager, set_seq, process_name, plan_date, duration_days, offset_days)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """, [(
+                    project_id,
+                    mgr_val,
+                    int(d.get('set_seq') or 0),
+                    str(d.get('process_name') or '').strip(),
+                    (str(d['plan_date'])[:10] if d.get('plan_date') else None),
+                    (int(d['duration_days']) if d.get('duration_days') is not None else None),
+                    (int(d['offset_days']) if d.get('offset_days') is not None else None),
+                ) for d in durations])
             conn.commit()
 
             # 「已完成」文本识别回填：只有带 actual_qty 的项才走这段，
@@ -451,12 +498,130 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                 if not row:
                     continue
                 pending_actuals.append((int(row['id']), proc_name, qty, plan_date))
+
+            # 进度回挂：把快照按 (process_name, plan_date, manager) 挂到新建的 plan 行上，
+            # 使「重新导入排产计划」不再清空已填报进度。显式 actual_qty 项已在上方处理，此处跳过。
+            for p in plans:
+                if int(p.get('actual_qty') or 0) > 0:
+                    continue
+                pn = str(p['process_name']).strip()
+                pd = str(p['plan_date'])[:10]
+                snap = progress_snapshot.get((pn, pd))
+                if not snap or snap[0] <= 0:
+                    continue
+                cursor.execute(
+                    "SELECT id FROM process_node_plans WHERE project_id = %s AND process_name = %s "
+                    "AND plan_date = %s AND manager <=> %s LIMIT 1",
+                    (project_id, pn, pd, mgr_val),
+                )
+                row = cursor.fetchone()
+                if row:
+                    pending_actuals.append((int(row['id']), pn, snap[0], snap[1] or pd))
     finally:
         conn.close()
 
     for node_plan_id, proc_name, qty, report_date in pending_actuals:
         upsert_node_actual(project_id, node_plan_id, proc_name, qty, report_date, mgr_val)
     return len(plans)
+
+
+def get_project_process_durations(project_id: int, manager: str | None = None) -> dict:
+    """读取项目的「按套工序时长/偏移」，按 (process_name, plan_date) 归并后返回。
+
+    同一 (工序, 计划日) 若来自多套（排产按 plan_date 聚合行的情形，实测约 4% 行），
+    取各套的**中位数**作为该行代表值——95%+ 的行本就与「套」1:1，中位数对合并行稳健。
+
+    Returns:
+        {(process_name, 'YYYY-MM-DD'): {"duration_days": int|None, "offset_days": int|None}}
+        无数据（存量项目未重新导入）→ 返回 {}，调用方回退原判定规则。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = ("SELECT process_name, plan_date, duration_days, offset_days "
+                   "FROM project_process_durations WHERE project_id = %s")
+            args: list = [project_id]
+            if manager is not None:
+                sql += " AND manager <=> %s"
+                args.append(str(manager).strip())
+            cursor.execute(sql, tuple(args))
+            raw = [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+    return _merge_duration_rows(raw)
+
+
+def _merge_duration_rows(rows: list[dict]) -> dict:
+    """把 durations 原始行按 (process_name, plan_date) 归并为
+    {key: {"duration_days", "offset_days"}}；同一行来自多套时取中位数（稳健代表值）。"""
+    groups: dict = {}
+    for row in rows:
+        if not row.get('plan_date'):
+            continue
+        key = (str(row['process_name']).strip(), str(row['plan_date'])[:10])
+        groups.setdefault(key, []).append((row.get('duration_days'), row.get('offset_days')))
+
+    def _median(vals):
+        vals = sorted(v for v in vals if v is not None)
+        if not vals:
+            return None
+        n = len(vals)
+        return vals[n // 2] if n % 2 else int(round((vals[n // 2 - 1] + vals[n // 2]) / 2))
+
+    return {
+        key: {"duration_days": _median([p[0] for p in pairs]),
+              "offset_days": _median([p[1] for p in pairs])}
+        for key, pairs in groups.items()
+    }
+
+
+def get_project_process_durations_batch(project_ids: list[int]) -> dict[int, dict]:
+    """批量读取多项目「按套工序时长/偏移」并归并：{project_id: {(pn,date): {...}}}。
+
+    用于项目列表风险等级计算，避免逐项目查询造成 N+1（按 900 分片）。
+    """
+    if not project_ids:
+        return {}
+    by_pid: dict[int, list] = {}
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            for chunk in _chunked(project_ids):
+                fmt = ",".join(["%s"] * len(chunk))
+                cur.execute(
+                    f"SELECT project_id, process_name, plan_date, duration_days, offset_days "
+                    f"FROM project_process_durations WHERE project_id IN ({fmt})", chunk)
+                for row in cur.fetchall():
+                    by_pid.setdefault(int(row['project_id']), []).append(dict(row))
+    finally:
+        conn.close()
+    return {pid: _merge_duration_rows(rws) for pid, rws in by_pid.items()}
+
+
+def get_actuals_rich_by_node_ids(node_ids: list[int]) -> dict:
+    """批量取节点实际进度（含日期）：{node_plan_id: {"actual_qty": int, "report_date": str|None}}。
+
+    排名明细需要 report_date 以支持「实际下料日」锚点；按 900 分片规避占位符上限。
+    """
+    if not node_ids:
+        return {}
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            result: dict = {}
+            for chunk in _chunked(node_ids):
+                fmt = ",".join(["%s"] * len(chunk))
+                cur.execute(
+                    f"SELECT node_plan_id, actual_qty, report_date FROM node_actual_progress "
+                    f"WHERE node_plan_id IN ({fmt})", chunk)
+                for r in cur.fetchall():
+                    result[int(r["node_plan_id"])] = {
+                        "actual_qty": int(r["actual_qty"] or 0),
+                        "report_date": str(r["report_date"])[:10] if r.get("report_date") else None,
+                    }
+            return result
+    finally:
+        conn.close()
 
 
 def delete_all_node_plans(project_id: int) -> None:
@@ -496,6 +661,33 @@ def sync_independent_plans(project_id: int, contract_count) -> int:
             )
             conn.commit()
             return 2
+    finally:
+        conn.close()
+
+
+def update_independent_contract_qty(project_id: int, contract_count) -> int:
+    """同步独立工序「合同占位行」的 plan_qty = contract_count（**非破坏性**）。
+
+    与 sync_independent_plans 的区别（关键）：
+      - sync_independent_plans 会 DELETE 该工序**全部行**再重建，用于调度令导入的全量同步；
+      - 本函数只 UPDATE `plan_date IS NULL` 的**占位行**，**不删除、不重建**，
+        因此不会误删用户已填报的日期行，也不会留下孤儿 node_actual_progress。
+
+    用于「编辑项目·合同总数」后的占位行同步，保证任何读取占位行的路径与 projects.contract_count 一致。
+    返回受影响行数（项目从未导入调度令 → 0，不新增行）。
+    """
+    names = INDEPENDENT_PROCESS_NAMES
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE process_node_plans SET plan_qty = %s "
+                "WHERE project_id = %s AND process_name IN (%s, %s) AND plan_date IS NULL",
+                (int(contract_count or 0), project_id, names[0], names[1]),
+            )
+            affected = cursor.rowcount
+            conn.commit()
+            return int(affected or 0)
     finally:
         conn.close()
 

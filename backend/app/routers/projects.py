@@ -17,12 +17,16 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 # ============ 手动添加项目请求体 ============
 class ProjectCreate(BaseModel):
-    """手动添加项目：5 必填 + 3 选填；服务端做非空/整数校验。"""
+    """手动添加项目：5 必填 + 选填；服务端做非空/整数校验。
+
+    ⚠️ 与 ProjectUpdateRequest / database 白名单保持一致；漏声明字段会被 Pydantic 静默忽略。
+    """
     project_name: Optional[str] = None       # 项目名称 *
     machine_type: Optional[str] = None         # 机型 *
     factory_name: Optional[str] = None         # 钢塔厂家 *
     delivery_person: Optional[str] = None      # 交付负责人 *
     big_area_person: Optional[str] = None      # 大区负责人（选填）
+    contract_count: Optional[int] = None       # 合同总数（选填；此前漏声明 → 新增时不落库）
     monthly_plan: Optional[int] = None          # 本月计划出品数量 *
     last_month_output: Optional[int] = None    # 截止上月出品（选填）
     plan_start_date: Optional[str] = None      # 计划开工日期（选填）
@@ -163,7 +167,8 @@ def get_project(pid: int, user: dict = Depends(get_current_user)):
     # 风险等级：基于 node_plans + node_actuals 实时判定
     plans = db.get_node_plans(pid)
     actuals = db.get_node_actuals(pid)
-    rows = enrich_rows(plans, actuals)
+    durations = db.get_project_process_durations(pid)   # 工序时间规则升级：按套时长/偏移
+    rows = enrich_rows(plans, actuals, durations=durations)
 
     today_s = str(date.today())
 
@@ -295,7 +300,7 @@ def update_project(pid: int, payload: ProjectUpdateRequest, user: dict = Depends
     data = {k: v for k, v in payload.model_dump().items() if v is not None}
     if "project_name" in data and not str(data["project_name"]).strip():
         raise HTTPException(status_code=400, detail="项目名称不能为空")
-    for f in ("last_month_output", "monthly_plan"):
+    for f in ("last_month_output", "monthly_plan", "contract_count"):
         if f in data and data[f] is not None:
             try:
                 data[f] = int(data[f])
@@ -306,6 +311,12 @@ def update_project(pid: int, payload: ProjectUpdateRequest, user: dict = Depends
 
     if data:
         db.update_project(pid, data)
+
+    # 合同总数变更后，同步独立工序「合同占位行」的 plan_qty（只改 plan_date IS NULL 的占位行，
+    # 不触碰用户已填报的日期行），保证任何读取占位行的路径与项目主表一致。
+    if "contract_count" in data:
+        db.update_independent_contract_qty(pid, data["contract_count"])
+
     # 废弃 processes 表工序重排与 risk_level 写入：风险等级由 node_plans+node_actuals 实时计算
 
     return db.get_project_by_id(pid)
@@ -389,7 +400,9 @@ def get_node_plans_overview(pid: int, manager: Optional[str] = None,
         # 汇总视图：用项目整体本月计划数
         monthly_plan = int(project.get("monthly_plan") or 0)
 
-    result = build_overview(pid, plans, actuals, monthly_plan=monthly_plan)
+    result = build_overview(pid, plans, actuals, monthly_plan=monthly_plan,
+                            contract_count=project.get("contract_count"),
+                            durations=db.get_project_process_durations(pid, mgr))
     result["manager"] = mgr                          # 当前口径（null=汇总）
     result["managers"] = db.list_project_managers(pid)  # 供前端渲染筛选器
     return result
@@ -407,7 +420,9 @@ def get_process_nodes(pid: int, process_name: str, manager: Optional[str] = None
     mgr = manager.strip() if manager and manager.strip() else None
     plans = db.get_node_plans(pid, mgr)
     actuals = db.get_node_actuals(pid)
-    return build_process_detail(process_name, plans, actuals)
+    return build_process_detail(process_name, plans, actuals,
+                                contract_count=project.get("contract_count"),
+                                durations=db.get_project_process_durations(pid, mgr))
 
 
 @router.get("/{pid}/alerts")
@@ -418,13 +433,15 @@ def get_alerts(pid: int, user: dict = Depends(get_current_user)):
     plans = db.get_node_plans(pid)
     actuals = db.get_node_actuals(pid)
     from ..services.node_service import enrich_rows
-    rows = enrich_rows(plans, actuals)
+    rows = enrich_rows(plans, actuals, durations=db.get_project_process_durations(pid))
     from ..core.config import INDEPENDENT_PROCESS_NAMES
     # 独立工序（累计完成/累计发运）不参与预警：无日期语义，仅作为参考指标
+    # count_as_overdue=False（待下料 / 法兰到货）也不进预警，避免出现不该有的延期项
     focus = [
         r for r in rows
         if r["status"] in ("overdue", "warning", "in_progress")
         and r["process_name"] not in INDEPENDENT_PROCESS_NAMES
+        and r.get("count_as_overdue", True)
     ]
     focus.sort(key=lambda r: {"overdue": 0, "warning": 1, "in_progress": 2}[r["status"]])
 

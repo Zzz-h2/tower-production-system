@@ -10,11 +10,12 @@ FastAPI 运行路径实际在用的函数（保留）：
 已清理的历史遗留死代码：Streamlit 版 正向/倒排计划（12 道制造工序）、
 工序进度计算、预警判定、预计交付、里程碑对比、日计划拆解等不再被引用的函数。
 """
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 from .workday_calendar import parse_date
-from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
+from ..core.config import (SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES,
+                           MATERIAL_PROCESS_NAMES, MANUFACTURE_PROCESS_NAMES)
 
 
 def prev_process_total(process_name: str, plans_all: list[dict], actuals: dict,
@@ -39,9 +40,82 @@ def prev_process_total(process_name: str, plans_all: list[dict], actuals: dict,
     return total
 
 
-def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=None):
+def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[dict] = None) -> dict:
+    """按「每一套（每个计划行）」计算闸门与 effective 计划日期（工序时间/延期判定规则升级核心）。
+
+    闸门 = 该行所属套的「下料」是否已有实际填报（actual_qty>0）。
+    - 钢板到货：不参与闸门，始终按计划日期判定，**计入**逾期/风险/排名（保证闭环）。
+    - 法兰到货：不参与闸门，按计划日期展示，但**不计入**逾期/风险/排名（不作主指标）。
+    - 制造链（下料~具备验收）：
+        · 闸门关 → waiting_material=True（⏸ 待下料，灰），不计入统计；
+        · 闸门开 → eff_plan_date = 实际下料日 + 该行所属套的 offset_days，计入统计。
+
+    Args:
+        plans_all: 项目全部节点计划行（含 id/process_name/plan_date）
+        actuals: {node_plan_id: {actual_qty, report_date}}
+        durations: {(process_name, 'YYYY-MM-DD'): {"offset_days": int}}；为 None/缺该键 → 回退现规则
+                   （该行不做闸门抑制、不重算日期，行为与升级前一致）
+
+    Returns:
+        {node_id: {"waiting_material": bool, "eff_plan_date": str|None, "count_as_overdue": bool}}
     """
-    判定单个工序节点计划状态（五态 + 完成日期偏差）。
+    mfg = set(MANUFACTURE_PROCESS_NAMES)
+    cutting_name = MANUFACTURE_PROCESS_NAMES[0] if MANUFACTURE_PROCESS_NAMES else "下料"
+    steel_name = MATERIAL_PROCESS_NAMES[0] if MATERIAL_PROCESS_NAMES else "钢板到货"
+
+    # 下料行：plan_date -> 该套最早实际下料日（闸门锚点）
+    cutting_anchor: dict[str, str] = {}
+    for p in plans_all:
+        if p.get("process_name") != cutting_name:
+            continue
+        pd = str(p.get("plan_date") or "")[:10]
+        act = actuals.get(p.get("id"), {}) or {}
+        aq = int(act.get("actual_qty", 0) or 0)
+        rd = str(act.get("report_date") or "")[:10]
+        if pd and aq > 0 and rd:
+            cur = cutting_anchor.get(pd)
+            if cur is None or rd < cur:
+                cutting_anchor[pd] = rd
+
+    rules: dict = {}
+    for p in plans_all:
+        nid = p.get("id")
+        pn = p.get("process_name")
+        pd = str(p.get("plan_date") or "")[:10]
+        if pn not in mfg:
+            # 到货类（及其它非制造链）：钢板计入主指标，法兰不计入
+            rules[nid] = {"waiting_material": False, "eff_plan_date": None,
+                          "count_as_overdue": (pn == steel_name)}
+            continue
+        info = (durations or {}).get((pn, pd))
+        if not info:
+            # 无时长数据（存量项目/未重新导入）→ 回退现规则
+            rules[nid] = {"waiting_material": False, "eff_plan_date": None, "count_as_overdue": True}
+            continue
+        offset = int(info.get("offset_days") or 0)
+        base = parse_date(p.get("plan_date"))
+        d0 = (base - timedelta(days=offset)).strftime("%Y-%m-%d") if base else None
+        anchor = cutting_anchor.get(d0) if d0 else None
+        if not anchor:
+            rules[nid] = {"waiting_material": True, "eff_plan_date": None, "count_as_overdue": False}
+        else:
+            eff = (parse_date(anchor) + timedelta(days=offset)).strftime("%Y-%m-%d")
+            rules[nid] = {"waiting_material": False, "eff_plan_date": eff, "count_as_overdue": True}
+    return rules
+
+
+def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=None, *,
+                      eff_plan_date=None, waiting_material=False, count_as_overdue=True):
+    """
+    判定单个工序节点计划状态（五态 + 完成日期偏差 + 待下料态）。
+
+    新增（工序时间/延期判定规则升级）：
+    - waiting_material=True：闸门关（该套尚未实际下料）的制造链工序 → 返回 ⏸ 待下料（灰），
+      不判延期、不计入逾期/风险/排名（count_as_overdue=False）；**但不影响可填报性**
+      （分组不变，下料仍可填报，否则闸门永远打不开）。
+    - eff_plan_date：闸门开时以「实际下料日 + 该工序相对下料的计划偏移」重算的计划日期，
+      作为延期判定基准（替代原始 plan_date）。
+    - count_as_overdue：该节点是否计入逾期统计/风险等级/排名（法兰到货、待下料为 False）。
 
     规则（按此顺序）：
     - done:        actual_qty >= plan_qty              → 🟢 已完成
@@ -66,10 +140,21 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
             - deviation_label: 提前X天 / 准时 / 延期X天 / 还有X天 / 进行中 / 逾期X天
             - deviation_color: 提前/准时/进行中 #38a169；未到 #718096；warning #d69e2e；overdue #e53e3e
     """
+    # 待下料态（闸门关的制造链工序）：灰态、不判延期、不计入逾期/风险/排名
+    if waiting_material:
+        return {
+            "status": "waiting_material", "label": "⏸ 待下料", "level": 0, "lag_qty": 0,
+            "completion_date": None,
+            "deviation_days": 0, "deviation_label": "-", "deviation_color": "#a0aec0",
+            "count_as_overdue": False,
+        }
+
     # 统一解析日期（str / date / datetime / Timestamp 均兼容）
-    parsed_plan = parse_date(plan_date)
-    if parsed_plan is None and plan_date is not None:
-        parsed_plan = plan_date
+    # 闸门开时用重算后的 effective 计划日期作为延期判定基准
+    base_plan = eff_plan_date if eff_plan_date is not None else plan_date
+    parsed_plan = parse_date(base_plan)
+    if parsed_plan is None and base_plan is not None:
+        parsed_plan = base_plan
 
     if today is None:
         today = date.today()
@@ -126,6 +211,7 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
         "deviation_days": dev_days,
         "deviation_label": dev_label,
         "deviation_color": dev_color,
+        "count_as_overdue": bool(count_as_overdue),
     }
 
 
@@ -149,7 +235,7 @@ def compute_real_overdue(rows: list[dict], monthly_plan: int) -> list[dict]:
     Returns:
         list[dict]: 真逾期节点行（可能为空列表）
     """
-    all_overdue = [r for r in rows if r["status"] == "overdue"]
+    all_overdue = [r for r in rows if r["status"] == "overdue" and r.get("count_as_overdue", True)]
     if monthly_plan <= 0:
         # 无调度令计划 → 无法判定"超产"，回退原有逻辑（避免漏报延期）
         return all_overdue
@@ -188,10 +274,16 @@ def judge_process_card_status(proc_nodes: list[dict], actuals: dict, today=None,
         int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0) for n in proc_nodes
     )
 
-    # 严格历史逾期：plan_date < today 且未完成（不含今天）
+    # 闸门关（整道工序均为待下料）→ 卡片显示 ⏸ 待下料，不判延期
+    if all(n.get("status") == "waiting_material" for n in proc_nodes):
+        return {"status": "waiting_material", "label": "⏸ 待下料", "tags": []}
+
+    # 严格历史逾期：plan_date < today 且未完成（不含今天）；仅计入 count_as_overdue 的节点
+    # （法兰到货、待下料不参与逾期/风险/排名）
     overdue_nodes = [
         n for n in proc_nodes
-        if str(n["plan_date"])[:10] < today_s
+        if n.get("count_as_overdue", True)
+        and str(n["plan_date"])[:10] < today_s
         and int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0)
         < int(n["plan_qty"] or 0)
     ]

@@ -36,11 +36,17 @@ class ImportResult(BaseModel):
 # ---------- 项目编辑 ----------
 
 class ProjectUpdateRequest(BaseModel):
-    """项目信息更新（仅提交需要修改的字段，其余保持原值）。"""
+    """项目信息更新（仅提交需要修改的字段，其余保持原值）。
+
+    ⚠️ 必须与 database.update_project 的字段白名单、前端 EditProjectDialog 的表单保持一致；
+    漏声明字段会被 Pydantic 静默忽略（extra=ignore），表现为「提示保存成功但值未更新」。
+    """
     project_name: Optional[str] = None
+    machine_type: Optional[str] = None       # 机型（此前漏声明 → 编辑不生效）
     factory_name: Optional[str] = None
     last_month_output: Optional[int] = None
     monthly_plan: Optional[int] = None
+    contract_count: Optional[int] = None     # 合同总数（此前漏声明 → 编辑不生效）
     delivery_person: Optional[str] = None
     big_area_person: Optional[str] = None
     plan_start_date: Optional[str] = None

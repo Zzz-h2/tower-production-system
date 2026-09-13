@@ -13,7 +13,7 @@
 from datetime import date
 
 from ..core import db
-from ..services.business_logic import judge_node_status
+from ..services.business_logic import judge_node_status, build_time_rules
 
 
 def _month_range(month: str) -> tuple[str, str]:
@@ -93,14 +93,31 @@ def get_production_ranking_detail(month: str, person: str, big_area_person: str 
     """
     ns, ne = _month_range(month)
     plans = db.get_all_plans_by_month_and_person(ns, ne, person, big_area_person)  # 1 次查询
+    if not plans:
+        return []
     node_ids = [p["id"] for p in plans]
-    actuals = db.get_actuals_by_node_ids(node_ids)                # 1 次查询
+    actuals = db.get_actuals_rich_by_node_ids(node_ids)           # 1 次查询（含日期，支持闸门锚点）
+    pids = sorted({int(p["project_id"]) for p in plans})
+    durations_map = db.get_project_process_durations_batch(pids)   # 1 次查询（按套时长/偏移）
     today = date.today()
+
+    # 按项目算「闸门 + effective 计划日期」（与页面口径一致，避免排名与页面打架）
+    by_pid: dict[int, list] = {}
+    for p in plans:
+        by_pid.setdefault(int(p["project_id"]), []).append(p)
+    rules_all: dict = {}
+    for pid, plist in by_pid.items():
+        rules_all.update(build_time_rules(plist, actuals, durations_map.get(pid)))
 
     result = []
     for p in plans:
-        aq = actuals.get(int(p["id"]), 0)
-        plan_date = p["plan_date"]
+        aq = int((actuals.get(int(p["id"])) or {}).get("actual_qty", 0) or 0)
+        ru = rules_all.get(int(p["id"])) or {}
+        # 待下料（闸门关的制造链工序）与法兰到货（不作主指标）不进逾期/提前明细
+        if ru.get("waiting_material") or not ru.get("count_as_overdue", True):
+            continue
+        eff = ru.get("eff_plan_date")
+        plan_date = eff if eff else p["plan_date"]        # 闸门开 → 用重算后的计划日期
         info = judge_node_status(str(plan_date), int(p["plan_qty"] or 0), aq, today)
         pd = str(plan_date)[:10]
         ts = str(today)

@@ -210,9 +210,16 @@ def _find_set_col(rows: list[list], header_row_idx: int) -> int:
 # 主函数
 # ============================================================
 
-def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
+def parse_schedule_excel_full(file_path: str) -> tuple[list[dict], list[str], list[dict]]:
     """
-    解析排产矩阵 Excel，返回 (plans, errors)。
+    解析排产矩阵 Excel，返回 (plans, errors, durations)。
+
+    durations: list[dict]，**按「套」**保存工序计划时长与相对下料偏移（工序时间规则升级用）：
+        {set_seq, process_name, plan_date, duration_days, offset_days}
+        - duration_days = 具备验收计划日 − 本工序计划日 + 1（含首尾；例 9.7→9.24 = 18）
+        - offset_days   = 本工序计划日 − 下料计划日（下料=0）
+        仅当同一套内「下料」与「具备验收」计划日都存在时产出；「已完成」文本行不产出。
+        ⚠️ 必须在聚合(按 process_name+plan_date 合并)之前计算，否则套身份丢失。
 
     Args:
         file_path: .xlsx 文件路径
@@ -231,10 +238,10 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
     try:
         raw = pd.read_excel(file_path, sheet_name=0, header=None)
     except Exception as e:  # noqa: BLE001
-        return [], [f"文件读取失败: {e}"]
+        return [], [f"文件读取失败: {e}"], []
 
     if raw is None or raw.empty:
-        return [], ["Excel 文件为空或第一个 sheet 无内容"]
+        return [], ["Excel 文件为空或第一个 sheet 无内容"], []
 
     rows: list[list] = []
     for _, row in raw.iterrows():
@@ -246,7 +253,7 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
         return [], [
             "未找到工序名行：需包含排产工序名（钢板到货/法兰到货/下料/卷制/"
             "组对/环缝/门框焊接/黑塔/防腐/附件安装/具备验收）"
-        ]
+        ], []
 
     header_vals = rows[header_row_idx]
 
@@ -268,6 +275,9 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
     node_items: list[tuple[str, str]] = []
     # 「已完成」文本识别：工序名 → 完成套数（无日期语义，聚合时落到「导入当天」）
     completed_counts: Counter = Counter()
+    # 工序时间规则升级：按「套」记录时长/偏移（必须在聚合前算，聚合后套身份会丢失）
+    durations: list[dict] = []
+    set_seq = 0
     for r_idx in range(header_row_idx + 1, len(rows)):
         row = rows[r_idx]
         set_val = row[set_col] if set_col < len(row) else None
@@ -276,6 +286,8 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
             # 跳过空行 / 汇总行 / 备注行（但保留可定位到的套序号行）
             continue
 
+        set_seq += 1
+        set_dates: dict[str, str] = {}   # 本套：工序名 → 计划日（仅正常日期，不含「已完成」文本）
         excel_row_num = r_idx + 1  # Excel 行号（1-based）
         for i, pn in enumerate(SCHEDULE_PROCESS_NAMES):
             col = proc_cols[i]
@@ -288,7 +300,9 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
             if isinstance(val, (int, float)) and not isinstance(val, bool):
                 serial_date = _excel_serial_to_date(val)
                 if serial_date is not None:
-                    node_items.append((pn, serial_date.strftime('%Y-%m-%d')))
+                    ds = serial_date.strftime('%Y-%m-%d')
+                    node_items.append((pn, ds))
+                    set_dates[pn] = ds
                     continue
                 errors.append(
                     f"第{excel_row_num}行 工序「{pn}」数值 {val} 不是有效的 Excel 日期序列号"
@@ -310,10 +324,32 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
                 continue
             if pd.isna(parsed):
                 continue
-            node_items.append((pn, parsed.strftime('%Y-%m-%d')))
+            ds = parsed.strftime('%Y-%m-%d')
+            node_items.append((pn, ds))
+            set_dates[pn] = ds
+
+        # ---- 4b. 本套工序时长/偏移（需同时存在「下料」与「具备验收」计划日）----
+        d0 = set_dates.get(SCHEDULE_PROCESS_NAMES[2])    # 下料
+        de = set_dates.get(SCHEDULE_PROCESS_NAMES[-1])   # 具备验收
+        if d0 and de:
+            try:
+                b0 = datetime.strptime(d0, '%Y-%m-%d').date()
+                be = datetime.strptime(de, '%Y-%m-%d').date()
+            except ValueError:
+                b0 = be = None
+            if b0 and be:
+                for pn, d in set_dates.items():
+                    bd = datetime.strptime(d, '%Y-%m-%d').date()
+                    durations.append({
+                        "set_seq": set_seq,
+                        "process_name": pn,
+                        "plan_date": d,
+                        "duration_days": (be - bd).days + 1,   # 含首尾
+                        "offset_days": (bd - b0).days,         # 相对下料
+                    })
 
     if not node_items and not completed_counts:
-        return [], ["未解析到任何有效节点计划：请检查套序号列与工序日期列格式"]
+        return [], ["未解析到任何有效节点计划：请检查套序号列与工序日期列格式"], []
 
     # ---- 5. 聚合：按 (process_name, plan_date) 分组，plan_qty = 套数计数 ----
     counter = Counter(node_items)
@@ -368,11 +404,17 @@ def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
                 f"【信息】工序「{pn}」：{qty} 套识别为「已完成」，已记为完成量"
             )
 
+    return plans, errors, durations
+
+
+def parse_schedule_excel(file_path: str) -> tuple[list[dict], list[str]]:
+    """兼容旧签名：只返回 (plans, errors)，忽略 durations（QA/CLI 等既有调用方不受影响）。"""
+    plans, errors, _durations = parse_schedule_excel_full(file_path)
     return plans, errors
 
 
-def parse_upload(file_bytes: bytes, filename: str) -> tuple[list[dict], list[str]]:
-    """接收上传文件字节流 → 临时落盘 → 解析。"""
+def parse_upload_full(file_bytes: bytes, filename: str) -> tuple[list[dict], list[str], list[dict]]:
+    """接收上传文件字节流 → 临时落盘 → 解析（返回 plans, warnings, durations）。"""
     import tempfile
     import os
     from fastapi import HTTPException
@@ -381,12 +423,18 @@ def parse_upload(file_bytes: bytes, filename: str) -> tuple[list[dict], list[str
         tmp.write(file_bytes)
         tmp_path = tmp.name
     try:
-        plans, warnings = parse_schedule_excel(tmp_path)
+        plans, warnings, durations = parse_schedule_excel_full(tmp_path)
         if not plans:
             raise HTTPException(status_code=400, detail="未解析到任何工序节点计划，请检查 Excel 格式。")
-        return plans, warnings
+        return plans, warnings, durations
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def parse_upload(file_bytes: bytes, filename: str) -> tuple[list[dict], list[str]]:
+    """兼容旧签名：只返回 (plans, warnings)，忽略 durations。"""
+    plans, warnings, _durations = parse_upload_full(file_bytes, filename)
+    return plans, warnings

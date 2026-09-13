@@ -148,9 +148,11 @@ const statusText = { pending: '待处理', processing: '处理中', closed: '已
 
 const statusColors = {
   done: '#38a169', pending: '#718096', in_progress: '#3182ce', warning: '#3182ce', overdue: '#e53e3e',
+  waiting_material: '#a0aec0',
 }
 const statusBgs = {
   done: '#f0fff4', pending: '#f7fafc', in_progress: '#ebf8ff', warning: '#ebf8ff', overdue: '#fff5f5',
+  waiting_material: '#f7fafc',
 }
 const pillStyle = (s) => ({ background: statusBgs[s] || '#f7fafc', color: statusColors[s] || '#718096' })
 

@@ -60,11 +60,20 @@ STATUS_COLORS = {
     "in_progress": "#3182ce",
     "warning": "#d69e2e",
     "overdue": "#e53e3e",
+    "waiting_material": "#a0aec0",   # ⏸ 待下料（闸门关：未实际下料，暂不判延期）
 }
 STATUS_EMOJI = {
     "done": "🟢", "pending": "⚪", "in_progress": "🔵",
     "warning": "🟡", "overdue": "🔴",
+    "waiting_material": "⏸",
 }
+
+# 原材料到货工序（不参与「下料闸门」）：钢板到货、法兰到货。
+# 闸门关时只有「钢板到货」承担延期主指标并计入逾期/风险/排名；
+# 「法兰到货」按计划日期展示但不计入逾期/风险/排名（不作主指标）。
+MATERIAL_PROCESS_NAMES = ["钢板到货", "法兰到货"]
+# 制造链工序（下料~具备验收）：受闸门与 effective_plan_date 重算管辖
+MANUFACTURE_PROCESS_NAMES = SCHEDULE_PROCESS_NAMES[2:]
 
 # 分组名（填报弹窗互斥手风琴）
 GROUP_LABELS = {

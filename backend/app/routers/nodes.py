@@ -7,7 +7,7 @@ from ..core import db
 from ..core.deps import get_current_user, require_project_access
 from ..schemas import SaveNodeProgressRequest
 from ..services.business_logic import (
-    validate_today_quota, validate_today_quota_nodes, split_node_groups,
+    validate_today_quota, validate_today_quota_nodes, split_node_groups, build_time_rules,
 )
 from ..core.config import GROUP_LABELS, INDEPENDENT_PROCESS_NAMES
 
@@ -44,7 +44,16 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
     # 多负责人：只取该负责人名下的节点计划（前序联动校验也随之限定在其内部，互不干扰）
     plans = db.get_node_plans(pid, mgr)
     actuals = db.get_node_actuals(pid)
-    proc_nodes = [p for p in plans if p["process_name"] == process_name]
+    durations = db.get_project_process_durations(pid, mgr)
+    # 分组与前端展示口径一致：闸门开（该套已实际下料）的制造链节点按「重算后的计划日期」归组，
+    # 否则会出现「前端显示在未来计划、后端却按旧日期归到逾期组」的 NODE_NOT_IN_GROUP 错位。
+    rules = build_time_rules(plans, actuals, durations)
+    plans_for_group = [
+        ({**p, "plan_date": rules[p["id"]]["eff_plan_date"]}
+         if rules.get(p["id"], {}).get("eff_plan_date") else p)
+        for p in plans
+    ]
+    proc_nodes = [p for p in plans_for_group if p["process_name"] == process_name]
     if not proc_nodes:
         tip = f"（负责人：{mgr}）" if mgr else ""
         raise HTTPException(status_code=404, detail=f"工序「{process_name}」无节点{tip}")
