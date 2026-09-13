@@ -8,7 +8,8 @@ from .business_logic import (judge_node_status, judge_process_card_status, split
 from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
 
 
-def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optional[dict] = None) -> list[dict]:
+def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optional[dict] = None,
+                rules: Optional[dict] = None) -> list[dict]:
     """富化节点行：计划信息 + 实际完成 + 五态判定（含完成日期与偏差）。
 
     返回行结构与原 Streamlit 版 rows 一致（前端时间轴/卡片直接使用）。
@@ -16,9 +17,12 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
     done / in_progress，不走日期判定，避免被误判逾期/预警。
     工序时间规则升级（durations 非空时）：制造链工序按「实际下料闸门 + 重算日期」判定；
     durations 为 None / 缺该行时长 → 回退原规则（存量项目行为不变）。
+    ⚠️ rules 可由调用方预计算传入——**闸门锚点需要全项目的计划行**（找「下料」行），
+    若 plans 已被过滤成单道工序，必须传全量行算出的 rules，否则全部误判为待下料。
     """
     today = today or date.today()
-    rules = build_time_rules(plans, actuals, durations)
+    if rules is None:
+        rules = build_time_rules(plans, actuals, durations)
     rows = []
     for r in plans:
         nid = r["id"]
@@ -173,6 +177,7 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
       - 返回值额外带 contract_count，供前端「合同总数」直接读取（避免依赖占位行 plan_qty）
     """
     today = today or date.today()
+    # ⚠️ 闸门锚点必须基于【全项目】计划行（找「下料」行），不能只用本工序的行
     rules = build_time_rules(plans, actuals, durations)
     proc_nodes = sorted(
         (r for r in plans if r["process_name"] == process_name),
@@ -185,7 +190,7 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
         for p in proc_nodes
     ]
     groups = split_node_groups(proc_nodes, actuals, today)
-    rows = enrich_rows(proc_nodes, actuals, today, durations)
+    rows = enrich_rows(proc_nodes, actuals, today, durations, rules)
 
     # 独立工序的 done 组按日期降序展示（最新填报在上）
     if process_name in INDEPENDENT_PROCESS_NAMES:
