@@ -8,11 +8,11 @@
       </div>
       <div class="kpi-card kpi-blue">
         <div class="kpi-value" style="color:#38a169;">{{ uploadedCount }}</div>
-        <div class="kpi-label">已上传排产</div>
+        <div class="kpi-label">{{ monthLabel }}已上传排产</div>
       </div>
       <div class="kpi-card kpi-warning">
         <div class="kpi-value" style="color:#ed8936;">{{ notUploadedCount }}</div>
-        <div class="kpi-label">未上传排产</div>
+        <div class="kpi-label">{{ monthLabel }}未上传排产</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-value">{{ monthDueCount }}</div>
@@ -51,8 +51,8 @@
           @clear="applyFilter"
         >
           <el-option label="全部" value="all" />
-          <el-option label="已上传" value="uploaded" />
-          <el-option label="未上传" value="not_uploaded" />
+          <el-option label="本月已上传" value="uploaded" />
+          <el-option label="本月未上传" value="not_uploaded" />
         </el-select>
         <el-date-picker
           v-model="store.filters.month"
@@ -70,8 +70,9 @@
     <div class="block-card">
       <div class="block-header">
         <span class="section-dot" style="background:#ed8936;"></span>
-        <span class="block-title" style="color:#ed8936;">未上传排产计划</span>
+        <span class="block-title" style="color:#ed8936;">{{ monthLabel }}未上传排产计划</span>
         <el-tag type="warning" size="small">{{ notUploadedList.length }}</el-tag>
+        <span class="block-hint">含「本月未上传 · 上次上传 X 月」与「从未上传」两类，请按需补传</span>
       </div>
       <el-table :data="notUploadedList" style="width: 100%" :row-style="{ height: '48px' }">
         <el-table-column label="项目名称" min-width="240">
@@ -89,9 +90,18 @@
             {{ row.plan_start_date || '-' }} → {{ row.plan_end_date || '-' }}
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="100">
+        <el-table-column label="上次上传" width="130">
           <template #default="{ row }">
-            <span class="st-pill" style="background:#fffaf0; color:#ed8936;">未上传</span>
+            <span v-if="row.schedule_upload_month" class="last-month">{{ row.schedule_upload_month }}</span>
+            <span v-else-if="row.has_schedule_plan_ever" class="last-month muted">历史数据（月份未标记）</span>
+            <span v-else class="last-month muted">从未上传</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <span class="st-pill" style="background:#fffaf0; color:#ed8936;">
+              {{ row.has_schedule_plan_ever ? '本月未上传' : '未上传' }}
+            </span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="210" fixed="right">
@@ -109,7 +119,7 @@
     <div class="block-card" style="margin-top: 20px;">
       <div class="block-header">
         <span class="section-dot" style="background:#38a169;"></span>
-        <span class="block-title" style="color:#38a169;">已上传排产计划</span>
+        <span class="block-title" style="color:#38a169;">{{ monthLabel }}已上传排产计划</span>
         <el-tag type="success" size="small">{{ uploadedList.length }}</el-tag>
       </div>
       <el-table :data="uploadedList" style="width: 100%" :row-style="{ height: '48px' }">
@@ -128,7 +138,12 @@
             {{ row.plan_start_date || '-' }} → {{ row.plan_end_date || '-' }}
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="100">
+        <el-table-column label="上传归属月" width="130">
+          <template #default="{ row }">
+            <span class="last-month">{{ row.schedule_upload_month || monthLabel }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
           <template #default="{ row }">
             <span class="st-pill" style="background:#f0fff4; color:#38a169;">已上传</span>
           </template>
@@ -201,6 +216,12 @@ const auth = useAuthStore()   // 普通账号仅可查看排产总览，导入/�
 
 const allItems = ref([])
 const filters = ref({ keyword: '', person: '', uploadStatus: 'all' })
+
+// 月份文案：KPI / 表头统一带月份，避免用户把「本月未上传」误读成「从来没传过」
+const monthLabel = computed(() => {
+  const m = store.filters.month
+  return m ? `${m} ` : ''
+})
 
 // 统计
 const totalCount = computed(() => allItems.value.length)
@@ -304,8 +325,11 @@ onMounted(() => {
 .block-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .section-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .block-title { font-size: 15px; font-weight: 600; }
+.block-hint { font-size: 12px; color: #a0aec0; margin-left: 4px; }
 .search-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .st-pill { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+.last-month { font-size: 12px; color: #4a5568; }
+.last-month.muted { color: #a0aec0; }
 .proj-link { color: #3182ce; cursor: pointer; font-weight: 500; }
 .proj-link:hover { text-decoration: underline; }
 .import-dialog-actions {

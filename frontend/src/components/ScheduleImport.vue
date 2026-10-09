@@ -5,6 +5,23 @@
       <span class="block-title">📥 导入排产计划</span>
       <span class="block-subtitle">支持 .xlsx / .xls，将按 (工序, 计划日期) 聚合生成节点计划</span>
     </div>
+
+    <!-- 排产归属月（v7.2）：默认取页面当前共享月份，可手动改。
+         该月份决定「本月是否上传过排产」的判定，以及被替换旧行的归档归属。 -->
+    <div class="month-row">
+      <span class="month-label">本次排产归属月</span>
+      <el-date-picker
+        v-model="planMonth"
+        type="month"
+        value-format="YYYY-MM"
+        placeholder="选择归属月（默认当前月）"
+        :disabled="props.disabled || uploading"
+        class="month-picker"
+        :clearable="false"
+      />
+      <span class="month-hint">导入后该项目在「{{ planMonth || '当前月' }}」将被标记为已上传排产</span>
+    </div>
+
     <el-upload
       drag
       :accept="'.xlsx,.xls'"
@@ -24,9 +41,10 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { importSchedule } from '../api/node'
+import { useProjectStore } from '../store/project'
 
 const props = defineProps({
   pid: { type: String, required: true },
@@ -36,7 +54,26 @@ const props = defineProps({
 })
 const emit = defineEmits(['imported'])
 
+const store = useProjectStore()
 const uploading = ref(false)
+
+// 默认归属月 = 页面当前共享月份（store.filters.month，未设置则为当前自然月）
+function currentMonth() {
+  if (store.filters.month) return store.filters.month
+  if (typeof store.ensureMonth === 'function') {
+    store.ensureMonth()
+    return store.filters.month || ''
+  }
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+const planMonth = ref(currentMonth())
+// 本组件在「项目详情-节点计划」页是**常驻挂载**的。若只在挂载时取一次全局月份，
+// 用户之后切换页面月份时选择器不跟随 → 排产被归到错误的月份。
+// 故：全局月份变化 → 选择器同步跟随；同一个月上下文内用户的手动改动保持不变。
+watch(() => store.filters.month, (m) => {
+  if (m) planMonth.value = m
+})
 
 async function doUpload({ file }) {
   uploading.value = true
@@ -46,6 +83,7 @@ async function doUpload({ file }) {
       file,
       props.manager || undefined,
       props.managerMonthlyPlan || 0,
+      planMonth.value || undefined,
     )
     ElMessage.success(res.message || '导入成功')
     // 大文件兜底：warnings 可能多达数百条（62 套 × 11 工序），巨型 toast 会糊满整页导致"页面显示错误"。
@@ -88,4 +126,18 @@ async function doUpload({ file }) {
   border-color: #e2e8f0 !important;
   background: #f7fafc !important;
 }
+.month-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #f7fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.month-label { font-size: 13px; font-weight: 600; color: #1a365d; }
+.month-picker { width: 170px; }
+.month-hint { font-size: 12px; color: #718096; }
 </style>
