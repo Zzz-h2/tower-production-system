@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """节点计划聚合服务：把原始行富化为前端所需的「时间轴 / 工序卡片 / 分组」数据。"""
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 from .business_logic import (judge_node_status, judge_process_card_status, split_node_groups,
@@ -63,6 +63,83 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
     return rows
 
 
+def _load_node_segments(project_id: int) -> dict[int, tuple[int, int]]:
+    """读取项目全部按段填报行（v7.1 行级化）→ {node_plan_id: (segment_total, segment_done)}。
+
+    查询失败（如表未建）返回空 dict，不阻塞总览。
+    """
+    if project_id is None:
+        return {}
+    from ..core import db
+    try:
+        seg_map: dict[int, tuple[int, int]] = {}
+        for seg in (db.get_node_segments(int(project_id)) or []):
+            seg_map[int(seg.get("node_plan_id") or 0)] = (
+                int(seg.get("segment_total") or 0), int(seg.get("segment_done") or 0),
+            )
+        return seg_map
+    except Exception as e:  # noqa: BLE001 — 按段填报为增强功能，失败不阻塞主流程
+        import logging
+        logging.getLogger(__name__).warning("get_node_segments(%s) 失败：%s", project_id, e)
+        return {}
+
+
+def _segment_delay_tags(tags: list, grp: list[dict],
+                        seg_map: dict[int, tuple[int, int]], today: date) -> list:
+    """按段填报标签（v7.1 行级化 + 未来计划预警门槛）：
+    该工序任一节点有段记录且未填满 → 追加「部分完成」；预警/延期按计划日门槛分级：
+      1) 已开始（plan_date ≤ today，无日期保守视为已开始）节点中存在 plan_date + 7 天
+         仍早于今天 → 「部分完成」+「延期」；
+      2) 否则已开始节点中存在未填满 → 「部分完成」+「预警」；
+      3) 仅未来计划（plan_date > today）未填满 → 只给「部分完成」，**不给预警/延期**
+         （用户口径：预警仅在该套计划已开始后才触发，未来计划不触发任何预警）；
+      4) 填满（done>=total）或无段记录 → 不加任何标签。
+    ⚠️ 卡片主状态/status/label 一律不改（tags 仅追加，其余字段不动）。
+    ⚠️ 逐词判重（P2-1）：业务层可能已产出「部分完成」（0<actual<plan 且 plan<today），
+       追加段标签前对三个词逐一判重，已在 tags 里的不再重复 append；
+       「延期」替换「预警」的现有逻辑保持不变。
+    """
+    # 活跃节点：该工序的行中，有段记录且 done < total 的节点
+    active = [
+        (r, seg_map[r["id"]]) for r in grp
+        if r.get("id") in seg_map and 0 <= seg_map[r["id"]][1] < seg_map[r["id"]][0]
+    ]
+    if not active:
+        return tags
+    # 按 plan_date 分两组：started = plan_date ≤ today（无日期保守视为已开始）；future = > today
+    started, future = [], []
+    for r, seg in active:
+        pd_str = str(r.get("plan_date") or "")[:10]
+        if pd_str and date.fromisoformat(pd_str) > today:
+            future.append((r, seg))
+        else:
+            started.append((r, seg))
+
+    def _over7(row):
+        d = str(row.get("plan_date") or "")[:10]
+        return bool(d) and (date.fromisoformat(d) + timedelta(days=7)) < today
+
+    if any(_over7(r) for r, (_t, _d) in started):
+        seg_tags = ["部分完成", "延期"]
+    elif started:
+        seg_tags = ["部分完成", "预警"]
+    else:
+        # 仅未来计划未填满：不触发预警/延期
+        seg_tags = ["部分完成"]
+    # 逐词判重追加（保序）：「预警」已被业务层加入时不重复；「延期」始终以替换语义处理
+    out = list(tags)
+    for t in seg_tags:
+        if t == "延期":
+            if "延期" in out:
+                continue
+            if "预警" in out:
+                out = [x for x in out if x != "预警"]  # 「预警」换「延期」
+            out.append("延期")
+        elif t not in out:
+            out.append(t)
+    return out
+
+
 def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None, monthly_plan: int = 0,
                    contract_count=None, durations: Optional[dict] = None) -> dict:
     """节点计划总览：指标 + 工序卡片 + 时间轴 + 分组数据。
@@ -74,6 +151,9 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
     """
     today = today or date.today()
     rows = enrich_rows(plans, actuals, today, durations)
+
+    # 按段填报（v7.1 行级化）：{node_plan_id: (segment_total, segment_done)}
+    seg_map = _load_node_segments(project_id)
 
     proc_groups: dict[str, list[dict]] = {}
     for r in rows:
@@ -105,11 +185,14 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
             for r in grp
         )
         progress = (total_actual / total_plan * 100) if total_plan else 0
+        proc_tags = _segment_delay_tags(
+            list(proc_status.get("tags", [])), grp, seg_map, today,
+        )
         processes.append({
             "process_name": pn,
             "status": proc_status["status"],
             "label": proc_status["label"],
-            "tags": proc_status.get("tags", []),
+            "tags": proc_tags,
             "has_today_plan": has_today_plan,
             "total_plan": total_plan,
             "total_plan_qty": total_plan,      # 总计划套数（前端进度条分母）
@@ -167,7 +250,8 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
 
 
 def build_process_detail(process_name: str, plans: list[dict], actuals: dict, today=None,
-                         contract_count=None, durations: Optional[dict] = None) -> dict:
+                         contract_count=None, durations: Optional[dict] = None,
+                         project_id: int | None = None) -> dict:
     """某工序节点列表：按 今日/逾期/未来/已完成 四组返回（填报弹窗数据源）。
 
     独立工序特殊处理：
@@ -175,6 +259,9 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
       - 卡片（build_overview）total_plan **单一数据源 = projects.contract_count**
       - 卡片 total_actual = 所有行 actual_qty 之和（每次填报一条）
       - 返回值额外带 contract_count，供前端「合同总数」直接读取（避免依赖占位行 plan_qty）
+    v7.1 按段填报（行级化）：project_id 非空时每个节点行（nodes/groups 行）带
+      segment_total/segment_done（该套的分段进度；无记录为 None），供填报 tab 回显 +
+      节点详情 tab 展示；旧调用（不传参）行为不变。
     """
     today = today or date.today()
     # ⚠️ 闸门锚点必须基于【全项目】计划行（找「下料」行），不能只用本工序的行
@@ -200,6 +287,13 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
             reverse=True,
         )
 
+    # 按段填报（v7.1 行级化）：每套（计划行）各自的段进度——无记录为 None
+    seg_map = _load_node_segments(project_id) if project_id is not None else {}
+    for r in rows:
+        seg = seg_map.get(int(r["id"]))
+        r["segment_total"] = seg[0] if seg else None
+        r["segment_done"] = seg[1] if seg else None
+
     return {
         "process_name": process_name,
         "is_independent": process_name in INDEPENDENT_PROCESS_NAMES,
@@ -209,7 +303,10 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
             g: [{"id": p["id"],
                  "plan_date": (str(p["plan_date"])[:10] if p.get("plan_date") is not None else ""),
                  "plan_qty": p["plan_qty"],
-                 "actual_qty": actuals.get(p["id"], {}).get("actual_qty", 0)}
+                 "actual_qty": actuals.get(p["id"], {}).get("actual_qty", 0),
+                 # 按段填报回显（v7.1 行级化；无记录为 None）
+                 "segment_total": seg_map.get(int(p["id"]), (None, None))[0],
+                 "segment_done": seg_map.get(int(p["id"]), (None, None))[1]}
                 for p in nodes]
             for g, nodes in groups.items()
         },

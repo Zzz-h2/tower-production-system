@@ -51,6 +51,8 @@
                 <div class="row-qty-line">
                   <span class="qty-text">
                     计划 <span class="qty-num">{{ row.plan_qty }}</span> 套 / 实际 <span class="qty-num">{{ row.actual_qty }}</span> 套
+                    <!-- 按段填报（v7.1 行级化）：有段记录的行追加橙色段进度提示 -->
+                    <span v-if="row.segment_total != null" style="color:#b7791f;">&nbsp;已完成 {{ row.segment_done }}/{{ row.segment_total }} 段</span>
                   </span>
                 </div>
               </div>
@@ -260,6 +262,15 @@
                   </div>
                 </div>
               </el-popover>
+              <!-- 按段填报（v7.1 行级化）：按套（计划行）生效；状态胶囊保留在行右侧不动 -->
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                class="seg-btn"
+                :disabled="!auth.canFill"
+                @click="openSegmentDialog(node)"
+              >🧩 按段填报</el-button>
             </div>
             <div class="row-status-section">
               <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
@@ -373,13 +384,72 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 按段填报弹窗（嵌套二级，v7.1 行级化：按套/计划行生效） -->
+    <el-dialog
+      v-model="segmentDialogVisible"
+      :title="segNodeTitle"
+      width="560px"
+      :close-on-click-modal="false"
+      append-to-body
+      @closed="segmentSubmitting = false"
+    >
+      <div class="seg-body">
+        <div class="seg-tip">
+          仅记录这一套的分段进度，不影响该工序其他套计划；保存后主页面对应工序卡片显示「部分完成」并预警，
+          延期 7 天未整套完成自动转「延期」。
+        </div>
+        <div class="seg-fields">
+          <div class="seg-field">
+            <span class="seg-field-label">总段数</span>
+            <el-input-number
+              v-model="segTotal"
+              :min="1"
+              :max="99"
+              :disabled="segmentSubmitting"
+            />
+          </div>
+          <div class="seg-field">
+            <span class="seg-field-label">已完成段数</span>
+            <el-input-number
+              v-model="segDone"
+              :min="0"
+              :max="segTotal"
+              :disabled="segmentSubmitting"
+            />
+          </div>
+        </div>
+        <!-- 分段进度可视化：一排 total 个小块，前 done 个绿色其余灰色 -->
+        <div class="seg-blocks">
+          <div
+            v-for="i in segTotal"
+            :key="i"
+            class="seg-block"
+            :class="{ 'seg-block-done': i <= segDone }"
+          >{{ i }}</div>
+        </div>
+        <div class="seg-progress-line">
+          折算进度：<b>{{ segPct }}%</b>（{{ segDone }}/{{ segTotal }} 段）
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="segmentDialogVisible = false" :disabled="segmentSubmitting">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="segmentSubmitting"
+          @click="saveSegments"
+        >
+          {{ segmentSubmitting ? '保存中...' : '保存' }}
+        </el-button>
+      </template>
+    </el-dialog>
   </el-dialog>
 </template>
 
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { fetchProcessNodes, saveNodeProgress } from '../api/node'
+import { fetchProcessNodes, saveNodeProgress, saveSegmentProgress } from '../api/node'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
 import ExceptionReportTab from './ExceptionReportTab.vue'
@@ -795,6 +865,75 @@ async function executeBatchReport() {
     batchSubmitting.value = false
   }
 }
+
+// === 按段填报（嵌套二级弹窗，v7.1 行级化：按套/计划行生效） ===
+const segmentDialogVisible = ref(false)
+const segmentSubmitting = ref(false)
+// 当前填报的节点（计划行）id；总段数/已完成段数预填该行已保存值，无记录默认 5/0
+const segNodeId = ref(null)
+const segTotal = ref(5)
+const segDone = ref(0)
+// 当前节点行（nodes 行含 segment 字段；回退 groups 行，两处后端均已带段字段）
+const segNode = computed(() => {
+  if (segNodeId.value == null) return null
+  return (detail.value?.nodes || []).find((n) => n.id === segNodeId.value)
+    || (detail.value?.groups?.[activeGroup.value] || []).find((n) => n.id === segNodeId.value)
+    || null
+})
+const segNodeTitle = computed(() => {
+  const n = segNode.value
+  return n
+    ? `🧩 按段填报：${props.processName} · ${n.plan_date}（${n.plan_qty} 套）`
+    : `🧩 按段填报：${props.processName}`
+})
+// 折算进度（仅弹窗内展示，不参与任何主进度计算）
+const segPct = computed(() => {
+  const t = Number(segTotal.value) || 0
+  const d = Number(segDone.value) || 0
+  return t > 0 ? Math.round((d / t) * 100) : 0
+})
+
+function openSegmentDialog(node) {
+  if (!node || node.id == null) return
+  segNodeId.value = node.id
+  // 预填该行已保存段进度（无记录默认 总段数=5、已完成=0）
+  segTotal.value = node.segment_total ?? 5
+  segDone.value = Math.min(node.segment_done ?? 0, segTotal.value)
+  segmentSubmitting.value = false
+  segmentDialogVisible.value = true
+}
+
+async function saveSegments() {
+  if (segNodeId.value == null) return
+  segmentSubmitting.value = true
+  try {
+    await saveSegmentProgress(props.pid, props.processName, {
+      node_id: segNodeId.value,
+      segment_total: segTotal.value,
+      segment_done: segDone.value,
+    })
+    // ⚠️ ElMessage 只传单个参数（传第二参会崩）
+    segmentDialogVisible.value = false
+    ElMessage.success('✅ 按段填报已保存')
+    await load()      // 刷新详情（各行 segment 回显）
+    emit('refresh')   // 父级总览（工序卡片「部分完成/预警/延期」标签）同步刷新
+  } catch (e) {
+    const errDetail = e?.response?.data?.detail
+    const code = errDetail && typeof errDetail === 'object' ? errDetail.code : null
+    const msg = errDetail?.message || e?.message || '按段填报保存失败'
+    const headline = code === 'SEGMENT_INVALID' ? '⚠️ 段数校验未通过'
+      : code === 'NODE_MISMATCH' || code === 'NODE_NOT_FOUND' ? '⚠️ 节点归属校验未通过'
+      : '⚠️ 按段填报保存失败'
+    safeToast('error', {
+      dangerouslyUseHTMLString: true,
+      message: `<div style="line-height:1.6; max-width:520px;"><b>${esc(headline)}</b><div style="margin-top:4px; color:#4a5568; font-size:13px;">${esc(msg)}</div></div>`,
+      duration: 6000,
+      showClose: true,
+    })
+  } finally {
+    segmentSubmitting.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -1009,6 +1148,38 @@ async function executeBatchReport() {
   background: #f7fafc;
   border-radius: 8px;
 }
+
+/* 按段填报弹窗（v7.1 行级化） */
+/* 行内「按段填报」小按钮：与行内其他按钮（更改填报日期）同高 */
+.seg-btn { padding: 4px 10px; font-size: 12px; }
+.seg-body { padding: 4px 0; }
+/* 蓝色说明条 */
+.seg-tip {
+  background: #ebf8ff;
+  border: 1px solid #bee3f8;
+  color: #2c5282;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.7;
+  margin-bottom: 16px;
+}
+.seg-fields { display: flex; gap: 28px; margin-bottom: 16px; }
+.seg-field { display: flex; align-items: center; gap: 10px; }
+.seg-field-label { font-size: 14px; color: #1a365d; font-weight: 600; white-space: nowrap; }
+/* 分段进度可视化：一排小块，前 done 个绿色其余灰色 */
+.seg-blocks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.seg-block {
+  width: 30px; height: 30px;
+  border-radius: 6px;
+  background: #e2e8f0; color: #64748b;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.seg-block-done { background: #38a169; color: #ffffff; }
+.seg-progress-line { font-size: 13px; color: #4a5568; }
+.seg-progress-line b { color: #1a365d; }
 
 @media (max-width: 1100px) {
   .row-grid { gap: 10px; padding: 10px 14px; }

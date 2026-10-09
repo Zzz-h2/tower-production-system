@@ -422,7 +422,8 @@ def get_process_nodes(pid: int, process_name: str, manager: Optional[str] = None
     actuals = db.get_node_actuals(pid)
     return build_process_detail(process_name, plans, actuals,
                                 contract_count=project.get("contract_count"),
-                                durations=db.get_project_process_durations(pid, mgr))
+                                durations=db.get_project_process_durations(pid, mgr),
+                                project_id=pid)
 
 
 @router.get("/{pid}/alerts")

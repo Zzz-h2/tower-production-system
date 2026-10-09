@@ -5,7 +5,7 @@ from datetime import date, datetime
 
 from ..core import db
 from ..core.deps import get_current_user, require_project_access
-from ..schemas import SaveNodeProgressRequest
+from ..schemas import SaveNodeProgressRequest, SaveSegmentRequest
 from ..services.business_logic import (
     validate_today_quota, validate_today_quota_nodes, split_node_groups, build_time_rules,
 )
@@ -179,3 +179,44 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
     if req.partial_ok:
         resp["skipped"] = skipped_details
     return resp
+
+
+@router.post("/{pid}/nodes/{process_name}/save-segments")
+def save_segment_progress(pid: int, process_name: str, req: SaveSegmentRequest,
+                          user: dict = Depends(get_current_user)):
+    """按段填报（v7.1 行级化）：录入某套（计划行）的「总段数 + 已完成段数」。
+
+    - 行级隔离：big_area 用户仅可填报本大区项目（非本区返回 404 防探测）；admin 全量；
+    - 段数唯一挂在 node_plan_id 上（node_segment_progress 表，uk_node_seg），同套重复提交 = 覆盖；
+      不折算、不写 actual_qty，联动校验/出品排名/进度百分比零影响——不影响现有 save 端点任何逻辑；
+    - 校验 node_id 对应计划行存在且属于该项目+该工序（不符 → 400 NODE_MISMATCH / 404）；
+    - 校验 0 <= segment_done <= segment_total（违者 400 SEGMENT_INVALID）。
+    """
+    project = db.get_project_by_id(pid)
+    require_project_access(project, user)
+
+    if req.segment_done > req.segment_total:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "SEGMENT_INVALID",
+                    "message": f"已完成段数（{req.segment_done}）不能超过总段数（{req.segment_total}）"},
+        )
+
+    # 计划行归属校验：必须存在且属于该项目+该工序（防跨项目/跨工序误挂段数）
+    plan = db.get_node_plan_by_id(req.node_id)
+    if not plan:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NODE_NOT_FOUND",
+                    "message": f"计划行 {req.node_id} 不存在"},
+        )
+    if int(plan.get("project_id") or 0) != int(pid) \
+            or str(plan.get("process_name") or "") != str(process_name):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "NODE_MISMATCH",
+                    "message": f"计划行 {req.node_id} 不属于项目 {pid} 的工序「{process_name}」"},
+        )
+
+    db.upsert_node_segment(pid, req.node_id, req.segment_total, req.segment_done)
+    return {"ok": True}

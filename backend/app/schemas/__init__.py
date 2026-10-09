@@ -67,3 +67,17 @@ class ManualCompleteRequest(BaseModel):
     complete_qty: int
     complete_date: str
     manager: Optional[str] = None
+
+
+# ---------- 按段填报（v7.1 行级化） ----------
+
+class SaveSegmentRequest(BaseModel):
+    """按段填报：录入某套（计划行）的「总段数 + 已完成段数」。
+
+    段数唯一挂在 node_plan_id 上（node_segment_progress 表，uk_node_seg），
+    不折算、不写 actual_qty，联动校验/出品排名/进度百分比零影响。
+    路由层另校验：node_id 对应计划行存在且属于该项目+该工序；0 <= segment_done <= segment_total。
+    """
+    node_id: int
+    segment_total: int = Field(ge=1, le=99)
+    segment_done: int = Field(ge=0, le=99)

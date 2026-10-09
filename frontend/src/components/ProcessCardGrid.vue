@@ -55,6 +55,8 @@ const tagStyle = (t) => {
     '已逾期': { c: '#e53e3e', b: '#fff5f5' },
     '已提前': { c: '#0ea5e9', b: '#e0f2fe' },
     '部分完成': { c: '#f6ad55', b: '#fffaf0' },
+    '预警': { c: '#e53e3e', b: '#fff5f5' },
+    '延期': { c: '#e53e3e', b: '#fff5f5' },
   }
   const s = m[t] || { c: '#718096', b: '#f7fafc' }
   return { background: s.b, color: s.c }
