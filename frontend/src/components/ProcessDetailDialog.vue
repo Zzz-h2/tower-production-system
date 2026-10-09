@@ -411,23 +411,23 @@
           </div>
           <div class="seg-field">
             <span class="seg-field-label">已完成段数</span>
-            <el-input-number
-              v-model="segDone"
-              :min="0"
-              :max="segTotal"
-              :disabled="segmentSubmitting"
-            />
+            <div class="seg-done-readonly">
+              {{ segDone }}<span class="seg-done-unit">段</span>
+            </div>
           </div>
         </div>
-        <!-- 分段进度可视化：一排 total 个小块，前 done 个绿色其余灰色 -->
+        <!-- 分段进度可视化：一排 total 个小块，点击第 i 块即把已完成段数设为 i（再点当前最后一块回退） -->
         <div class="seg-blocks">
           <div
             v-for="i in segTotal"
             :key="i"
             class="seg-block"
-            :class="{ 'seg-block-done': i <= segDone }"
+            :class="{ 'seg-block-done': i <= segDone, 'seg-block-disabled': segmentSubmitting }"
+            :title="`点击设为已完成 ${i} 段`"
+            @click="onPickSegments(i)"
           >{{ i }}</div>
         </div>
+        <div class="seg-hint">点击方块选择已完成段数；再次点击最后一块可回退</div>
         <div class="seg-progress-line">
           折算进度：<b>{{ segPct }}%</b>（{{ segDone }}/{{ segTotal }} 段）
         </div>
@@ -893,6 +893,20 @@ const segPct = computed(() => {
   return t > 0 ? Math.round((d / t) * 100) : 0
 })
 
+// 点击第 i 个方块 → 已完成段数 = i；再次点击「当前最后一块已完成」→ 回退 1 段（i=1 时归 0）
+function onPickSegments(i) {
+  if (segmentSubmitting.value) return
+  const n = Number(i)
+  if (!Number.isFinite(n) || n < 1 || n > Number(segTotal.value)) return
+  segDone.value = n === Number(segDone.value) ? n - 1 : n
+}
+
+// 总段数调小后自动夹取已完成段数（原实现依赖 el-input-number 的 :max，去掉步进器后需显式兜底）
+watch(segTotal, (t) => {
+  const total = Number(t) || 0
+  if (Number(segDone.value) > total) segDone.value = total
+})
+
 function openSegmentDialog(node) {
   if (!node || node.id == null) return
   segNodeId.value = node.id
@@ -1167,17 +1181,39 @@ async function saveSegments() {
 .seg-fields { display: flex; gap: 28px; margin-bottom: 16px; }
 .seg-field { display: flex; align-items: center; gap: 10px; }
 .seg-field-label { font-size: 14px; color: #1a365d; font-weight: 600; white-space: nowrap; }
-/* 分段进度可视化：一排小块，前 done 个绿色其余灰色 */
-.seg-blocks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+/* 已完成段数：只读展示，仅能通过点击下方方块修改（不再提供步进器） */
+.seg-done-readonly {
+  display: flex; align-items: center; gap: 4px;
+  min-width: 78px; height: 32px;
+  padding: 0 14px; box-sizing: border-box;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f7fafc;
+  color: #1a365d;
+  font-size: 15px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.seg-done-unit { font-size: 12px; font-weight: 400; color: #94a3b8; }
+/* 分段进度可视化：一排小块，前 done 个绿色其余灰色；点击第 i 块 = 已完成 i 段 */
+.seg-blocks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .seg-block {
   width: 30px; height: 30px;
   border-radius: 6px;
   background: #e2e8f0; color: #64748b;
+  border: 1px solid transparent;
+  box-sizing: border-box;
   display: flex; align-items: center; justify-content: center;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color .12s, border-color .12s;
 }
+.seg-block:hover { border-color: #38a169; background: #eaf5ee; color: #2f7a4f; }
 .seg-block-done { background: #38a169; color: #ffffff; }
+.seg-block-done:hover { background: #2f8f5b; border-color: #2f8f5b; color: #ffffff; }
+.seg-block-disabled { cursor: not-allowed; opacity: .6; }
+.seg-hint { font-size: 12px; color: #94a3b8; margin-bottom: 10px; }
 .seg-progress-line { font-size: 13px; color: #4a5568; }
 .seg-progress-line b { color: #1a365d; }
 
