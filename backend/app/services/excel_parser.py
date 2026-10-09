@@ -206,6 +206,9 @@ def auto_detect_mapping(excel_headers: list[str]) -> dict[str, str]:
         "钢塔厂家": "factory_name", "厂家": "factory_name", "加工厂": "factory_name",
         # 业务实际列名：X月计划、截止X月底出品
         "本月计划出品": "monthly_plan", "本月计划": "monthly_plan",
+        # 现行调度令模板的权威计划列：调度令计划（= 本月计划出品口径）
+        # ⚠️ 必须精确别名优先，否则会被过期的周度分解列「X月塔筒出品计划」抢走（见下方负向模式）
+        "调度令计划": "monthly_plan",
         "交付负责人": "delivery_person", "负责人": "delivery_person",
         "截止上月月底出品": "last_month_output",
         "计划开工日期": "plan_start_date", "开工日期": "plan_start_date",
@@ -221,6 +224,13 @@ def auto_detect_mapping(excel_headers: list[str]) -> dict[str, str]:
 
     # 动态别名：匹配「X月计划」「截止X月底出品」等月度变化列名
     import re
+
+    # 负向模式：明确**不是**本月计划出品的列名——「X月塔筒出品计划」是调度令里的
+    # 周度分解子表（其首行是「10月第1周」这类子表头），不是月度计划列。
+    # 命中则跳过关键词匹配：宁可让 monthly_plan 未映射（导入被必填校验拦下、由用户手动指定），
+    # 也不能静默把过期列的数写进本月计划（实测一次误认会写坏 37 个项目 + 月度快照）。
+    PLAN_NEGATIVE = re.compile(r'^\d+\s*月.*出品计划$')
+
     headers = [str(h).strip() for h in excel_headers]
     for header in headers:
         if header in EXACT_ALIASES:
@@ -252,6 +262,10 @@ def auto_detect_mapping(excel_headers: list[str]) -> dict[str, str]:
         for field, keyword_groups in FIELD_KEYWORDS.items():
             if field in matched_fields:
                 continue  # 已被其他列匹配
+
+            # 负向模式：明确不是本月计划的列（周度分解子表头）直接跳过
+            if field == "monthly_plan" and PLAN_NEGATIVE.match(header):
+                continue
 
             for group in keyword_groups:
                 hits = sum(1 for kw in group if kw in header)

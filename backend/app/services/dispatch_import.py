@@ -10,6 +10,7 @@ T05 导入联动：逐行 upsert 项目后，自动为本批 Excel 中出现的�
 """
 import datetime as dt
 import math
+import re
 from typing import Optional
 
 import pandas as pd
@@ -19,15 +20,60 @@ from ..core import db
 # 预览时每列展示的样例值条数
 SAMPLE_ROWS = 5
 
+# 从文件名猜调度令归属月的模式（如 2026.10 / 2026-10 / 2026年10月）
+# ⚠️ 必须用 [0-9] 而不是 \d：Python 的 \d 在 str 模式下匹配任意 Unicode Nd 类数字
+#    （阿拉伯-印度数字 ٢٠٢٦、全角 ２０２６ 等），会让非规范月份通过校验并落库。
+_MONTH_PATTERNS = (
+    re.compile(r"(20[0-9]{2})\s*[.\-/年]\s*([0-9]{1,2})"),
+    re.compile(r"([0-9]{4})\s*年\s*([0-9]{1,2})\s*月"),
+)
 
-def preview_dispatch(tmp_path: str) -> dict:
+
+def resolve_plan_month(explicit: Optional[str], file_name: str = "") -> str:
+    """解析归属月（'YYYY-MM'）：显式参数 > 文件名 > 当前自然月。
+
+    调度令导入与排产导入共用同一套解析与校验（口径一致，避免两处漂移）。
+
+    文件名示例：``10月份塔筒调度令指标管控表-2026.10.3.xlsx`` → ``2026-10``。
+
+    Raises:
+        ValueError: explicit 非空但不是 YYYY-MM（或月份越界）
+    """
+    if explicit:
+        # 只认 ASCII 数字（[0-9]），年份也过 int() 归一，避免 '٢٠٢٦-٠٩' / '２０２６-０９'
+        # 这类 Unicode 数字被接受后原样落库 → 该项目永远匹配不上真实月过滤。
+        m = re.match(r"^\s*([0-9]{4})-([0-9]{1,2})\s*$", str(explicit))
+        if m and 1 <= int(m.group(2)) <= 12:
+            return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+        raise ValueError(f"归属月份格式错误：{explicit}（应为 YYYY-MM）")
+
+    name = str(file_name or "")
+    for pat in _MONTH_PATTERNS:
+        m = pat.search(name)
+        if m and 1 <= int(m.group(2)) <= 12:
+            return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+
+    # 文件名只有「10月份」这类（无年份）→ 取当前年份
+    m = re.search(r"([0-9]{1,2})\s*月", name)
+    if m and 1 <= int(m.group(1)) <= 12:
+        return f"{dt.date.today().year}-{int(m.group(1)):02d}"
+
+    return dt.date.today().strftime("%Y-%m")
+
+
+def preview_dispatch(tmp_path: str, file_name: str = "") -> dict:
     """预览调度令 Excel：只解析不写库。
+
+    Args:
+        tmp_path: 上传文件落盘的临时路径
+        file_name: 原始文件名（用于推断建议的调度令归属月）
 
     Returns:
         dict: {
             headers: 清洗后的表头名列表,
             samples: {表头名: [前N条有效数据行的取值]},
             suggested_mapping: {表头名: 系统字段名} 自动识别建议,
+            suggested_plan_month: 由文件名推断的归属月（'YYYY-MM'）,
             system_fields: [{field, label, required}, ...]
         }
 
@@ -78,6 +124,7 @@ def preview_dispatch(tmp_path: str) -> dict:
         "headers": headers,
         "samples": samples,
         "suggested_mapping": suggested_mapping,
+        "suggested_plan_month": resolve_plan_month(None, file_name),
         "system_fields": system_fields,
     }
 
@@ -213,22 +260,25 @@ def _sanitize_mapping(field_mapping: dict, headers: Optional[list] = None) -> di
     return cleaned
 
 
-def parse_and_import(tmp_path: str, file_name: str, field_mapping: Optional[dict] = None) -> dict:
-    """解析调度令 Excel 并导入。
+def parse_and_import(tmp_path: str, file_name: str, field_mapping: Optional[dict] = None,
+                     plan_month: Optional[str] = None) -> dict:
+    """解析调度令 Excel 并导入（项目主表 upsert + 月度调度令快照 dispatch_records）。
 
     Args:
         tmp_path: 上传文件落盘的临时路径
-        file_name: 原始文件名（用于写导入日志）
+        file_name: 原始文件名（用于写导入日志 + 推断归属月）
         field_mapping: 前端确认后的字段映射 {Excel列名: 系统字段名}；
                        传入时直接使用（跳过自动识别 auto_detect_mapping），
                        传 None 走自动识别；传入的表头读取只用于映射消毒
+        plan_month: 调度令归属月 'YYYY-MM'；不传则按文件名推断，再退化为当前自然月
 
     Returns:
-        dict: {success, skipped, errors, message, accounts_ready}
+        dict: {success, created, updated, plan_month, skipped, errors, message, accounts_ready}
+        created/updated: 本次 upsert 的新建 / 更新条数（跨月重复导入的项目计入 updated）。
         accounts_ready: 本次自动开通/更新的大区账号数（去重后计数）。
 
     Raises:
-        HTTPException 400: 表头读取失败 / 必填字段映射缺失
+        HTTPException 400: 表头读取失败 / 必填字段映射缺失 / 归属月格式错误
     """
     from fastapi import HTTPException
     from .excel_parser import (
@@ -269,9 +319,26 @@ def parse_and_import(tmp_path: str, file_name: str, field_mapping: Optional[dict
     # 4) 解析（标准化行 + 行级错误；失败行被跳过）
     rows, parse_errors = parse_schedule_excel(tmp_path, mapping)
 
+    # 4') 归属月解析（显式参数 > 文件名 > 当前月）；格式非法直接 400，不静默兜底
+    try:
+        resolved_month = resolve_plan_month(plan_month, file_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # 本次 Excel 实际映射到的系统字段：传给 upsert_project 做「覆盖保护」
+    # （未映射的列不参与 UPDATE，避免跨月重复导入冲掉历史月份口径）
+    mapped_fields = set(mapping.values())
+
     # 5) 逐行建项目（upsert）→ 新建项目即建项目记录（废弃 processes 初始化与风险写入）
+    #    + 写入「项目 × 归属月」调度令快照（同一项目可同时出现在多个月份，各月计划数互不覆盖）
+    created = updated = 0
     for row in rows:
-        pid, is_new = db.upsert_project(row)
+        pid, is_new = db.upsert_project(row, mapped_fields=mapped_fields)
+        db.upsert_dispatch_record(pid, resolved_month, row, source_file=file_name)
+        if is_new:
+            created += 1
+        else:
+            updated += 1
         # 独立工序节点计划（累计完成总数/累计发运总数）：plan_qty=合同数量，重新导入幂等
         db.sync_independent_plans(pid, row.get("contract_count"))
 
@@ -307,8 +374,14 @@ def parse_and_import(tmp_path: str, file_name: str, field_mapping: Optional[dict
 
     return {
         "success": len(rows),
+        "created": created,
+        "updated": updated,
+        "plan_month": resolved_month,
         "skipped": len(parse_errors),
         "errors": parse_errors[:20],
-        "message": f"导入完成：成功{len(rows)}条，跳过{len(parse_errors)}条，开通大区账号{accounts_ready}个",
+        "message": (
+            f"导入完成（调度令归属 {resolved_month}）：新增 {created} 条、更新 {updated} 条"
+            f"（共 {len(rows)} 条），跳过 {len(parse_errors)} 条，开通大区账号 {accounts_ready} 个"
+        ),
         "accounts_ready": accounts_ready,
     }

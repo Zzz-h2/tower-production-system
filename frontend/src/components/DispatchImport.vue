@@ -1,5 +1,27 @@
 <template>
   <div class="dispatch-import">
+    <!-- 调度令归属月份：决定这批项目计入哪个月的调度令列表
+         （同一项目可跨月并存，各月计划数互不覆盖） -->
+    <div class="month-row">
+      <span class="month-label">调度令归属月份</span>
+      <el-date-picker
+        v-model="planMonth"
+        type="month"
+        value-format="YYYY-MM"
+        placeholder="留空则按文件名识别"
+        size="small"
+        clearable
+        class="month-picker"
+      />
+      <span class="month-hint">
+        {{
+          step === 1
+            ? '留空时按文件名自动识别（如「10月份…2026.10.3.xlsx」→ 2026-10）'
+            : '确认无误后导入，这批项目将计入该月列表'
+        }}
+      </span>
+    </div>
+
     <!-- 步骤一：选择文件 -->
     <el-upload
       v-if="step === 1"
@@ -139,6 +161,7 @@ const fileName = ref('')
 const pickedFile = ref(null)   // 预览用的原始 File，导入时复用
 const systemFields = ref([])
 const rows = ref([])           // [{ header, samples, field }]
+const planMonth = ref('')      // 调度令归属月 'YYYY-MM'；空=后端按文件名推断
 
 const requiredFields = computed(() => systemFields.value.filter((f) => f.required))
 
@@ -184,6 +207,10 @@ async function doPreview({ file }) {
     fileName.value = file.name
     pickedFile.value = file
     systemFields.value = res.system_fields || []
+    // 归属月：用户未手填时用文件名推断结果预填（可再改）
+    if (!planMonth.value && res.suggested_plan_month) {
+      planMonth.value = res.suggested_plan_month
+    }
     const samples = res.samples || {}
     const suggested = res.suggested_mapping || {}
     rows.value = (res.headers || []).map((header) => ({
@@ -203,7 +230,7 @@ async function doImport() {
   if (missingFields.value.length) return
   importing.value = true
   try {
-    const res = await importDispatch(pickedFile.value, mappingPayload.value)
+    const res = await importDispatch(pickedFile.value, mappingPayload.value, planMonth.value)
     ElMessage.success(res.message || '导入完成')
     emit('imported', res)   // 父组件刷新列表与看板；响应透传（含 accounts_ready 时提示开通账号）
     resetAll()              // 导入成功后立即关闭导入面板并重置为初始状态（回到选文件步骤、清空结果与已选文件）
@@ -220,12 +247,29 @@ function resetAll() {
   fileName.value = ''
   rows.value = []
   systemFields.value = []
+  planMonth.value = ''
 }
 </script>
 
 <style scoped>
 .dispatch-import { padding: 4px 0; }
 .upload-hint { padding: 18px 0; color: var(--color-primary); }
+
+/* 调度令归属月份：始终可见（选文件/确认映射两步都要能核对） */
+.month-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.month-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-primary);
+}
+.month-picker { width: 170px; }
+.month-hint { font-size: 12px; color: var(--color-sub); }
 
 .mapping-panel {
   background: var(--bg-card);

@@ -49,7 +49,7 @@ async def preview_dispatch(file: UploadFile = File(...), user: dict = Depends(re
 
     tmp_path = _save_to_temp(filename, await file.read())
     try:
-        return build_preview(tmp_path)
+        return build_preview(tmp_path, filename)
     finally:
         _cleanup(tmp_path)
 
@@ -58,11 +58,13 @@ async def preview_dispatch(file: UploadFile = File(...), user: dict = Depends(re
 async def import_dispatch(
     file: UploadFile = File(...),
     mapping: Optional[str] = Form(None),
+    plan_month: Optional[str] = Form(None),
     user: dict = Depends(require_admin),
 ):
-    """上传月度调度令 Excel → 按（可选）字段映射解析 → 批量建项目。（仅 admin）
+    """上传月度调度令 Excel → 按（可选）字段映射解析 → 批量建项目 + 写月度归属快照。（仅 admin）
 
     mapping: JSON 字符串，格式 {"Excel列名": "系统字段名"}；不传则走自动识别。
+    plan_month: 调度令归属月 'YYYY-MM'；不传则按文件名推断，再退化为当前自然月。
     """
     filename = file.filename or ""
     if not filename.lower().endswith(ALLOWED_EXT):
@@ -81,7 +83,7 @@ async def import_dispatch(
     tmp_path = _save_to_temp(filename, await file.read())
 
     try:
-        result = parse_and_import(tmp_path, filename, field_mapping)
+        result = parse_and_import(tmp_path, filename, field_mapping, plan_month)
         return result
     finally:
         _cleanup(tmp_path)
