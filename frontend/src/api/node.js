@@ -38,10 +38,12 @@ export const previewDispatch = (file) => {
 
 // 导入月度调度令（批量建项目）
 // mapping: {Excel列名: 系统字段名}，不传则由后端自动识别
-export const importDispatch = (file, mapping) => {
+// planMonth: 调度令归属月 'YYYY-MM'；不传则后端按文件名推断、再退化为当前自然月
+export const importDispatch = (file, mapping, planMonth) => {
   const form = new FormData()
   form.append('file', file)
   if (mapping) form.append('mapping', JSON.stringify(mapping))
+  if (planMonth) form.append('plan_month', planMonth)
   return http.post('/projects/import-dispatch', form)
 }
 
@@ -52,6 +54,12 @@ export const fetchProcessNodes = (pid, processName, params = {}) =>
   http.get(`/projects/${pid}/nodes/${encodeURIComponent(processName)}`, { params })
 export const saveNodeProgress = (pid, processName, payload) =>
   http.post(`/projects/${pid}/nodes/${encodeURIComponent(processName)}/save`, payload)
+
+// 按段填报（v7.1 行级化）：录入某套（计划行）的「总段数 + 已完成段数」，
+// 段数唯一挂在 node_id 上，独立记录不折算、不写 actual_qty
+// payload: { node_id: int, segment_total: int, segment_done: int }；返回 { ok: true }
+export const saveSegmentProgress = (pid, processName, payload) =>
+  http.post(`/projects/${pid}/nodes/${encodeURIComponent(processName)}/save-segments`, payload)
 
 // 多负责人管理（v6.0）
 export const fetchProjectManagers = (pid) => http.get(`/projects/${pid}/managers`)
@@ -64,13 +72,16 @@ export const setManagerMonthlyPlan = (pid, manager, monthlyPlan) =>
 export const fetchAlerts = (pid) => http.get(`/projects/${pid}/alerts`)
 
 // Excel 导入（排产）。多负责人 v6.0：可带 manager（归属负责人）+ monthlyPlan（该负责人本月计划数）
-export const importSchedule = (pid, file, manager, monthlyPlan) => {
+// v7.2：可带 planMonth（本次排产归属月 'YYYY-MM'，默认当前自然月）——
+//       决定 has_schedule_plan 的「本月口径」判定与归档归属，不传则由后端按文件名/当前月推断。
+export const importSchedule = (pid, file, manager, monthlyPlan, planMonth) => {
   const form = new FormData()
   form.append('file', file)
   if (manager) form.append('manager', String(manager))
   if (monthlyPlan !== undefined && monthlyPlan !== null) {
     form.append('monthly_plan', String(monthlyPlan))
   }
+  if (planMonth) form.append('plan_month', String(planMonth))
   return http.post(`/projects/${pid}/import-schedule`, form)
 }
 

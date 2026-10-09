@@ -15,12 +15,20 @@ from typing import Optional, Any
 import pymysql
 import pymysql.cursors
 
-from backend.app.core.config import MYSQL_CONFIG, INDEPENDENT_PROCESS_NAMES
+from backend.app.core.config import MYSQL_CONFIG, INDEPENDENT_PROCESS_NAMES, SCHEDULE_PROCESS_NAMES
 
 logger = logging.getLogger(__name__)
 
 # MySQL schema 文件路径（SQLite → MySQL 迁移后使用）
 MYSQL_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db_schema_mysql.sql')
+
+# v7.2 排产工序白名单区间：排产导入写入的行满足 process_order = SCHEDULE_PROCESS_NAMES.index(name)+1，
+# 即 1..len(SCHEDULE_PROCESS_NAMES)（当前 11）。
+# ⚠️ 判定「有没有排产计划」必须用这个区间，**不能**用「非独立工序（NOT IN 90,91）」：
+#    「手动完成」占位行（process_order=99, process_name='附件安装'）也满足「非独立工序」，
+#    会把只做过手动完成、从未导过排产的项目误判为「已上传排产」（假阳性）。
+SCHEDULE_ORDER_MIN = 1
+SCHEDULE_ORDER_MAX = len(SCHEDULE_PROCESS_NAMES)
 
 
 def get_connection() -> pymysql.Connection:
@@ -112,10 +120,17 @@ def insert_project(data: dict) -> int:
         conn.close()
 
 
-def upsert_project(data: dict) -> tuple[int, bool]:
+def upsert_project(data: dict, mapped_fields: Optional[set] = None) -> tuple[int, bool]:
     """
     插入或更新项目（以 项目名称+钢塔厂家+交付负责人+机型 四字段为唯一键）。
     返回 (project_id, is_new)。
+
+    Args:
+        data: 解析后的项目行数据
+        mapped_fields: 本次 Excel **已映射**到系统的字段名集合（调度令导入传入）。
+                       仅用于 UPDATE 分支的覆盖保护：未映射的列不参与 UPDATE，
+                       避免跨月重复导入时把历史月份口径冲掉。
+                       传 None 时退化为「值为非 None 才算提供」。
     """
     conn = get_connection()
     try:
@@ -132,26 +147,51 @@ def upsert_project(data: dict) -> tuple[int, bool]:
 
             if existing:
                 # 更新已有项目（四字段唯一键不变，机型不更新）
-                cursor.execute("""
-                    UPDATE projects SET
-                        last_month_output = %s, monthly_plan = %s,
-                        monthly_total_plan = %s,
-                        contract_count = %s,
-                        plan_start_date = %s, plan_end_date = %s,
-                        big_area_person = %s,
-                        updated_at = %s
-                    WHERE id = %s
-                """, (
-                    data.get('last_month_output', 0),
-                    data['monthly_plan'],
-                    data.get('monthly_total_plan', data['monthly_plan']),
-                    data.get('contract_count'),
-                    data.get('plan_start_date'),
-                    data.get('plan_end_date'),
-                    data.get('big_area_person', '') or '',
-                    now,
-                    existing['id']
-                ))
+                #
+                # ★ 覆盖保护（跨月重复导入）：只更新本次 Excel **真正提供**（已映射到）的字段，
+                #   未提供的列保持原值。否则「8 月导入过的项目在 10 月再次导入」时，
+                #   会把 projects.monthly_plan / last_month_output 直接冲掉，历史月份口径不可回溯。
+                #   mapped_fields 由调用方（调度令导入）传入 = 本次 Excel 实际映射到的字段集合；
+                #   未传时退化为「值为非 None 才算提供」。
+                mapped = mapped_fields if mapped_fields is not None else data.get('_mapped_fields')
+
+                def _provided(field: str) -> bool:
+                    if mapped is not None:
+                        return field in mapped
+                    return data.get(field) is not None
+
+                sets, vals = [], []
+
+                if _provided('last_month_output'):
+                    sets.append("last_month_output = %s")
+                    vals.append(int(data.get('last_month_output') or 0))
+                if _provided('monthly_plan'):
+                    mp = int(data.get('monthly_plan') or 0)
+                    sets.append("monthly_plan = %s")
+                    vals.append(mp)
+                    # monthly_total_plan 无独立 Excel 列（历史遗留字段），与 monthly_plan 同步
+                    sets.append("monthly_total_plan = %s")
+                    vals.append(data.get('monthly_total_plan', mp))
+                if _provided('contract_count'):
+                    sets.append("contract_count = %s")
+                    vals.append(data.get('contract_count'))
+                if _provided('plan_start_date'):
+                    sets.append("plan_start_date = %s")
+                    vals.append(data.get('plan_start_date'))
+                if _provided('plan_end_date'):
+                    sets.append("plan_end_date = %s")
+                    vals.append(data.get('plan_end_date'))
+                if _provided('big_area_person'):
+                    sets.append("big_area_person = %s")
+                    vals.append(str(data.get('big_area_person') or '').strip())
+
+                sets.append("updated_at = %s")
+                vals.append(now)
+                vals.append(existing['id'])
+
+                cursor.execute(
+                    f"UPDATE projects SET {', '.join(sets)} WHERE id = %s", tuple(vals)
+                )
                 conn.commit()
                 return existing['id'], False
             else:
@@ -301,23 +341,253 @@ def update_project(project_id: int, data: dict) -> None:
 
 
 def delete_project(project_id: int) -> None:
-    """删除项目（应用层级联：工序计划/实际进度/异常先删，再删项目主表；里程碑由外键 cascade 自动清理）。
+    """删除项目（应用层级联：工序计划/实际进度/异常/月度调度令快照先删，再删项目主表；里程碑由外键 cascade 自动清理）。
 
     说明：三张无外键子表（node_actual_progress / node_exceptions / process_node_plans）在
     db_schema_mysql.sql 中已补充 projects(id) 的 ON DELETE CASCADE 外键；
+    dispatch_records / schedule_imports 同样带 FK CASCADE（新建库）；
     此处的逐表删除是兼容「建库时尚未带外键的存量库」的兜底，两路叠加互不影响。
     """
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # 先清三张无外键的子表，避免孤儿行（顺序：子→父）
+            # 先清子表，避免孤儿行（顺序：子→父）
             cursor.execute("DELETE FROM node_actual_progress WHERE project_id = %s", (project_id,))
             cursor.execute("DELETE FROM node_exceptions WHERE project_id = %s", (project_id,))
             cursor.execute("DELETE FROM process_node_plans WHERE project_id = %s", (project_id,))
+            cursor.execute("DELETE FROM dispatch_records WHERE project_id = %s", (project_id,))
+            cursor.execute("DELETE FROM schedule_imports WHERE project_id = %s", (project_id,))
+            cursor.execute("DELETE FROM process_node_plans_history WHERE project_id = %s", (project_id,))
+            cursor.execute("DELETE FROM project_process_durations WHERE project_id = %s", (project_id,))
             cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
             conn.commit()
     finally:
         conn.close()
+
+
+# ---------- 月度调度令快照（dispatch_records） ----------
+# 语义：项目主表 projects 与月份无关（四字段唯一键跨月复用同一行），
+# 「该项目在某月调度令中的计划口径」由本表按月留档，使同一项目可同时出现在多个月份列表，
+# 且各月 monthly_plan / last_month_output 互不覆盖（历史月份可回溯）。
+
+# 会写入快照的业务字段（与 dispatch_records 列一一对应）
+_DISPATCH_RECORD_FIELDS = (
+    "monthly_plan", "last_month_output", "monthly_total_plan", "contract_count",
+    "delivery_person", "big_area_person", "factory_name", "machine_type",
+)
+
+
+def upsert_dispatch_record(project_id: int, plan_month: str, data: dict,
+                           source_file: str = "", is_approx: int = 0) -> None:
+    """写入/更新「项目 × 调度令归属月」快照（唯一键 uk_pid_month，重复导入幂等覆盖）。
+
+    Args:
+        project_id: 项目ID
+        plan_month: 调度令归属月，格式 'YYYY-MM'
+        data: 解析后的项目行数据（缺失字段按 None 存快照列）
+        source_file: 来源调度令文件名
+        is_approx: 1=历史回填近似值（原值已被后续导入覆盖）
+    """
+    conn = get_connection()
+    try:
+        cols = ["project_id", "plan_month"] + list(_DISPATCH_RECORD_FIELDS) + \
+               ["source_file", "is_approx"]
+
+        def _val(field: str):
+            """取快照列值。monthly_plan / last_month_output 在表上是 NOT NULL，
+            缺键或 None 时兜底为 0，避免 IntegrityError(1048) 直接 500。"""
+            v = data.get(field)
+            if field in ("monthly_plan", "last_month_output"):
+                return int(v or 0)
+            return v
+
+        vals = [int(project_id), plan_month] + [_val(f) for f in _DISPATCH_RECORD_FIELDS] + \
+               [source_file or "", int(is_approx or 0)]
+        placeholders = ", ".join(["%s"] * len(cols))
+        updates = ", ".join(f"{c} = VALUES({c})" for c in _DISPATCH_RECORD_FIELDS) + \
+                  ", source_file = VALUES(source_file), is_approx = VALUES(is_approx), " \
+                  "updated_at = NOW()"
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"INSERT INTO dispatch_records ({', '.join(cols)}) VALUES ({placeholders}) "
+                f"ON DUPLICATE KEY UPDATE {updates}",
+                tuple(vals),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def get_dispatch_records(plan_month: str) -> dict[int, dict]:
+    """按归属月取全部快照 → {project_id: 快照行}（列表/KPI 的月度口径覆盖源）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM dispatch_records WHERE plan_month = %s", (plan_month,)
+            )
+            return {int(r["project_id"]): dict(r) for r in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_dispatch_months() -> list[dict]:
+    """返回已留档的调度令月份列表（倒序），供前端月份下拉/校验使用。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT plan_month, COUNT(*) AS cnt FROM dispatch_records "
+                "GROUP BY plan_month ORDER BY plan_month DESC"
+            )
+            return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+# ---------- 排产上传台账（schedule_imports） ----------
+# 语义：一次排产 Excel 导入成功 = 一条「项目 × 归属月 × 负责人」台账。
+# 存在的理由：排产导入是覆盖式重排，process_node_plans 只保留最后一次上传的行，
+# 系统原本无处记录「哪个月传过排产」。仅凭「有没有工序行」推测会假阳性——
+# 「手动完成」占位行（process_order=99）与调度令自动创建的独立工序（90/91）都不是排产上传证据。
+
+def upsert_schedule_import(project_id: int, plan_month: str, manager: str = "",
+                           row_count: int = 0, source_file: str = "") -> None:
+    """写入/更新「项目 × 排产归属月 × 负责人」上传台账（唯一键 uk_pid_month_mgr，重复导入幂等覆盖）。
+
+    Args:
+        project_id: 项目ID
+        plan_month: 排产归属月，格式 'YYYY-MM'
+        manager: 本次导入归属负责人；空串=未区分负责人（表列为 NOT NULL DEFAULT ''，
+                 用空串而非 NULL 才能让唯一键对「无负责人」项目真正生效）
+        row_count: 本次导入实际写入的计划行数
+        source_file: 来源排产文件名
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO schedule_imports (project_id, plan_month, manager, row_count, source_file) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE row_count = VALUES(row_count), "
+                "source_file = VALUES(source_file), imported_at = NOW(), updated_at = NOW()",
+                (int(project_id), plan_month, str(manager or "").strip(),
+                 int(row_count or 0), source_file or ""),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def get_schedule_imports(plan_month: str) -> dict[int, dict]:
+    """按归属月取上传台账 → {project_id: {'managers': [...], 'row_count': int}}。
+
+    同一项目同月可能有多位负责人各上传一次，这里按项目聚合（managers 去重保序、row_count 求和）。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT project_id, manager, row_count FROM schedule_imports "
+                "WHERE plan_month = %s ORDER BY project_id, manager",
+                (plan_month,),
+            )
+            out: dict[int, dict] = {}
+            for r in cursor.fetchall():
+                pid = int(r["project_id"])
+                slot = out.setdefault(pid, {"managers": [], "row_count": 0})
+                mgr = str(r["manager"] or "").strip()
+                if mgr and mgr not in slot["managers"]:
+                    slot["managers"].append(mgr)
+                slot["row_count"] += int(r["row_count"] or 0)
+            return out
+    finally:
+        conn.close()
+
+
+def get_last_schedule_months() -> dict[int, str]:
+    """取每个项目**最近一次**排产上传的归属月 → {project_id: 'YYYY-MM'}。
+
+    供列表页展示「本月未上传 · 上次上传：X月」，让用户一眼看出该补哪个项目。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT project_id, MAX(plan_month) AS m FROM schedule_imports GROUP BY project_id"
+            )
+            return {int(r["project_id"]): str(r["m"]) for r in cursor.fetchall() if r["m"]}
+    finally:
+        conn.close()
+
+
+def get_schedule_import_months() -> list[dict]:
+    """返回已留档的排产归属月列表（倒序），供前端月份下拉/校验使用。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT plan_month, COUNT(*) AS cnt FROM schedule_imports "
+                "GROUP BY plan_month ORDER BY plan_month DESC"
+            )
+            return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+# ---------- 排产明细归档（process_node_plans_history） ----------
+# 语义：覆盖式重排前把即将 DELETE 的排产工序行原样归档，做到「替换而非销毁」。
+# 主表 process_node_plans 保持「每个项目只有一份最新排产」的单月语义——读路径零改动，
+# 规避跨月行共存导致的 plan_qty 翻倍风险；历史月份明细在本表可按月回溯与恢复。
+
+def archive_node_plans_in_scope(cursor, where_sql: str, where_args: tuple,
+                                reason: str = "schedule_reimport") -> int:
+    """把 WHERE 命中的 process_node_plans 行归档一份（不删除）。
+
+    由 insert_node_plans 在 DELETE 之前调用，传入与之**完全相同的 WHERE 子句**，
+    保证「归档集合 == 删除集合」，不重不漏。返回归档行数。
+
+    注意：cursor 由调用方传入（要求与随后的 DELETE 处于同一事务），本函数不 commit。
+    """
+    cursor.execute(
+        "INSERT INTO process_node_plans_history "
+        "(id, project_id, process_name, process_order, plan_date, plan_qty, manager, plan_month, archived_reason) "
+        f"SELECT id, project_id, process_name, process_order, plan_date, plan_qty, manager, plan_month, %s "
+        f"FROM process_node_plans WHERE {where_sql}",
+        (reason, *where_args),
+    )
+    return int(cursor.rowcount or 0)
+
+
+def get_node_plans_history(project_id: int, plan_month: str | None = None,
+                           manager: str | None = None, limit: int = 5000) -> list[dict]:
+    """读取已归档的排产明细（历史回溯）。
+
+    Args:
+        project_id: 项目ID
+        plan_month: 归属月过滤；None=全部月份
+        manager: 负责人过滤；None=不区分
+        limit: 单次返回上限（防大项目全量拉爆内存）
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = ("SELECT * FROM process_node_plans_history "
+                   "WHERE project_id = %s")
+            args: list = [project_id]
+            if plan_month is not None:
+                sql += " AND plan_month <=> %s"
+                args.append(str(plan_month).strip())
+            if manager is not None:
+                sql += " AND manager <=> %s"
+                args.append(str(manager).strip())
+            sql += " ORDER BY plan_month DESC, process_order, plan_date LIMIT %s"
+            args.append(int(limit))
+            cursor.execute(sql, tuple(args))
+            return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
 
 def insert_import_log(file_name: str, total: int, success: int, 
                        error: int, error_details: str = '') -> None:
@@ -358,12 +628,19 @@ def get_config(key: str) -> Optional[str]:
 # ============================================================
 
 def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None,
-                      durations: list[dict] | None = None) -> int:
+                      durations: list[dict] | None = None,
+                      plan_month: str | None = None) -> int:
     """清空该项目（指定负责人名下）的节点计划，再批量插入新计划（覆盖式导入）。
 
     多负责人（v6.0）：manager 非 None 时，删除与插入都**只作用于该负责人名下**，
     实现「各负责人分别导入、互不覆盖、互不影响」；
     manager 为 None 时保持历史行为——清空该项目全部排产工序行（兼容未拆分的老数据/老调用）。
+
+    v7.2 归属月 + 归档：
+      - plan_month 记到每个排产工序行上（独立工序 90/91、手动完成占位行 99 恒为 NULL），
+        使「本月是否上传过排产」可判定，不再靠「有没有工序行」推测；
+      - 被本次替换掉的行先原样存入 process_node_plans_history 再删除（替换而非销毁），
+        历史月份明细可回溯、可恢复（backend/scripts/restore_schedule_month.py）。
 
     Args:
         project_id: 项目ID
@@ -373,11 +650,13 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
             actual_qty 均=完成套数），存在时会同步写入 node_actual_progress。
             不带 actual_qty 的普通导入**行为完全不变**（不产生任何额外 SQL）。
         manager: 归属负责人姓名；None=不区分负责人（历史行为）
+        plan_month: 排产归属月 'YYYY-MM'；None=不标记（调用方负责解析，路由层默认取当前自然月）
 
     Returns:
         int: 实际插入的节点计划条数
     """
     mgr_val = str(manager).strip() if manager is not None else None
+    month_val = str(plan_month).strip() if plan_month else None
     # 「已完成」识别项：仅由排产导入的「已完成」文本识别产出，带 actual_qty 的计划行
     actual_items = [p for p in plans if int(p.get('actual_qty') or 0) > 0]
     # 回填完成量队列：(node_plan_id, process_name, actual_qty, report_date)
@@ -397,6 +676,20 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                 # 导致汇总视图 plan_qty 翻倍。首个导入的负责人会接管这些历史行。
                 del_cond += " AND (manager <=> %s OR manager IS NULL)"
                 del_args.append(str(manager).strip())
+
+            # v7.2：删除前先按**完全相同的 WHERE**归档一份（归档集合 == 删除集合，不重不漏）。
+            # 主表因此永远只保留该（负责人名下的）最新一份排产，读路径无需感知月份，
+            # 规避跨月行共存导致的 plan_qty 翻倍；历史明细在归档表按月可回溯。
+            cursor.execute(f"SELECT COUNT(*) AS c FROM process_node_plans WHERE {del_cond}",
+                           tuple(del_args))
+            _will_delete = int(cursor.fetchone()['c'] or 0)
+            if _will_delete:
+                archived = archive_node_plans_in_scope(cursor, del_cond, tuple(del_args))
+                if archived != _will_delete:
+                    # 归档与删除集合必须一致；不一致直接回滚，绝不静默丢数据
+                    conn.rollback()
+                    raise RuntimeError(
+                        f"排产明细归档异常：待删除 {_will_delete} 行、实际归档 {archived} 行，已回滚")
 
             # 覆盖式重导入会重建 plan 行（新 id）。为**不丢失已填报进度**：
             # ① 删除前按 (process_name, plan_date, manager) 快照既有实际进度；
@@ -451,8 +744,8 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
             if plans:
                 cursor.executemany("""
                     INSERT INTO process_node_plans
-                        (project_id, process_name, process_order, plan_date, plan_qty, manager)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (project_id, process_name, process_order, plan_date, plan_qty, manager, plan_month)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, [(
                     project_id,
                     str(p['process_name']).strip(),
@@ -460,6 +753,7 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                     str(p['plan_date'])[:10],          # 统一 'YYYY-MM-DD' 字符串
                     int(p.get('plan_qty', 1) or 1),
                     mgr_val,
+                    month_val,                          # v7.2 排产归属月（None=不标记）
                 ) for p in plans])
 
             # 按「套」写入工序计划时长/相对下料偏移（无 durations → 零额外 SQL）
@@ -819,7 +1113,8 @@ def list_project_managers(project_id: int) -> list[dict]:
             proj = cursor.fetchone()
             names = split_managers(proj["delivery_person"] if proj else "")
 
-            # 2) 已入库的 manager（排除独立工序行，只看排产工序）
+            # 2) 已入库的 manager（排除独立工序行；此处只作**姓名来源**，不参与「是否已导入」判定，
+            #    故保留宽松范围——名字被漏掉比多出一个名字更糟）
             cursor.execute("""
                 SELECT DISTINCT manager FROM process_node_plans
                 WHERE project_id = %s
@@ -832,16 +1127,19 @@ def list_project_managers(project_id: int) -> list[dict]:
                 if nm and nm not in names:
                     names.append(nm)
 
-            # 3) 各负责人已导入行数
+            # 3) 各负责人已导入的排产工序行数
+            #    ⚠️ v7.2 判定口径必须是排产工序白名单（process_order 1..11），不能用
+            #    「process_name NOT IN (90,91)」——「手动完成」占位行（process_order=99,
+            #    process_name='附件安装'）也满足后者，会把只做过手动完成的项目误判为「已导入排产」。
             row_counts: dict[str, int] = {}
             if names:
                 cursor.execute("""
                     SELECT manager, COUNT(*) AS c FROM process_node_plans
                     WHERE project_id = %s
-                      AND process_name NOT IN (%s, %s)
+                      AND process_order BETWEEN %s AND %s
                       AND manager IS NOT NULL
                     GROUP BY manager
-                """, (project_id, INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]))
+                """, (project_id, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX))
                 row_counts = {str(r["manager"]).strip(): int(r["c"]) for r in cursor.fetchall()}
 
             plan_map = get_manager_monthly_plan_map(project_id)
@@ -941,6 +1239,56 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
     upsert_node_actual(project_id, node_plan_id, "附件安装",
                        int(complete_qty or 0), complete_date)
     return node_plan_id
+
+
+# ---------- 按段填报（v7.1 行级化，node_segment_progress） ----------
+
+def upsert_node_segment(project_id: int, node_plan_id: int,
+                        segment_total: int, segment_done: int) -> None:
+    """按段填报（行级化）：写入/更新某套（计划行）的分段进度（总段数/已完成段数）。
+
+    - 段数唯一挂在计划行 node_plan_id 上（唯一键 uk_node_seg），同套重复提交 = **覆盖**；
+    - 负责人维度不单独存——计划行 process_node_plans 自带 manager；
+    - 排产重导删除计划行时段数随 FK 级联清理（重导=重排）；
+    - 独立记录，不折算、不写 actual_qty，联动校验/出品排名/进度百分比零影响。
+
+    Args:
+        project_id: 项目ID（冗余标注，供行级隔离/级联删除）
+        node_plan_id: 计划行ID（路由层已校验存在且属于该项目+该工序）
+        segment_total: 总段数（正整数，路由层已校验 1..99）
+        segment_done: 已完成段数（路由层已校验 0 <= done <= total）
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO node_segment_progress "
+                    "(project_id, node_plan_id, segment_total, segment_done) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE "
+                    "segment_total = VALUES(segment_total), "
+                    "segment_done = VALUES(segment_done)",
+                (int(project_id), int(node_plan_id),
+                 int(segment_total or 0), int(segment_done or 0)),
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def get_node_segments(project_id: int) -> list[dict]:
+    """查询项目全部按段填报行（行级化）：返回 node_plan_id/segment_total/segment_done。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, project_id, node_plan_id, segment_total, segment_done, updated_at "
+                "FROM node_segment_progress WHERE project_id = %s",
+                (int(project_id),),
+            )
+            return list(cursor.fetchall())
+    finally:
+        conn.close()
 
 
 def save_independent_fill(project_id: int, process_name: str,

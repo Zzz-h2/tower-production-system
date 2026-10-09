@@ -6,7 +6,14 @@
 """
 from datetime import date
 
-from .config import MYSQL_CONFIG, INDEPENDENT_PROCESS_NAMES
+from .config import MYSQL_CONFIG, SCHEDULE_PROCESS_NAMES
+
+# v7.2 排产工序白名单区间（与根 database.py 同源，顺序由 SCHEDULE_PROCESS_NAMES 保证）：
+# 排产导入写出的行满足 process_order = index+1，即 1..len(SCHEDULE_PROCESS_NAMES)。
+# ⚠️ 判定「有没有排产计划」必须用它，不能用「process_name NOT IN (90,91)」——
+#    「手动完成」占位行（process_order=99, process_name='附件安装'）也满足后者，会造成假阳性。
+SCHEDULE_ORDER_MIN = 1
+SCHEDULE_ORDER_MAX = len(SCHEDULE_PROCESS_NAMES)
 
 
 def get_connection():
@@ -87,15 +94,53 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
 
 
 def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None,
-                      durations: list[dict] | None = None) -> int:
+                      durations: list[dict] | None = None,
+                      plan_month: str | None = None) -> int:
     """批量写入节点计划（覆盖式）。
 
     多负责人（v6.0）：manager 非 None 时只覆盖该负责人名下的排产工序行（并吸收历史 NULL 行），
     实现各负责人分别导入、互不覆盖。manager=None 保持历史行为（清空该项目全部排产工序行）。
     durations：按「套」的工序计划时长/相对下料偏移（工序时间规则升级用），与 plan 行同范围覆盖式重建。
+    plan_month（v7.2）：排产归属月 'YYYY-MM'，记到每个排产工序行上；被替换掉的行先归档到
+    process_node_plans_history 再删除（替换而非销毁，历史月份可回溯）。
     """
     from database import insert_node_plans as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, plans, manager, durations)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, plans, manager, durations, plan_month)
+
+
+# ---------- 排产上传台账（schedule_imports，v7.2 新增） ----------
+# ⚠️ 根 database.py 新增函数必须在此同步 re-export，否则 `db.xxx` 抛 AttributeError → FastAPI 默认 500。
+
+def upsert_schedule_import(project_id: int, plan_month: str, manager: str = "",
+                           row_count: int = 0, source_file: str = "") -> None:
+    """写入「项目 × 排产归属月 × 负责人」上传台账（重复导入幂等覆盖）。"""
+    from database import upsert_schedule_import as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, plan_month, manager, row_count, source_file)
+
+
+def get_schedule_imports(plan_month: str) -> dict[int, dict]:
+    """按归属月取上传台账 → {project_id: {'managers': [...], 'row_count': int}}。"""
+    from database import get_schedule_imports as _fn
+    return getattr(_fn, "__wrapped__", _fn)(plan_month)
+
+
+def get_last_schedule_months() -> dict[int, str]:
+    """取每个项目最近一次排产上传的归属月 → {project_id: 'YYYY-MM'}。"""
+    from database import get_last_schedule_months as _fn
+    return getattr(_fn, "__wrapped__", _fn)()
+
+
+def get_schedule_import_months() -> list[dict]:
+    """返回已留档的排产归属月列表（倒序）。"""
+    from database import get_schedule_import_months as _fn
+    return getattr(_fn, "__wrapped__", _fn)()
+
+
+def get_node_plans_history(project_id: int, plan_month: str | None = None,
+                           manager: str | None = None, limit: int = 5000) -> list[dict]:
+    """读取已归档的排产明细（历史月份回溯）。"""
+    from database import get_node_plans_history as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, plan_month, manager, limit)
 
 
 def get_project_process_durations(project_id: int, manager: str | None = None) -> dict:
@@ -163,6 +208,29 @@ def move_independent_fill_date(project_id: int, process_name: str,
     """
     from database import move_independent_fill_date as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_id, process_name, node_plan_id, new_report_date, new_qty)
+
+
+# ---------- 按段填报（v7.1 行级化，node_segment_progress） ----------
+
+def upsert_node_segment(project_id: int, node_plan_id: int,
+                        segment_total: int, segment_done: int) -> None:
+    """写入/更新某套（计划行）的分段进度（总段数/已完成段数）。
+
+    桥接根目录 database.py 的 upsert_node_segment（路由层通过本桥接调用）。
+    段数唯一挂在 node_plan_id 上（uk_node_seg）；独立记录不折算、不写 actual_qty。
+    """
+    from database import upsert_node_segment as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, node_plan_id,
+                                            segment_total, segment_done)
+
+
+def get_node_segments(project_id: int) -> list[dict]:
+    """查询项目全部按段填报行（行级化）：node_plan_id/segment_total/segment_done。
+
+    桥接根目录 database.py 的 get_node_segments（总览/详情组装段进度用）。
+    """
+    from database import get_node_segments as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id)
 
 
 # ---------- 多负责人管理（v6.0） ----------
@@ -266,10 +334,13 @@ def get_dashboard_stats(month: str | None = None, big_area_person: str | None = 
 
 # ---------- 手动添加 / 调度令导入 复用封装 ----------
 
-def upsert_project(data: dict):
-    """插入或更新项目（四字段唯一键），返回 (project_id, is_new)。"""
+def upsert_project(data: dict, mapped_fields=None):
+    """插入或更新项目（四字段唯一键），返回 (project_id, is_new)。
+
+    mapped_fields: 本次 Excel 已映射的系统字段集合（覆盖保护用）；None=不过滤。
+    """
     from database import upsert_project as _fn
-    return getattr(_fn, "__wrapped__", _fn)(data)
+    return getattr(_fn, "__wrapped__", _fn)(data, mapped_fields)
 
 
 def sync_independent_plans(project_id: int, contract_count) -> int:
@@ -295,6 +366,29 @@ def insert_import_log(file_name: str, total: int, success: int, error: int, erro
     return getattr(_fn, "__wrapped__", _fn)(file_name, total, success, error, error_details)
 
 
+# ---------- 月度调度令快照（dispatch_records）桥接 ----------
+# ⚠️ 根 database.py 新增函数必须在此同步 re-export，否则调用方报
+#    AttributeError: module 'app.core.db' has no attribute 'xxx' → FastAPI 500。
+
+def upsert_dispatch_record(project_id: int, plan_month: str, data: dict,
+                           source_file: str = "", is_approx: int = 0) -> None:
+    """写入/更新「项目 × 调度令归属月」快照。"""
+    from database import upsert_dispatch_record as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, plan_month, data, source_file, is_approx)
+
+
+def get_dispatch_records(plan_month: str) -> dict:
+    """按归属月取全部快照 → {project_id: 快照行}。"""
+    from database import get_dispatch_records as _fn
+    return getattr(_fn, "__wrapped__", _fn)(plan_month)
+
+
+def get_dispatch_months() -> list:
+    """已留档的调度令月份列表（倒序）。"""
+    from database import get_dispatch_months as _fn
+    return getattr(_fn, "__wrapped__", _fn)()
+
+
 # ---------- 项目列表：搜索/筛选 + 服务端分页 ----------
 
 def get_projects_filtered(keyword: str | None = None, person: str | None = None,
@@ -307,15 +401,35 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     （生命周期字段 in_progress/completed）。
     实现：取全量项目 → keyword/person/big_area_person 内存过滤 → 计算 risk_level/progress_pct →
     风险等级内存过滤 → 切片分页。
-    month: 调度令月份（projects.created_at 年月，如 '2026-08'），三页联动共享口径。
+    month: 调度令归属月份（'YYYY-MM'），口径 = projects.created_at 年月 ∪ dispatch_records.plan_month；
+           命中快照的项目以该月快照口径覆盖 monthly_plan/last_month_output，三页联动共享。
     big_area_person: 大区负责人 精确相等过滤。
     """
     # status 不再作为生命周期条件下推，统一取全量项目（big_area_person 下推 SQL 做行级隔离）
     rows = get_all_projects(None, big_area_person)
 
-    # ★ 按调度令月份（created_at 年月）过滤
+    # ★ 按调度令月份过滤：口径 = 「创建月」∪「月度调度令快照（dispatch_records）」
+    #   历史实现只看 created_at，导致「8/9 月建过的项目在 10 月调度令中再次出现」时
+    #   走 upsert 的 UPDATE 分支、created_at 保持不变 → 被当月筛选吞掉
+    #   （实测：10 月调度令 51 条只显示 38 条）。快照表按月留档后，命中快照的项目
+    #   同样计入当月，并用**该月口径**覆盖计划数列（各月计划数互不覆盖）。
     if month:
-        rows = [p for p in rows if str(p.get("created_at", ""))[:7] == month]
+        rec_map = get_dispatch_records(month)
+        created_ids = {p["id"] for p in rows if str(p.get("created_at", ""))[:7] == month}
+        keep_ids = created_ids | set(rec_map.keys())
+        rows = [p for p in rows if p["id"] in keep_ids]
+
+        # 月度口径覆盖：必须在下方 compute_real_overdue / KPI 汇总之前生效
+        for p in rows:
+            rec = rec_map.get(p["id"])
+            if not rec:
+                continue
+            p["monthly_plan"] = int(rec.get("monthly_plan") or 0)
+            p["last_month_output"] = int(rec.get("last_month_output") or 0)
+            if rec.get("contract_count") is not None:
+                p["contract_count"] = rec["contract_count"]
+            p["dispatch_month"] = month
+            p["is_approx"] = bool(rec.get("is_approx"))
 
     # keyword：项目名称 或 机型 模糊包含（忽略大小写）
     if keyword:
@@ -347,23 +461,55 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     actuals_map = get_node_actuals_batch(all_pids)  # 1 次查询
     durations_map = get_project_process_durations_batch(all_pids)   # 1 次查询（工序时间规则升级）
 
+    # ---- 排产上传状态（v7.2：台账 + 归属月双口径，替代原「有非独立工序行」的臆测）----
+    # ① 口径修正：判定「有排产计划」必须用排产工序白名单（process_order 1..11）。
+    #    原口径 process_name NOT IN (90,91) 会被「手动完成」占位行（process_order=99,
+    #    process_name='附件安装'）命中 → 只做过手动完成、从未导过排产的项目显示「已上传排产」。
+    # ② 月份维度：即使口径修对，白名单也只能回答「曾经传过没有」；列表是按月看的，
+    #    必须回答「本月传了没有」→ 以 schedule_imports 台账（排产导入成功即落一条）为准，
+    #    叠加 process_node_plans.plan_month 命中作兜底。
+    #    未传 month 时（跨月视图）退回「曾经传过」口径，保持历史行为。
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            # 只看 11 道排产工序：排除 dispatch 导入自动创建的两条独立工序（累计完成总数/累计发运总数），
-            # 否则仅做过调度令导入、没导过排产计划的项目也会被误判为"已提报"
             cur.execute(
                 "SELECT DISTINCT project_id FROM process_node_plans "
-                "WHERE process_name NOT IN (%s, %s)",
-                (INDEPENDENT_PROCESS_NAMES[0], INDEPENDENT_PROCESS_NAMES[1]),
+                "WHERE process_order BETWEEN %s AND %s",
+                (SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX),
             )
-            has_schedule_ids = {r["project_id"] for r in cur.fetchall()}
+            has_schedule_ids = {int(r["project_id"]) for r in cur.fetchall()}
+
+            month_schedule_ids: set[int] = set()
+            if month:
+                cur.execute(
+                    "SELECT DISTINCT project_id FROM process_node_plans "
+                    "WHERE plan_month = %s AND process_order BETWEEN %s AND %s",
+                    (month, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX),
+                )
+                month_schedule_ids |= {int(r["project_id"]) for r in cur.fetchall()}
+                cur.execute(
+                    "SELECT DISTINCT project_id FROM schedule_imports WHERE plan_month = %s",
+                    (month,),
+                )
+                month_schedule_ids |= {int(r["project_id"]) for r in cur.fetchall()}
+
+            # 「上次上传：X月」提示源（同一连接内取，不额外开连接）
+            cur.execute(
+                "SELECT project_id, MAX(plan_month) AS m FROM schedule_imports GROUP BY project_id"
+            )
+            last_schedule_months = {
+                int(r["project_id"]): str(r["m"]) for r in cur.fetchall() if r["m"]
+            }
     finally:
         conn.close()
 
     for p in rows:
         pid = p["id"]
-        p["has_schedule_plan"] = pid in has_schedule_ids
+        p["has_schedule_plan"] = (pid in month_schedule_ids) if month else (pid in has_schedule_ids)
+        # 历史是否传过（白名单口径）+ 最近一次上传归属月，供前端区分
+        # 「本月未上传 · 上次上传 9 月」与「从未上传」两种不同状态。
+        p["has_schedule_plan_ever"] = pid in has_schedule_ids
+        p["schedule_upload_month"] = last_schedule_months.get(pid)
         plans = plans_map.get(pid, [])
         actuals = actuals_map.get(pid, {})
         nodes = enrich_rows(plans, actuals, durations=durations_map.get(pid))
