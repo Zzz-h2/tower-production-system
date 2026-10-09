@@ -1668,9 +1668,18 @@ def get_ranking_manager_rows_by_month(month: str,
       - manager：delivery_person 按 '/' 拆分后的单个姓名（去重保序）；
         若 delivery_person 为空/脏数据，则回退为原样单人（保持旧行为，不丢数据）。
       - total_plan：该负责人申报的本月计划数（project_manager_plans.monthly_plan）；
-        单人项目且未申报时，回退用 projects.monthly_plan（向后兼容旧数据）。
+        单人项目且未申报时，回退用项目本月计划数（向后兼容旧数据）。
       - total_actual：该负责人名下『附件安装』工序实际完成量之和（按 pnp.manager 归属）。
       - project_id / delivery_person / project_monthly_plan：便于上层追溯与前端展示。
+
+    🔴 **当月项目口径（与 core/db.get_projects_filtered 严格一致）**：
+    `projects.created_at 年月 = month` **∪** `dispatch_records.plan_month = month`。
+    仅用 created_at 会让「跨月延续项目」（8/9 月已建档、本月又进调度令 → 走 upsert 的
+    UPDATE 分支、created_at 不变）整批漏掉，导致排名与「生产进度总览 / 项目列表」数字打架
+    （实测生产 2026-10：仅 created_at → 39 项目 / 13 负责人 / 计划 109 / 完成 0；
+    正确应为 51 项目 / 14 负责人 / 计划 169 / 完成 14）。
+    命中快照的项目用**该月快照**的 monthly_plan 作为计划数（同一项目跨月各月互不覆盖，
+    历史月份也才能显示当月口径，而不是被最新一次导入覆盖后的值）。
 
     big_area_person 非 None 时追加大区行级隔离。
     """
@@ -1678,17 +1687,21 @@ def get_ranking_manager_rows_by_month(month: str,
     try:
         with conn.cursor() as cur:
             ba_sql = " AND p.big_area_person = %s" if big_area_person else ""
-            params: list = [month]
+            # 前两个占位符依次是：LEFT JOIN 的快照月份、WHERE 的 created_at 月份
+            params: list = [month, month]
             if big_area_person:
                 params.append(big_area_person)
 
-            # 1) 当月项目（调度令月份 = created_at 年月）
+            # 1) 当月项目：created_at 年月 ∪ dispatch_records.plan_month（命中快照者用该月口径）
             cur.execute(f"""
                 SELECT p.id AS project_id,
                        p.delivery_person,
-                       p.monthly_plan AS project_monthly_plan
+                       COALESCE(d.monthly_plan, p.monthly_plan) AS project_monthly_plan
                 FROM projects p
-                WHERE DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
+                LEFT JOIN dispatch_records d
+                       ON d.project_id = p.id
+                      AND d.plan_month = %s
+                WHERE (DATE_FORMAT(p.created_at, '%%Y-%%m') = %s OR d.id IS NOT NULL)
                   AND p.delivery_person IS NOT NULL AND TRIM(p.delivery_person) <> ''
                   AND p.delivery_person NOT REGEXP '^[0-9]+$'
                   {ba_sql}

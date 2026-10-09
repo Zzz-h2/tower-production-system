@@ -2,13 +2,16 @@
 """出品排名统计：按交付负责人维度聚合当月『附件安装』出品数据并排名。
 
 统计口径（与排产数据一致）：
-- 当月范围：process_node_plans.plan_date 落在所选月份
-- 计划/完成套数：仅『附件安装』工序（整体进度口径）
+- 当月范围（调度令月份，与 core/db.get_projects_filtered 一致）：
+  projects.created_at 年月 = month ∪ dispatch_records.plan_month = month
+  —— 跨月延续项目（上月建档、本月又进调度令）必须计入，否则与总览/项目列表打架
+- 计划/完成套数：仅『附件安装』工序（整体进度口径）；完成数为该批项目的累计实际
 - 完成率 = 完成/计划×100%，分母为 0 → None（前端显示 —）
 - 排名：完成率降序 → 计划套数降序 → 负责人升序
 - 详情：该负责人当月存在「逾期/提前」节点的项目清单（全部工序）
   - 逾期：plan_date < today 且 actual_qty < plan_qty（含部分完成）
   - 提前：plan_date > today 且 actual_qty >= plan_qty
+  - 注意：明细按 plan_date 落在当月筛选，与上面的「调度令月份」是两个不同维度（页面口径如此）
 """
 from datetime import date
 
