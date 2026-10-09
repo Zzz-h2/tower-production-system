@@ -105,7 +105,8 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
 
 
 def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=None, *,
-                      eff_plan_date=None, waiting_material=False, count_as_overdue=True):
+                      eff_plan_date=None, waiting_material=False, count_as_overdue=True,
+                      segment_active=False):
     """
     判定单个工序节点计划状态（五态 + 完成日期偏差 + 待下料态）。
 
@@ -116,13 +117,19 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
     - eff_plan_date：闸门开时以「实际下料日 + 该工序相对下料的计划偏移」重算的计划日期，
       作为延期判定基准（替代原始 plan_date）。
     - count_as_overdue：该节点是否计入逾期统计/风险等级/排名（法兰到货、待下料为 False）。
+    - segment_active（按段填报已开工，v7.1 行级化）：该套已有按段记录且已完成段数 > 0
+      → 视为「已开工但未整套完成」，返回 🔵 进行中（未来计划日为 🔵 提前进行中），
+      **不再判 🔴 逾期未完成**（用户 2026-10-09 口径：按段提报后状态应为进行中）。
+      注意：按段填报不写 actual_qty，故不能靠 actual_qty>0 分支兜住，必须单独判。
 
     规则（按此顺序）：
     - done:        actual_qty >= plan_qty              → 🟢 已完成
-    - pending:     plan_date > today                   → ⚪ 未开始
+    - pending:     plan_date > today 且无任何进度       → ⚪ 未开始
+    - in_progress: plan_date > today 且有进度/有段记录  → 🔵 提前进行中
     - in_progress: plan_date == today                  → 🔵 进行中（当日不再显示逾期）
     - warning:     plan_date < today 且 actual_qty > 0 → 🟡 部分完成
-    - overdue:     plan_date < today 且 actual_qty == 0 → 🔴 逾期未完成
+    - in_progress: plan_date < today 且已按段提报（segment_active）→ 🔵 进行中（不判逾期）
+    - overdue:     plan_date < today 且 actual_qty == 0 且无按段进度 → 🔴 逾期未完成
 
     Args:
         plan_date: 计划完成日期（str 'YYYY-MM-DD' 或 date 对象，内部统一 parse_date）
@@ -172,8 +179,8 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
         else:
             status, label, level, lag = "done", "🟢 已完成", 0, 0
     elif parsed_plan is not None and parsed_today < parsed_plan:
-        # 未来计划节点：支持提前进行中语义
-        if actual_qty > 0:
+        # 未来计划节点：支持提前进行中语义（有实际填报 或 已按段提报 → 提前进行中）
+        if actual_qty > 0 or segment_active:
             status, label, level, lag = "in_progress", "🔵 提前进行中", 2, 0
         else:
             status, label, level, lag = "pending", "⚪ 未开始", 0, 0
@@ -181,6 +188,10 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
         status, label, level, lag = "in_progress", "🔵 进行中", 2, 0
     elif actual_qty > 0:
         status, label, level, lag = "warning", "🟡 部分完成", 3, plan_qty - actual_qty
+    elif segment_active:
+        # 按段提报已开工（已完成段数 > 0）但尚未整套填报 → 进行中，不再判逾期未完成
+        # （用户 2026-10-09 口径；按段填报不写 actual_qty，故必须在此单判）
+        status, label, level, lag = "in_progress", "🔵 进行中", 2, 0
     else:
         status, label, level, lag = "overdue", "🔴 逾期未完成", 4, plan_qty
 

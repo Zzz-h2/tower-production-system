@@ -233,6 +233,15 @@ def get_node_segments(project_id: int) -> list[dict]:
     return getattr(_fn, "__wrapped__", _fn)(project_id)
 
 
+def get_node_segments_batch(project_ids: list[int]) -> dict:
+    """批量查询多项目的按段填报行 → {project_id: {node_plan_id: (total, done)}}。
+
+    桥接根目录 database.py 的 get_node_segments_batch（项目列表一次性取回，避免 N+1）。
+    """
+    from database import get_node_segments_batch as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_ids)
+
+
 # ---------- 多负责人管理（v6.0） ----------
 
 def split_managers(delivery_person: str | None) -> list[str]:
@@ -460,6 +469,14 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     plans_map = get_node_plans_batch(all_pids)      # 1 次查询
     actuals_map = get_node_actuals_batch(all_pids)  # 1 次查询
     durations_map = get_project_process_durations_batch(all_pids)   # 1 次查询（工序时间规则升级）
+    # 按段填报（v7.1 行级化）：批量取回全部项目的段进度 → 参与节点状态判定
+    # （按段提报未填满的行 → 进行中，不再判「逾期未完成」；表缺失/查询失败不阻塞列表）
+    try:
+        seg_map_by_pid = get_node_segments_batch(all_pids)   # 1 次查询
+    except Exception as e:  # noqa: BLE001 — 按段填报为增强功能，失败不阻塞
+        import logging
+        logging.getLogger(__name__).warning("get_node_segments_batch 失败：%s", e)
+        seg_map_by_pid = {}
 
     # ---- 排产上传状态（v7.2：台账 + 归属月双口径，替代原「有非独立工序行」的臆测）----
     # ① 口径修正：判定「有排产计划」必须用排产工序白名单（process_order 1..11）。
@@ -512,7 +529,8 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         p["schedule_upload_month"] = last_schedule_months.get(pid)
         plans = plans_map.get(pid, [])
         actuals = actuals_map.get(pid, {})
-        nodes = enrich_rows(plans, actuals, durations=durations_map.get(pid))
+        nodes = enrich_rows(plans, actuals, durations=durations_map.get(pid),
+                            seg_map=seg_map_by_pid.get(pid) or {})
 
         # 风险等级：历史逾期 > 今日未完成 > 正常
         # （未来日期的 in_progress「提前进行中」不算预警；今日 in_progress 须 actual < plan 才算）

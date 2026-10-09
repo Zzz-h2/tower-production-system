@@ -5,11 +5,12 @@ from typing import Optional
 
 from .business_logic import (judge_node_status, judge_process_card_status, split_node_groups,
                              compute_real_overdue, build_time_rules)
+from .workday_calendar import parse_date
 from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
 
 
 def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optional[dict] = None,
-                rules: Optional[dict] = None) -> list[dict]:
+                rules: Optional[dict] = None, seg_map: Optional[dict] = None) -> list[dict]:
     """富化节点行：计划信息 + 实际完成 + 五态判定（含完成日期与偏差）。
 
     返回行结构与原 Streamlit 版 rows 一致（前端时间轴/卡片直接使用）。
@@ -19,10 +20,17 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
     durations 为 None / 缺该行时长 → 回退原规则（存量项目行为不变）。
     ⚠️ rules 可由调用方预计算传入——**闸门锚点需要全项目的计划行**（找「下料」行），
     若 plans 已被过滤成单道工序，必须传全量行算出的 rules，否则全部误判为待下料。
+    v7.1 按段填报（行级化，seg_map 非空时）：
+      - 每行输出 segment_total / segment_done（无记录为 None，前端据此显示「已完成 n/m 段」）；
+      - **已按段提报且 segment_done > 0 的行 → 判定为「进行中」，不再判「逾期未完成」**
+        （用户 2026-10-09 口径）。口径说明：只看「是否有已完成段」，不看是否填满——
+        「已完成 5/5 段」同样属于已开工，否则会出现「已完成 5/5 段 + 逾期未完成」的矛盾；
+        段记录 done=0（只填了总段数）不算开工，仍按原规则判逾期。
     """
     today = today or date.today()
     if rules is None:
         rules = build_time_rules(plans, actuals, durations)
+    seg_map = seg_map or {}
     rows = []
     for r in plans:
         nid = r["id"]
@@ -30,6 +38,11 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
         actual_qty = act.get("actual_qty", 0)
         completion_date = act.get("report_date") if actual_qty >= r["plan_qty"] else None
         ru = rules.get(nid) or {}
+        seg = seg_map.get(int(nid))
+        seg_total = int(seg[0]) if seg else None
+        seg_done = int(seg[1]) if seg else None
+        # 按段提报已开工（有已完成段）→ 「进行中」语义
+        segment_active = seg_total is not None and int(seg_done or 0) > 0
         if r["process_name"] in INDEPENDENT_PROCESS_NAMES:
             done = actual_qty >= r["plan_qty"]
             st = {
@@ -45,6 +58,7 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
                 eff_plan_date=ru.get("eff_plan_date"),
                 waiting_material=bool(ru.get("waiting_material")),
                 count_as_overdue=ru.get("count_as_overdue", True),
+                segment_active=segment_active,
             )
         rows.append({
             "id": nid,
@@ -58,6 +72,9 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
             "plan_qty": r["plan_qty"],
             "actual_qty": actual_qty,
             "report_date": str(act.get("report_date") or "")[:10] or None,
+            # 按段填报回显（v7.1 行级化；无记录为 None）
+            "segment_total": seg_total,
+            "segment_done": seg_done,
             **st,
         })
     return rows
@@ -82,6 +99,10 @@ def _load_node_segments(project_id: int) -> dict[int, tuple[int, int]]:
         import logging
         logging.getLogger(__name__).warning("get_node_segments(%s) 失败：%s", project_id, e)
         return {}
+
+
+# 对外公开别名：路由层（项目详情风险 / 预警列表）复用同一带兜底的读取逻辑
+load_node_segments = _load_node_segments
 
 
 def _segment_delay_tags(tags: list, grp: list[dict],
@@ -149,11 +170,13 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
     - timeline: 时间轴所需行
     - contract_count: 项目主表合同总数（独立工序卡片的「合同总数」单一数据源；None 时回退占位行）
     """
-    today = today or date.today()
-    rows = enrich_rows(plans, actuals, today, durations)
-
+    # ⚠️ today 统一归一化为 date：下游 _segment_delay_tags 做 date 比较，
+    # 调用方传 'YYYY-MM-DD' 字符串时原会 TypeError（防御性收口）
+    today = parse_date(today) or date.today()
     # 按段填报（v7.1 行级化）：{node_plan_id: (segment_total, segment_done)}
+    # ⚠️ 必须在 enrich_rows 之前加载——状态判定需要它（按段提报的行 → 进行中，不判逾期）
     seg_map = _load_node_segments(project_id)
+    rows = enrich_rows(plans, actuals, today, durations, seg_map=seg_map)
 
     proc_groups: dict[str, list[dict]] = {}
     for r in rows:
@@ -263,7 +286,7 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
       segment_total/segment_done（该套的分段进度；无记录为 None），供填报 tab 回显 +
       节点详情 tab 展示；旧调用（不传参）行为不变。
     """
-    today = today or date.today()
+    today = parse_date(today) or date.today()
     # ⚠️ 闸门锚点必须基于【全项目】计划行（找「下料」行），不能只用本工序的行
     rules = build_time_rules(plans, actuals, durations)
     proc_nodes = sorted(
@@ -276,8 +299,11 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
          if rules.get(p["id"], {}).get("eff_plan_date") else p)
         for p in proc_nodes
     ]
+    # 按段填报（v7.1 行级化）：每套（计划行）各自的段进度——无记录为 None。
+    # 由 enrich_rows 一并写入行字段并参与状态判定（按段提报未填满 → 进行中，不判逾期未完成）
+    seg_map = _load_node_segments(project_id) if project_id is not None else {}
     groups = split_node_groups(proc_nodes, actuals, today)
-    rows = enrich_rows(proc_nodes, actuals, today, durations, rules)
+    rows = enrich_rows(proc_nodes, actuals, today, durations, rules, seg_map=seg_map)
 
     # 独立工序的 done 组按日期降序展示（最新填报在上）
     if process_name in INDEPENDENT_PROCESS_NAMES:
@@ -286,13 +312,6 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
             key=lambda p: str(p.get('plan_date') or ''),
             reverse=True,
         )
-
-    # 按段填报（v7.1 行级化）：每套（计划行）各自的段进度——无记录为 None
-    seg_map = _load_node_segments(project_id) if project_id is not None else {}
-    for r in rows:
-        seg = seg_map.get(int(r["id"]))
-        r["segment_total"] = seg[0] if seg else None
-        r["segment_done"] = seg[1] if seg else None
 
     return {
         "process_name": process_name,

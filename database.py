@@ -1291,6 +1291,36 @@ def get_node_segments(project_id: int) -> list[dict]:
         conn.close()
 
 
+def get_node_segments_batch(project_ids: list[int]) -> dict[int, dict[int, tuple[int, int]]]:
+    """批量查询多个项目的按段填报行（避免项目列表 N+1 查询）。
+
+    Returns:
+        {project_id: {node_plan_id: (segment_total, segment_done)}}
+        空入参 → {}
+    """
+    ids = [int(x) for x in (project_ids or []) if x is not None]
+    if not ids:
+        return {}
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            placeholders = ",".join(["%s"] * len(ids))
+            cursor.execute(
+                f"SELECT project_id, node_plan_id, segment_total, segment_done "
+                f"FROM node_segment_progress WHERE project_id IN ({placeholders})",
+                tuple(ids),
+            )
+            out: dict[int, dict[int, tuple[int, int]]] = {}
+            for row in cursor.fetchall():
+                pid = int(row["project_id"])
+                out.setdefault(pid, {})[int(row["node_plan_id"])] = (
+                    int(row["segment_total"] or 0), int(row["segment_done"] or 0),
+                )
+            return out
+    finally:
+        conn.close()
+
+
 def save_independent_fill(project_id: int, process_name: str,
                           fill_qty: int, report_date: str,
                           manager: str | None = None) -> int:

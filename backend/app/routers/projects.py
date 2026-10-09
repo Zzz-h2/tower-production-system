@@ -168,7 +168,9 @@ def get_project(pid: int, user: dict = Depends(get_current_user)):
     plans = db.get_node_plans(pid)
     actuals = db.get_node_actuals(pid)
     durations = db.get_project_process_durations(pid)   # 工序时间规则升级：按套时长/偏移
-    rows = enrich_rows(plans, actuals, durations=durations)
+    # 按段填报（v7.1 行级化）：按段提报的行（已完成段数>0）→ 进行中，不判「逾期未完成」（与弹窗口径一致）
+    from ..services.node_service import load_node_segments
+    rows = enrich_rows(plans, actuals, durations=durations, seg_map=load_node_segments(pid))
 
     today_s = str(date.today())
 
@@ -433,8 +435,9 @@ def get_alerts(pid: int, user: dict = Depends(get_current_user)):
     require_project_access(project, user)
     plans = db.get_node_plans(pid)
     actuals = db.get_node_actuals(pid)
-    from ..services.node_service import enrich_rows
-    rows = enrich_rows(plans, actuals, durations=db.get_project_process_durations(pid))
+    from ..services.node_service import enrich_rows, load_node_segments
+    rows = enrich_rows(plans, actuals, durations=db.get_project_process_durations(pid),
+                       seg_map=load_node_segments(pid))
     from ..core.config import INDEPENDENT_PROCESS_NAMES
     # 独立工序（累计完成/累计发运）不参与预警：无日期语义，仅作为参考指标
     # count_as_overdue=False（待下料 / 法兰到货）也不进预警，避免出现不该有的延期项
