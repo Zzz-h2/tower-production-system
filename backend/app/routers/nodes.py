@@ -32,6 +32,9 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
     require_project_access(project, user)
 
     mgr = (req.manager or "").strip() or None   # 本次填报归属负责人（空=汇总/不区分）
+    # v7.4 排产按月隔离：填报所见的计划行必须与详情页同一月份口径，
+    # 否则会出现「前端展示该月行、后端按跨月全集校验」的口径漂移。
+    mth = (req.month or "").strip() or None
 
     if req.group not in GROUP_LABELS:
         raise HTTPException(status_code=400, detail={"code": "UNKNOWN_GROUP", "message": f"未知分组：{req.group}"})
@@ -42,9 +45,10 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
         raise HTTPException(status_code=400, detail={"code": "DONE_READONLY", "message": "已完成分组不可编辑（无法填报）"})
 
     # 多负责人：只取该负责人名下的节点计划（前序联动校验也随之限定在其内部，互不干扰）
-    plans = db.get_node_plans(pid, mgr)
+    # v7.4：叠加月份作用域，与详情页展示口径一致
+    plans = db.get_node_plans(pid, mgr, mth)
     actuals = db.get_node_actuals(pid)
-    durations = db.get_project_process_durations(pid, mgr)
+    durations = db.get_project_process_durations(pid, mgr, mth)
     # 分组与前端展示口径一致：闸门开（该套已实际下料）的制造链节点按「重算后的计划日期」归组，
     # 否则会出现「前端显示在未来计划、后端却按旧日期归到逾期组」的 NODE_NOT_IN_GROUP 错位。
     rules = build_time_rules(plans, actuals, durations)

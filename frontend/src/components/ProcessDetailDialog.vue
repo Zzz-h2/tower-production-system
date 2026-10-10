@@ -460,6 +460,7 @@ const props = defineProps({
   processName: { type: String, default: '' },
   mode: { type: String, default: 'detail' },
   manager: { type: String, default: '' },   // 多负责人 v6.0：仅查看/提报该负责人名下节点
+  month: { type: String, default: '' },     // v7.4 排产按月隔离：仅查看/提报该月导入的节点
 })
 // refresh：仅要求父级刷新总览，不关闭本弹窗（一键提报用）；saved：保存后由父级关闭并刷新
 const emit = defineEmits(['update:modelValue', 'saved', 'refresh'])
@@ -651,7 +652,10 @@ const independentStatus = computed(() => {
 
 async function load() {
   if (!props.processName) return
-  const params = props.manager ? { manager: props.manager } : {}
+  // v7.4：带 month 时只取「该月导入的行 ∪ 未标注月行」，与详情页总览同一月份口径
+  const params = {}
+  if (props.manager) params.manager = props.manager
+  if (props.month) params.month = props.month
   detail.value = await fetchProcessNodes(props.pid, props.processName, params)
   inputValues.value = {}
   reportDates.value = {}
@@ -700,7 +704,12 @@ async function save() {
     // 并发提交；任一组失败也汇总已成功的部分，避免无提示
     const settled = await Promise.allSettled(
       groupsToSave.map(([g, values]) =>
-        saveNodeProgress(props.pid, props.processName, { group: g, values, manager: props.manager || undefined }),
+        saveNodeProgress(props.pid, props.processName, {
+          group: g,
+          values,
+          manager: props.manager || undefined,
+          month: props.month || undefined,   // v7.4：后端按同一月份口径校验（前序联动）
+        }),
       ),
     )
     const ok = settled.filter((r) => r.status === 'fulfilled')
@@ -810,6 +819,7 @@ async function executeBatchReport() {
       group: activeGroup.value,
       values,
       manager: props.manager || undefined,
+      month: props.month || undefined,   // v7.4：后端按同一月份口径校验（前序联动）
       partial_ok: true,
     })
     const saved = res?.saved ?? values.length

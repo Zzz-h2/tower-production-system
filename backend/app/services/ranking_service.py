@@ -95,13 +95,14 @@ def get_production_ranking_detail(month: str, person: str, big_area_person: str 
     big_area_person: 大区负责人（大区行级隔离；admin 传 None 看全量）。
     """
     ns, ne = _month_range(month)
-    plans = db.get_all_plans_by_month_and_person(ns, ne, person, big_area_person)  # 1 次查询
+    # v7.4：显式传 month，使取到的计划行与「按套时长」都与该排产归属月口径一致
+    plans = db.get_all_plans_by_month_and_person(ns, ne, person, big_area_person, month)  # 1 次查询
     if not plans:
         return []
     node_ids = [p["id"] for p in plans]
     actuals = db.get_actuals_rich_by_node_ids(node_ids)           # 1 次查询（含日期，支持闸门锚点）
     pids = sorted({int(p["project_id"]) for p in plans})
-    durations_map = db.get_project_process_durations_batch(pids)   # 1 次查询（按套时长/偏移）
+    durations_map = db.get_project_process_durations_batch(pids, month)   # 1 次查询（按套时长/偏移）
     today = date.today()
 
     # 按项目算「闸门 + effective 计划日期」（与页面口径一致，避免排名与页面打架）

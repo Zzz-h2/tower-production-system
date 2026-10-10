@@ -32,9 +32,23 @@
       :title="`当前导入将归属到负责人「${selectedManager}」名下（仅覆盖该负责人排产工序）`"
     />
 
+    <!-- 排产按月隔离（v7.4）月份口径提示：本月未导入 / 上方为历史结转数据 -->
+    <el-alert
+      v-if="monthBanner"
+      :type="monthBanner.type"
+      :closable="false"
+      show-icon
+      style="margin-top:10px;"
+      :title="monthBanner.title"
+      :description="monthBanner.desc"
+    />
+
     <!-- 顶部指标 KPI 卡 -->
     <div class="block-card" v-if="overview">
-      <div class="block-header"><span class="icon"></span><span class="block-title">📌 项目节点概览</span></div>
+      <div class="block-header">
+        <span class="icon"></span><span class="block-title">📌 项目节点概览</span>
+        <span class="block-subtitle">{{ monthLabel }}</span>
+      </div>
       <el-row :gutter="16">
         <el-col :span="4" v-for="kpi in kpis" :key="kpi.key">
           <div class="kpi-card" :style="{ borderTopColor: kpi.color }">
@@ -73,7 +87,7 @@
         <div class="empty-title">暂无节点计划数据</div>
         <div class="empty-desc">
           请使用上方「导入排产计划」上传 Excel 后，即可查看工序时间轴与节点明细。<br/>
-          导入新排产计划会覆盖该项目已有节点计划。
+          排产计划按月独立：{{ monthLabel }}导入只替换本月的排产数据，其他月份与已填报进度不受影响。
         </div>
       </div>
     </template>
@@ -85,6 +99,7 @@
       :process-name="activeProcess"
       :mode="dialogMode"
       :manager="selectedManager"
+      :month="currentMonth"
       @saved="onSaved"
       @refresh="reload"
     />
@@ -106,6 +121,34 @@ const store = useProjectStore()
 const auth = useAuthStore()   // 普通账号禁用导入排产（仅管理员可导入）
 const route = useRoute()
 const overview = computed(() => store.overview)
+
+// 排产按月隔离（v7.4）：详情页跟随全局共享月份（与「排产计划总览」页联动，缺省当前自然月）
+const currentMonth = computed(() => store.ensureMonth())
+const monthLabel = computed(() => (currentMonth.value ? `${currentMonth.value} ` : ''))
+
+// 月份口径提示条：
+//   carry_over   —— 本月还没导入排产，页面上的行是「未标注月」的历史结转数据（重点提示）
+//   已导入       —— 显示本月已导入（附最近导入月，便于识别是否回看历史月）
+const monthBanner = computed(() => {
+  const o = overview.value
+  if (!o || !currentMonth.value) return null
+  if (o.carry_over) {
+    return {
+      type: 'warning',
+      title: `${currentMonth.value} 尚未导入排产计划，下方为历史结转数据（未标注月份）`,
+      desc: '排产计划按月独立：本月请按当月调度令重新导入，导入后仅替换本月数据，其他月份与已填报进度不受影响。',
+    }
+  }
+  if (o.month_imported) {
+    const last = o.last_plan_month ? `（最近导入：${o.last_plan_month}）` : ''
+    return {
+      type: 'success',
+      title: `当前展示 ${currentMonth.value} 排产计划${last}`,
+      desc: '',
+    }
+  }
+  return null
+})
 
 // 多负责人（v6.0）：负责人视图筛选（'' = 汇总）。可选负责人分别查看 / 提报
 const selectedManager = ref('')
@@ -144,10 +187,11 @@ const onOpenProcess = ({ process_name, mode }) => {
   dialogMode.value = mode || 'detail'
   dialogVisible.value = true
 }
-// 统一刷新：按当前负责人筛选重载总览 + 头部信息卡 + 触发预警刷新
+// 统一刷新：按当前负责人 + 当前排产归属月重载总览 + 头部信息卡 + 触发预警刷新
 function reload() {
-  store.loadOverview(props.pid, selectedManager.value || undefined)
-  store.loadDetail(props.pid)
+  const m = currentMonth.value || undefined
+  store.loadOverview(props.pid, selectedManager.value || undefined, m)
+  store.loadDetail(props.pid, m)
   store.lastNodeSavedAt = Date.now()
 }
 const onSaved = () => {
@@ -167,6 +211,8 @@ watch(() => props.pid, () => {
   selectedManager.value = ''
   reload()
 })
+// 全局月份切换（排产总览页 / 顶部月份选择器）→ 详情页同步切换排产归属月
+watch(currentMonth, () => { reload() })
 </script>
 
 <style scoped>

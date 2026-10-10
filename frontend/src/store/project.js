@@ -196,12 +196,16 @@ export const useProjectStore = defineStore('project', {
       }
     },
 
-    async loadDetail(pid) {
-      this.current = await fetchProject(pid)
+    async loadDetail(pid, month) {
+      // v7.4：带 month → 详情页的进度/风险按该排产归属月口径计算（与节点计划页同月）
+      this.current = await fetchProject(pid, month ? { month } : {})
       return this.current
     },
-    async loadOverview(pid, manager) {
-      const params = manager ? { manager } : {}
+    async loadOverview(pid, manager, month) {
+      // v7.4：manager 切负责人视图；month 切排产归属月（后端只返回该月导入的行 ∪ 未标注月行）
+      const params = {}
+      if (manager) params.manager = manager
+      if (month) params.month = month
       this.overview = await fetchNodePlans(pid, params)
       return this.overview
     },

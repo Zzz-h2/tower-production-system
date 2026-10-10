@@ -97,6 +97,8 @@ const props = defineProps({
   modelValue: Boolean,
   project: { type: Object, default: null },
   disabled: { type: Boolean, default: false },
+  // v7.4 排产按月隔离：plan_rows / has_imported 表示「该负责人本月是否已导入排产」
+  month: { type: String, default: '' },
 })
 const emit = defineEmits(['update:modelValue', 'imported'])
 const auth = useAuthStore()
@@ -115,7 +117,7 @@ watch(
 async function load() {
   if (!props.project?.id) return
   try {
-    const res = await fetchProjectManagers(String(props.project.id))
+    const res = await fetchProjectManagers(String(props.project.id), props.month || undefined)
     managers.value = (res.managers || []).map((m) => ({ ...m, _plan: m.monthly_plan || 0 }))
   } catch (e) {
     managers.value = []

@@ -28,7 +28,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useProjectStore } from '../store/project'
 import ProjectHeaderCard from '../components/ProjectHeaderCard.vue'
 import NodeScheduleTab from '../components/NodeScheduleTab.vue'
@@ -39,10 +39,17 @@ const props = defineProps({ id: { type: String, required: true } })
 const store = useProjectStore()
 const activeTab = ref('nodes')
 const project = computed(() => store.current)
+// 排产按月隔离（v7.4）：详情页跟随全局共享月份（与「排产计划总览」页联动，缺省当前自然月），
+// 使「项目基本信息卡的进度/风险」与「节点计划」的月份口径一致，不再把上月排产当作本月数据。
+const currentMonth = computed(() => store.ensureMonth())
 
 onMounted(() => {
-  store.loadDetail(props.id)
-  store.loadOverview(props.id)   // 头部信息卡需要各工序进度（附件安装进度/风险判定）
+  store.loadDetail(props.id, currentMonth.value)
+  store.loadOverview(props.id, undefined, currentMonth.value)   // 头部信息卡需要各工序进度
+})
+watch(currentMonth, () => {
+  store.loadDetail(props.id, currentMonth.value)
+  store.loadOverview(props.id, undefined, currentMonth.value)
 })
 </script>
 

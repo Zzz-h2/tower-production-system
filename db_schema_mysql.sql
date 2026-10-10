@@ -127,10 +127,40 @@ CREATE TABLE IF NOT EXISTS process_node_plans (
     plan_date       DATE NULL,
     plan_qty        INT NOT NULL DEFAULT 1,
     manager         VARCHAR(64) NULL COMMENT '归属负责人（多负责人项目按 / 拆分后逐位导入；NULL=历史/未拆分数据，仅汇总视图可见）',
-    plan_month      CHAR(7) NULL COMMENT '排产归属月 YYYY-MM（仅排产导入的工序行有值；NULL=独立工序 90/91、手动完成占位行 99、或 v7.2 迁移前的历史行）',
-    UNIQUE KEY uk_proj_proc_date_mgr (project_id, process_name, plan_date, manager),
+    plan_month      CHAR(7) NULL COMMENT '排产归属月 YYYY-MM（仅排产导入的工序行有值；NULL=独立工序 90/91、手动完成占位行 99、或 v7.4 迁移前的历史行）',
+    -- v7.4 按月隔离：唯一键必须含月份，否则跨月同 (工序, 计划日, 负责人) 会撞 1062。
+    -- 但 MySQL 唯一索引中 NULL≠NULL，直接把可空 plan_month 放进唯一键会让
+    -- upsert_manual_complete / save_independent_fill 的 ON DUPLICATE 永不触发，
+    -- 故用生成列把 NULL 映射为 ''（业务语义不变，代码仍只读写 plan_month）。
+    plan_month_key  CHAR(7) GENERATED ALWAYS AS (IFNULL(plan_month, '')) STORED
+                    COMMENT 'plan_month 的 NULL 安全副本（仅供唯一键使用；业务请用 plan_month）',
+    UNIQUE KEY uk_proj_proc_date_mgr (project_id, process_name, plan_date, manager, plan_month_key),
     KEY idx_pnp_month (project_id, plan_month),
     CONSTRAINT fk_pnp_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ============================================================
+-- 表：project_process_durations（按套工序时长/偏移，排产导入时写入）
+-- duration_days = 具备验收计划日 − 本工序计划日 + 1（含首尾）
+-- offset_days   = 本工序计划日 − 下料计划日（下料=0）
+-- v7.4 起按月隔离：plan_month 记录归属月，与排产行同范围覆盖式重建。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS project_process_durations (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    project_id      INT NOT NULL,
+    manager         VARCHAR(64) NULL,
+    set_seq         INT NOT NULL COMMENT '本次导入内的套序号/数据行序(1-based)',
+    process_name    VARCHAR(64) NOT NULL,
+    plan_date       DATE NULL,
+    duration_days   INT NULL COMMENT '计划总时长 = 具备验收计划日 - 本工序计划日 + 1(含首尾)',
+    offset_days     INT NULL COMMENT '相对下料的计划偏移 = 本工序计划日 - 下料计划日',
+    plan_month      CHAR(7) NULL COMMENT '排产归属月 YYYY-MM（v7.4 按月隔离；NULL=历史行）',
+    plan_month_key  CHAR(7) GENERATED ALWAYS AS (IFNULL(plan_month, '')) STORED
+                    COMMENT 'plan_month 的 NULL 安全副本（仅供唯一键使用）',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_proj_set_proc_mgr (project_id, set_seq, process_name, manager, plan_month_key),
+    KEY idx_proj_process (project_id, process_name, plan_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 

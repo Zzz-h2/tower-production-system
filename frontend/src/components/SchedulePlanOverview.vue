@@ -251,7 +251,8 @@
     </el-dialog>
 
     <!-- 多负责人管理弹窗（列出拆分后的负责人，分别导入 / 申报计划 / 查看） -->
-    <MultiManagerDialog v-model="multiManagerVisible" :project="importTarget" @imported="onImported" />
+    <MultiManagerDialog v-model="multiManagerVisible" :project="importTarget"
+                        :month="store.filters.month" @imported="onImported" />
 
     <!-- 手动完成二级弹窗（独立子组件，与导入弹窗平级） -->
     <ManualCompleteDialog v-model="manualVisible" :project="importTarget" @completed="onManualCompleted" />
@@ -343,7 +344,7 @@ function openImport(row) {
   importManager.value = ''
   importManagers.value = []
   importVisible.value = true
-  fetchProjectManagers(String(row.id))
+  fetchProjectManagers(String(row.id), store.filters.month || undefined)
     .then((res) => { importManagers.value = res.managers || [] })
     .catch(() => { importManagers.value = [] })
 }

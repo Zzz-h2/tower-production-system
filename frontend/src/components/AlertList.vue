@@ -219,7 +219,8 @@ async function saveEdit() {
 }
 
 async function loadCurrent() {
-  const res = await fetchAlerts(props.pid)
+  // v7.4：预警与「节点计划」同一排产归属月口径（未标注月行始终可见）
+  const res = await fetchAlerts(props.pid, store.ensureMonth() || undefined)
   currentItems.value = res.items || []
 }
 
@@ -231,6 +232,9 @@ async function loadHistory() {
 async function loadAll() {
   await Promise.all([loadCurrent(), loadHistory()])
 }
+
+// v7.4：全局月份切换时，预警列表同步按新月份口径刷新
+watch(() => store.filters.month, () => { loadCurrent() })
 
 function formatClosedAt(ts) {
   if (!ts) return '-'

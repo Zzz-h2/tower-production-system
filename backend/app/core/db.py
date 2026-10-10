@@ -39,14 +39,16 @@ def get_connection():
 
 # ---------- 节点计划 / 实际进度（v4.0 表） ----------
 
-def get_node_plans(project_id: int, manager: str | None = None) -> list[dict]:
+def get_node_plans(project_id: int, manager: str | None = None,
+                   month: str | None = None) -> list[dict]:
     """查询工序节点计划（含 id/project_id/process_name/plan_date/plan_qty/process_order/manager）。
 
     多负责人（v6.0）：manager=None 返回该项目全部行（汇总视图）；
     manager='张三' 只返回该负责人名下行（单人视图）。
+    按月隔离（v7.4）：month='YYYY-MM' 只返回「该月导入的行 ∪ 未标注月行」；None=不限定月份。
     """
     from database import get_node_plans as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, manager)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, manager, month)
 
 
 def get_node_actuals(project_id: int) -> dict:
@@ -55,10 +57,15 @@ def get_node_actuals(project_id: int) -> dict:
     return getattr(_fn, "__wrapped__", _fn)(project_id)
 
 
-def get_node_plans_batch(project_ids: list[int]) -> dict[int, list[dict]]:
-    """批量查询多个项目的工序节点计划：{project_id: [plan, ...]}（消除列表页 N+1）。"""
+def get_node_plans_batch(project_ids: list[int],
+                         month: str | None = None) -> dict[int, list[dict]]:
+    """批量查询多个项目的工序节点计划：{project_id: [plan, ...]}（消除列表页 N+1）。
+
+    v7.4：month 按月隔离（该月 ∪ 未标注月）；项目列表的「整体进度/风险」由此结果聚合，
+    必须传入当前列表月份，否则跨月行相加会让进度虚高。
+    """
     from database import get_node_plans_batch as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_ids)
+    return getattr(_fn, "__wrapped__", _fn)(project_ids, month)
 
 
 def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
@@ -93,10 +100,15 @@ def get_delivery_persons_by_projects(project_ids: list[int]) -> dict[int, str]:
 
 
 def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: str,
-                                      big_area_person: str | None = None) -> list[dict]:
-    """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。"""
+                                      big_area_person: str | None = None,
+                                      month: str | None = None) -> list[dict]:
+    """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。
+
+    v7.4：month 传入时叠加排产归属月隔离（该月 ∪ 未标注月），避免跨月行重复计数。
+    """
     from database import get_all_plans_by_month_and_person as _fn
-    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, person, big_area_person)
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, person,
+                                            big_area_person, month)
 
 
 def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None,
@@ -149,16 +161,21 @@ def get_node_plans_history(project_id: int, plan_month: str | None = None,
     return getattr(_fn, "__wrapped__", _fn)(project_id, plan_month, manager, limit)
 
 
-def get_project_process_durations(project_id: int, manager: str | None = None) -> dict:
-    """读取项目「按套工序时长/偏移」并按 (工序, 计划日) 归并（无数据返回 {}）。"""
+def get_project_process_durations(project_id: int, manager: str | None = None,
+                                 month: str | None = None) -> dict:
+    """读取项目「按套工序时长/偏移」并按 (工序, 计划日) 归并（无数据返回 {}）。
+
+    v7.4：month 与读到的计划行同一月份口径，避免「计划行按月过滤、时长跨月混用」。
+    """
     from database import get_project_process_durations as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, manager)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, manager, month)
 
 
-def get_project_process_durations_batch(project_ids: list[int]) -> dict[int, dict]:
+def get_project_process_durations_batch(project_ids: list[int],
+                                        month: str | None = None) -> dict[int, dict]:
     """批量读取多项目「按套工序时长/偏移」并归并（消除列表页 N+1）。"""
     from database import get_project_process_durations_batch as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_ids)
+    return getattr(_fn, "__wrapped__", _fn)(project_ids, month)
 
 
 def get_actuals_rich_by_node_ids(node_ids: list[int]) -> dict:
@@ -268,13 +285,24 @@ def get_manager_monthly_plan_map(project_id: int) -> dict[str, int]:
     return getattr(_fn, "__wrapped__", _fn)(project_id)
 
 
-def list_project_managers(project_id: int) -> list[dict]:
+def get_schedule_month_summary(project_id: int, manager: str | None = None) -> dict:
+    """项目排产的「月份分布」概览（v7.4）：{months, last_plan_month, legacy_rows}。
+
+    只统计排产工序白名单行（process_order 1..11）；供详情页展示
+    「本月是否已导入 / 数据是否为历史结转」。
+    """
+    from database import get_schedule_month_summary as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, manager)
+
+
+def list_project_managers(project_id: int, month: str | None = None) -> list[dict]:
     """列出项目负责人清单及概况（供「多负责人管理」弹窗使用）。
 
     每项：manager / monthly_plan / plan_rows / has_imported
+    v7.4：传 month 时 plan_rows / has_imported 回答「该负责人**本月**是否已导入排产」。
     """
     from database import list_project_managers as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id)
+    return getattr(_fn, "__wrapped__", _fn)(project_id, month)
 
 
 def get_ranking_manager_rows_by_month(month: str,
@@ -471,10 +499,12 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     today_s = str(date.today())
 
     # 一次性批量查询（消除 N+1：原逻辑每项目 2 次 DB 往返 → 现在全程仅 3 次）
+    # v7.4：三处批量查询统一带上当前列表月份 —— 「整体进度 / 风险等级」必须与列表的
+    #       月份口径一致，否则跨月共存的排产行会被相加、进度虚高。
     all_pids = [p["id"] for p in rows]
-    plans_map = get_node_plans_batch(all_pids)      # 1 次查询
-    actuals_map = get_node_actuals_batch(all_pids)  # 1 次查询
-    durations_map = get_project_process_durations_batch(all_pids)   # 1 次查询（工序时间规则升级）
+    plans_map = get_node_plans_batch(all_pids, month)             # 1 次查询
+    actuals_map = get_node_actuals_batch(all_pids)               # 1 次查询
+    durations_map = get_project_process_durations_batch(all_pids, month)   # 1 次查询（工序时间规则升级）
     # 按段填报（v7.1 行级化）：批量取回全部项目的段进度 → 参与节点状态判定
     # （按段提报未填满的行 → 进行中，不再判「逾期未完成」；表缺失/查询失败不阻塞列表）
     try:

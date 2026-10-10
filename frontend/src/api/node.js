@@ -12,7 +12,10 @@ export const fetchAllPersons = () =>
 export const fetchBigAreaPersons = () =>
   http.get('/projects/big-area-persons')
 
-export const fetchProject = (pid) => http.get(`/projects/${pid}`)
+// 项目详情（进度/风险）。v7.4：params 可带 { month }，按该排产归属月口径计算进度与风险，
+// 与「节点计划」页同月一致；不传则跨月汇总（历史行为）。
+export const fetchProject = (pid, params = {}) =>
+  http.get(`/projects/${pid}`, { params })
 
 // 看板指标（项目总览页 KPI 卡，支持调度令月份 month）
 export const fetchDashboardStats = (month) =>
@@ -48,6 +51,7 @@ export const importDispatch = (file, mapping, planMonth) => {
 }
 
 // 节点计划（多负责人 v6.0：params 可带 { manager } 切到单人视图，缺省为汇总视图）
+// v7.4 排产按月隔离：params 另可带 { month: 'YYYY-MM' } → 只取「该月导入的行 ∪ 未标注月行」
 export const fetchNodePlans = (pid, params = {}) =>
   http.get(`/projects/${pid}/node-plans`, { params })
 export const fetchProcessNodes = (pid, processName, params = {}) =>
@@ -62,14 +66,17 @@ export const saveSegmentProgress = (pid, processName, payload) =>
   http.post(`/projects/${pid}/nodes/${encodeURIComponent(processName)}/save-segments`, payload)
 
 // 多负责人管理（v6.0）
-export const fetchProjectManagers = (pid) => http.get(`/projects/${pid}/managers`)
+// v7.4：可带 month，使 plan_rows / has_imported 表示「该负责人本月是否已导入排产」
+export const fetchProjectManagers = (pid, month) =>
+  http.get(`/projects/${pid}/managers`, { params: month ? { month } : {} })
 export const setManagerMonthlyPlan = (pid, manager, monthlyPlan) =>
   http.put(`/projects/${pid}/managers/${encodeURIComponent(manager)}/monthly-plan`, {
     monthly_plan: monthlyPlan,
   })
 
-// 预警
-export const fetchAlerts = (pid) => http.get(`/projects/${pid}/alerts`)
+// 预警（v7.4：可带 month，按排产归属月口径）
+export const fetchAlerts = (pid, month) =>
+  http.get(`/projects/${pid}/alerts`, { params: month ? { month } : {} })
 
 // Excel 导入（排产）。多负责人 v6.0：可带 manager（归属负责人）+ monthlyPlan（该负责人本月计划数）
 // v7.2：可带 planMonth（本次排产归属月 'YYYY-MM'，默认当前自然月）——

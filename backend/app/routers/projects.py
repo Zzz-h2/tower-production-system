@@ -157,17 +157,23 @@ def list_big_area_persons(user: dict = Depends(get_current_user)):
 
 
 @router.get("/{pid}")
-def get_project(pid: int, user: dict = Depends(get_current_user)):
-    """项目详情（基本信息 / 进度 / 风险）。行级隔离：非本大区项目返回 404 防探测。"""
+def get_project(pid: int, month: Optional[str] = None,
+                user: dict = Depends(get_current_user)):
+    """项目详情（基本信息 / 进度 / 风险）。行级隔离：非本大区项目返回 404 防探测。
+
+    排产按月隔离（v7.4）：带 month 时进度/风险按该排产归属月口径计算（该月 ∪ 未标注月行），
+    与「节点计划」页同月一致；不带 month 时保持跨月汇总的历史行为。
+    """
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     require_project_access(project, user)
 
+    mth = month.strip() if month and month.strip() else None
     # 风险等级：基于 node_plans + node_actuals 实时判定
-    plans = db.get_node_plans(pid)
+    plans = db.get_node_plans(pid, None, mth)
     actuals = db.get_node_actuals(pid)
-    durations = db.get_project_process_durations(pid)   # 工序时间规则升级：按套时长/偏移
+    durations = db.get_project_process_durations(pid, None, mth)   # 工序时间规则升级：按套时长/偏移
     # 按段填报（v7.1 行级化）：按段提报的行（已完成段数>0）→ 进行中，不判「逾期未完成」（与弹窗口径一致）
     from ..services.node_service import load_node_segments
     rows = enrich_rows(plans, actuals, durations=durations, seg_map=load_node_segments(pid))
@@ -336,20 +342,24 @@ def delete_project(pid: int, user: dict = Depends(require_admin)):
 
 
 @router.get("/{pid}/managers")
-def list_project_managers(pid: int, user: dict = Depends(get_current_user)):
+def list_project_managers(pid: int, month: Optional[str] = None,
+                          user: dict = Depends(get_current_user)):
     """项目的负责人清单（供「多负责人管理」弹窗 / 详情筛选器使用）。行级隔离：非本大区项目返回 404。
 
     返回：{project_id, delivery_person, managers: [{manager, monthly_plan, plan_rows, has_imported}]}
+    排产按月隔离（v7.4）：带 month 时 plan_rows / has_imported 表示「该负责人本月是否已导入排产」。
     """
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     require_project_access(project, user)
+    mth = month.strip() if month and month.strip() else None
     return {
         "project_id": pid,
         "delivery_person": project.get("delivery_person") or "",
         "project_monthly_plan": int(project.get("monthly_plan") or 0),
-        "managers": db.list_project_managers(pid),
+        "month": mth,
+        "managers": db.list_project_managers(pid, mth),
     }
 
 
@@ -378,12 +388,20 @@ def set_manager_monthly_plan(pid: int, manager: str, payload: ManagerPlanRequest
 
 @router.get("/{pid}/node-plans")
 def get_node_plans_overview(pid: int, manager: Optional[str] = None,
+                            month: Optional[str] = None,
                             user: dict = Depends(get_current_user)):
     """节点计划总览（指标 / 工序卡片 / 时间轴 / 可见工序）。行级隔离：非本大区项目返回 404。
 
     多负责人（v6.0）：
       - manager 为空   → 汇总视图：全部负责人数据，月计划用 projects.monthly_plan 判定；
       - manager='张三' → 单人视图：仅该负责人名下行，月计划用其申报值判定。
+
+    排产按月隔离（v7.4）：
+      - month='YYYY-MM' → 只返回「该月导入的排产行」∪「未标注月行（独立工序 / 手动完成 /
+        v7.4 前的历史行）」，其他月份的行被隔离，避免跨月共用同一 (工序, 计划日) 时数量翻倍；
+      - month 为空 → 不限定月份（跨月汇总，行为与 v7.4 之前一致）。
+      响应额外返回月份口径元信息，供前端区分「本月已导入」「历史结转」：
+        month / month_imported / last_plan_month / plan_months / legacy_rows / carry_over
     """
     project = db.get_project_by_id(pid)
     if not project:
@@ -391,7 +409,8 @@ def get_node_plans_overview(pid: int, manager: Optional[str] = None,
     require_project_access(project, user)
 
     mgr = manager.strip() if manager and manager.strip() else None
-    plans = db.get_node_plans(pid, mgr)
+    mth = month.strip() if month and month.strip() else None
+    plans = db.get_node_plans(pid, mgr, mth)
     # actuals 按 node_plan_id 索引：plans 已按负责人过滤，多余 actual 项不会被引用，无需再过滤
     actuals = db.get_node_actuals(pid)
 
@@ -404,39 +423,58 @@ def get_node_plans_overview(pid: int, manager: Optional[str] = None,
 
     result = build_overview(pid, plans, actuals, monthly_plan=monthly_plan,
                             contract_count=project.get("contract_count"),
-                            durations=db.get_project_process_durations(pid, mgr))
+                            durations=db.get_project_process_durations(pid, mgr, mth))
     result["manager"] = mgr                          # 当前口径（null=汇总）
-    result["managers"] = db.list_project_managers(pid)  # 供前端渲染筛选器
+    result["managers"] = db.list_project_managers(pid, mth)  # 供前端渲染筛选器
+
+    # ---- v7.4 月份口径元信息（供前端提示「本月未导入 / 历史结转」）----
+    meta = db.get_schedule_month_summary(pid, mgr)
+    month_imported = bool(mth and meta["months"].get(mth))
+    result["month"] = mth
+    result["month_imported"] = month_imported
+    result["last_plan_month"] = meta["last_plan_month"]
+    result["plan_months"] = sorted(meta["months"].keys(), reverse=True)
+    result["legacy_rows"] = meta["legacy_rows"]
+    # carry_over：选了月份、本月尚未导入，但页面上还有「未标注月」的历史排产行（= 上月结转）
+    result["carry_over"] = bool(mth) and (not month_imported) and meta["legacy_rows"] > 0
     return result
 
 
 @router.get("/{pid}/nodes/{process_name}")
 def get_process_nodes(pid: int, process_name: str, manager: Optional[str] = None,
+                      month: Optional[str] = None,
                       user: dict = Depends(get_current_user)):
     """某工序节点列表（四分组 + 富化行）。行级隔离：非本大区项目返回 404。
 
     多负责人（v6.0）：带 manager 时只看该负责人名下的该工序节点（单独查看 / 单独提报）。
+    排产按月隔离（v7.4）：带 month 时只取该月导入的行 ∪ 未标注月行。
     """
     project = db.get_project_by_id(pid)
     require_project_access(project, user)
     mgr = manager.strip() if manager and manager.strip() else None
-    plans = db.get_node_plans(pid, mgr)
+    mth = month.strip() if month and month.strip() else None
+    plans = db.get_node_plans(pid, mgr, mth)
     actuals = db.get_node_actuals(pid)
     return build_process_detail(process_name, plans, actuals,
                                 contract_count=project.get("contract_count"),
-                                durations=db.get_project_process_durations(pid, mgr),
+                                durations=db.get_project_process_durations(pid, mgr, mth),
                                 project_id=pid)
 
 
 @router.get("/{pid}/alerts")
-def get_alerts(pid: int, user: dict = Depends(get_current_user)):
-    """节点预警列表（逾期未完成 / 部分完成 / 进行中 重点节点）。行级隔离：非本大区项目返回 404。"""
+def get_alerts(pid: int, month: Optional[str] = None,
+               user: dict = Depends(get_current_user)):
+    """节点预警列表（逾期未完成 / 部分完成 / 进行中 重点节点）。行级隔离：非本大区项目返回 404。
+
+    排产按月隔离（v7.4）：带 month 时只看该月导入的行 ∪ 未标注月行。
+    """
     project = db.get_project_by_id(pid)
     require_project_access(project, user)
-    plans = db.get_node_plans(pid)
+    mth = month.strip() if month and month.strip() else None
+    plans = db.get_node_plans(pid, None, mth)
     actuals = db.get_node_actuals(pid)
     from ..services.node_service import enrich_rows, load_node_segments
-    rows = enrich_rows(plans, actuals, durations=db.get_project_process_durations(pid),
+    rows = enrich_rows(plans, actuals, durations=db.get_project_process_durations(pid, None, mth),
                        seg_map=load_node_segments(pid))
     from ..core.config import INDEPENDENT_PROCESS_NAMES
     # 独立工序（累计完成/累计发运）不参与预警：无日期语义，仅作为参考指标

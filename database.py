@@ -36,6 +36,31 @@ SCHEDULE_ORDER_MAX = len(SCHEDULE_PROCESS_NAMES)
 MANUAL_COMPLETE_ORDER = 99
 
 
+def _month_scope(alias: str, month: str | None, args: list) -> str:
+    """v7.4 排产按月隔离：生成 SQL 片段 ``AND (<alias>plan_month <=> %s OR <alias>plan_month IS NULL)``。
+
+    统一口径（读 / 写完全一致，保证「归档集合 == 删除集合」「读到的行 == 写过的行」）：
+      - ``month`` 指定时：命中该月的行 **∪** 「未标注月」行（plan_month IS NULL）。
+        后者 = 独立工序 90/91、手动完成占位行 99、以及 v7.4 之前导入的历史排产行。
+        这样历史数据不会凭空消失（零回归），而**其他月份**的行被彻底隔离（不再跨月累加/翻倍）。
+      - ``month`` 为 None：不加任何条件（跨月汇总视图，行为与 v7.4 之前完全一致）。
+
+    写入侧复用同一片段即得到「首次按月导入接管历史未标注行」的语义：
+    项目在本月重新导入排产 → 该项目的历史未标注排产行被本月吸收（同 manager 的历史行同理由
+    ``manager <=> %s OR manager IS NULL`` 吸收），此后该项目严格按月隔离。
+
+    Args:
+        alias: 表别名前缀，如 ``''`` 或 ``'pnp.'``
+        month: 'YYYY-MM'；None/空 = 不限定月份
+        args: 参数列表（命中时会 append 一次 month）
+    """
+    m = str(month).strip() if month else ''
+    if not m:
+        return ""
+    args.append(m)
+    return f" AND ({alias}plan_month <=> %s OR {alias}plan_month IS NULL)"
+
+
 def get_connection() -> pymysql.Connection:
     """获取 MySQL 数据库连接，自动开启外键约束"""
     conn = pymysql.connect(
@@ -647,6 +672,14 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
       - 被本次替换掉的行先原样存入 process_node_plans_history 再删除（替换而非销毁），
         历史月份明细可回溯、可恢复（backend/scripts/restore_schedule_month.py）。
 
+    v7.4 按月隔离（重大语义变更）：
+      - 删除范围 = `项目[+负责人] × 本次归属月`，**不再**清空该项目全部排产行：
+        重新导入某月只替换该月的行，**其他月份的行及其已填报进度/按段进度完全不受影响**；
+      - 首次按月导入时，会顺带接管该项目「未标注月」的历史排产行（plan_month IS NULL），
+        完成一次性的月份归属，之后严格按月隔离；
+      - 读路径用同一口径过滤（`plan_month = 本月 OR plan_month IS NULL`），因此
+        跨月不会出现同一 (工序, 计划日) 的 plan_qty 翻倍。
+
     Args:
         project_id: 项目ID
         plans: list[dict]，每项含
@@ -669,7 +702,8 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # 删除范围：指定 manager 时只删该负责人名下的排产工序行（不含独立工序 90/91）
+            # 删除范围：指定 manager 时只删该负责人名下的排产工序行（不含独立工序 90/91）；
+            # v7.4 再叠加月份作用域（本月 ∪ 未标注月），其他月份的行保持不动。
             del_cond = (
                 "project_id = %s "
                 "AND process_name NOT IN (%s, %s)"
@@ -681,10 +715,13 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                 # 导致汇总视图 plan_qty 翻倍。首个导入的负责人会接管这些历史行。
                 del_cond += " AND (manager <=> %s OR manager IS NULL)"
                 del_args.append(str(manager).strip())
+            # v7.4：叠加月份作用域——只替换「本次归属月」的行（并接管未标注月的历史行）
+            del_cond += _month_scope("", month_val, del_args)
+
 
             # v7.2：删除前先按**完全相同的 WHERE**归档一份（归档集合 == 删除集合，不重不漏）。
-            # 主表因此永远只保留该（负责人名下的）最新一份排产，读路径无需感知月份，
-            # 规避跨月行共存导致的 plan_qty 翻倍；历史明细在归档表按月可回溯。
+            # v7.4：该 WHERE 已含月份作用域——主表按月共存，被「本月重导」替换掉的旧行归档留痕，
+            # 其他月份的行既不归档也不删除（原样保留，历史月份明细与进度均不受影响）。
             cursor.execute(f"SELECT COUNT(*) AS c FROM process_node_plans WHERE {del_cond}",
                            tuple(del_args))
             _will_delete = int(cursor.fetchone()['c'] or 0)
@@ -705,6 +742,8 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
             if manager is not None:
                 snap_cond += " AND (pnp.manager <=> %s OR pnp.manager IS NULL)"
                 snap_args.append(str(manager).strip())
+            snap_cond += _month_scope("pnp.", month_val, snap_args)
+
             cursor.execute(
                 "SELECT pnp.process_name, pnp.plan_date, pnp.manager, nap.actual_qty, nap.report_date "
                 "FROM process_node_plans pnp JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id "
@@ -730,12 +769,15 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
             cursor.execute(f"DELETE FROM process_node_plans WHERE {del_cond}", tuple(del_args))
 
             # 工序时长表（按套）与 plan 行同范围覆盖式重建，避免重导残留孤儿行
+            # v7.4：同样按月作用域——只重建本次归属月的时长行（∪ 未标注月历史行）
             dur_cond = "project_id = %s"
             dur_args: list = [project_id]
             if manager is not None:
                 dur_cond += " AND (manager <=> %s OR manager IS NULL)"
                 dur_args.append(str(manager).strip())
+            dur_cond += _month_scope("", month_val, dur_args)
             cursor.execute(f"DELETE FROM project_process_durations WHERE {dur_cond}", tuple(dur_args))
+
 
             if stale_plan_ids:
                 # 只删「本次刚被覆盖掉的 plan 行」挂着的完成量，不动其他任何实际进度
@@ -765,8 +807,9 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
             if durations:
                 cursor.executemany("""
                     INSERT INTO project_process_durations
-                        (project_id, manager, set_seq, process_name, plan_date, duration_days, offset_days)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (project_id, manager, set_seq, process_name, plan_date, duration_days, offset_days,
+                         plan_month)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, [(
                     project_id,
                     mgr_val,
@@ -775,7 +818,9 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                     (str(d['plan_date'])[:10] if d.get('plan_date') else None),
                     (int(d['duration_days']) if d.get('duration_days') is not None else None),
                     (int(d['offset_days']) if d.get('offset_days') is not None else None),
+                    month_val,                          # v7.4 排产归属月（与 plan 行同范围）
                 ) for d in durations])
+
             conn.commit()
 
             # 「已完成」文本识别回填：只有带 actual_qty 的项才走这段，
@@ -790,8 +835,11 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                 cursor.execute(
                     "SELECT id FROM process_node_plans "
                     "WHERE project_id = %s AND process_name = %s AND plan_date = %s "
-                    "  AND manager <=> %s LIMIT 1",   # <=> : NULL 安全等值（manager IS NULL 也能匹配）
-                    (project_id, proc_name, plan_date, mgr_val),
+                    "  AND manager <=> %s AND plan_month <=> %s LIMIT 1",
+                    # <=> : NULL 安全等值（manager / plan_month 为 NULL 也能精确匹配）
+                    # v7.4：plan_month 必须**严格**匹配本次归属月——不能放宽到「未标注月」，
+                    # 否则会把其他月份的同行错挂。
+                    (project_id, proc_name, plan_date, mgr_val, month_val),
                 )
                 row = cursor.fetchone()
                 if not row:
@@ -810,8 +858,8 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                     continue
                 cursor.execute(
                     "SELECT id FROM process_node_plans WHERE project_id = %s AND process_name = %s "
-                    "AND plan_date = %s AND manager <=> %s LIMIT 1",
-                    (project_id, pn, pd, mgr_val),
+                    "AND plan_date = %s AND manager <=> %s AND plan_month <=> %s LIMIT 1",
+                    (project_id, pn, pd, mgr_val, month_val),
                 )
                 row = cursor.fetchone()
                 if row:
@@ -824,11 +872,15 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
     return len(plans)
 
 
-def get_project_process_durations(project_id: int, manager: str | None = None) -> dict:
+def get_project_process_durations(project_id: int, manager: str | None = None,
+                                 month: str | None = None) -> dict:
     """读取项目的「按套工序时长/偏移」，按 (process_name, plan_date) 归并后返回。
 
     同一 (工序, 计划日) 若来自多套（排产按 plan_date 聚合行的情形，实测约 4% 行），
     取各套的**中位数**作为该行代表值——95%+ 的行本就与「套」1:1，中位数对合并行稳健。
+
+    month（v7.4）：与排产行同一月份口径（该月 ∪ 未标注月），保证「读到的时长 == 读到的计划行」；
+    None=不限定月份。
 
     Returns:
         {(process_name, 'YYYY-MM-DD'): {"duration_days": int|None, "offset_days": int|None}}
@@ -843,6 +895,7 @@ def get_project_process_durations(project_id: int, manager: str | None = None) -
             if manager is not None:
                 sql += " AND manager <=> %s"
                 args.append(str(manager).strip())
+            sql += _month_scope("", month, args)
             cursor.execute(sql, tuple(args))
             raw = [dict(r) for r in cursor.fetchall()]
     finally:
@@ -874,10 +927,12 @@ def _merge_duration_rows(rows: list[dict]) -> dict:
     }
 
 
-def get_project_process_durations_batch(project_ids: list[int]) -> dict[int, dict]:
+def get_project_process_durations_batch(project_ids: list[int],
+                                        month: str | None = None) -> dict[int, dict]:
     """批量读取多项目「按套工序时长/偏移」并归并：{project_id: {(pn,date): {...}}}。
 
     用于项目列表风险等级计算，避免逐项目查询造成 N+1（按 900 分片）。
+    month（v7.4）：与 get_node_plans_batch 同一月份口径，避免「计划行按月过滤、时长跨月混用」。
     """
     if not project_ids:
         return {}
@@ -887,9 +942,11 @@ def get_project_process_durations_batch(project_ids: list[int]) -> dict[int, dic
         with conn.cursor() as cur:
             for chunk in _chunked(project_ids):
                 fmt = ",".join(["%s"] * len(chunk))
-                cur.execute(
-                    f"SELECT project_id, process_name, plan_date, duration_days, offset_days "
-                    f"FROM project_process_durations WHERE project_id IN ({fmt})", chunk)
+                args: list = list(chunk)
+                sql = (f"SELECT project_id, process_name, plan_date, duration_days, offset_days "
+                       f"FROM project_process_durations WHERE project_id IN ({fmt})")
+                sql += _month_scope("", month, args)
+                cur.execute(sql, tuple(args))
                 for row in cur.fetchall():
                     by_pid.setdefault(int(row['project_id']), []).append(dict(row))
     finally:
@@ -1006,16 +1063,24 @@ def update_independent_contract_qty(project_id: int, contract_count) -> int:
         conn.close()
 
 
-def get_node_plans(project_id: int, manager: str | None = None) -> list[dict]:
+def get_node_plans(project_id: int, manager: str | None = None,
+                   month: str | None = None) -> list[dict]:
     """获取项目的工序节点计划，按 工序顺序 + 计划日期 排序。
 
     多负责人（v6.0）：
       - manager=None（默认）→ 返回该项目**全部**行（汇总视图口径，含历史 NULL 行）
       - manager='张三'      → 只返回该负责人名下行（单人视图口径，历史 NULL 行不可见）
 
+    按月隔离（v7.4）：
+      - month='YYYY-MM' → 只返回「该月导入的排产行」∪「未标注月行（plan_month IS NULL：
+        独立工序 90/91、手动完成占位行 99、v7.4 前的历史排产行）」。
+        其他月份的行被隔离，避免跨月共用同一 (工序, 计划日) 时 plan_qty 翻倍。
+      - month=None → 不加月份条件（跨月汇总，行为与 v7.4 之前一致）。
+
     Args:
         project_id: 项目ID
         manager: 负责人姓名；None=不区分负责人（汇总）
+        month: 排产归属月 'YYYY-MM'；None=不限定月份
 
     Returns:
         list[dict]: 节点计划行
@@ -1028,6 +1093,7 @@ def get_node_plans(project_id: int, manager: str | None = None) -> list[dict]:
             if manager is not None:
                 sql += " AND manager <=> %s"
                 args.append(str(manager).strip())
+            sql += _month_scope("", month, args)
             sql += " ORDER BY process_order, plan_date"
             cursor.execute(sql, tuple(args))
             return [dict(row) for row in cursor.fetchall()]
@@ -1108,20 +1174,23 @@ def get_manager_monthly_plan_map(project_id: int) -> dict[str, int]:
         conn.close()
 
 
-def list_project_managers(project_id: int) -> list[dict]:
+def list_project_managers(project_id: int, month: str | None = None) -> list[dict]:
     """列出项目的负责人清单及其导入/计划概况（供「多负责人管理」弹窗使用）。
 
     负责人来源（取并集，保序：先 delivery_person 拆分结果，再补 DB 中已存在但未在
     delivery_person 里的负责人，避免调度令改名后旧数据负责人「消失」）：
       1. projects.delivery_person 按 '/' 拆分
-      2. process_node_plans 中该项目已出现的 manager 值（非空）
+      2. process_node_plans 中该项目已出现的 manager 值（非空，**不分月份**：只作姓名来源）
+
+    按月隔离（v7.4）：plan_rows / has_imported 回答的是「**该负责人本月**导入了多少排产行」；
+    不传 month 时退回「曾经导入过」口径（历史行为）。
 
     Returns:
         list[dict]，每项：
           manager(str)       负责人姓名
           monthly_plan(int)  该负责人申报的本月计划数（未申报=0）
           plan_rows(int)     该负责人名下已导入的排产工序节点行数（不含独立工序 90/91）
-          has_imported(bool) 是否已导入过排产计划
+          has_imported(bool) 是否已导入过排产计划（带 month 时 = 本月是否已导入）
     """
     conn = get_connection()
     try:
@@ -1151,15 +1220,17 @@ def list_project_managers(project_id: int) -> list[dict]:
             #    ⚠️ v7.2 判定口径必须是排产工序白名单（process_order 1..11），不能用
             #    「process_name NOT IN (90,91)」——「手动完成」占位行（process_order=99,
             #    process_name='附件安装'）也满足后者，会把只做过手动完成的项目误判为「已导入排产」。
+            #    v7.4：叠加月份作用域（本月 ∪ 未标注月），使「本月未导入」可被正确识别。
             row_counts: dict[str, int] = {}
             if names:
-                cursor.execute("""
-                    SELECT manager, COUNT(*) AS c FROM process_node_plans
-                    WHERE project_id = %s
-                      AND process_order BETWEEN %s AND %s
-                      AND manager IS NOT NULL
-                    GROUP BY manager
-                """, (project_id, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX))
+                args: list = [project_id, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
+                sql = ("SELECT manager, COUNT(*) AS c FROM process_node_plans "
+                       "WHERE project_id = %s "
+                       "  AND process_order BETWEEN %s AND %s "
+                       "  AND manager IS NOT NULL")
+                sql += _month_scope("", month, args)
+                sql += " GROUP BY manager"
+                cursor.execute(sql, tuple(args))
                 row_counts = {str(r["manager"]).strip(): int(r["c"]) for r in cursor.fetchall()}
 
             plan_map = get_manager_monthly_plan_map(project_id)
@@ -1526,10 +1597,51 @@ def _chunked(seq: list[int], size: int = 900) -> list[list[int]]:
     return [seq[i:i + size] for i in range(0, len(seq), size)]
 
 
-def get_node_plans_batch(project_ids: list[int]) -> dict[int, list[dict]]:
+def get_schedule_month_summary(project_id: int, manager: str | None = None) -> dict:
+    """项目的「排产月份分布」概览（v7.4 排产按月隔离的展示口径）。
+
+    只统计排产工序白名单行（process_order 1..11），回答三个问题：
+      - 该项目**哪些月份**导入过排产？各多少行？（months / last_plan_month）
+      - 该项目还剩多少「未标注月」的历史排产行？（legacy_rows → 首次按月导入会被接管）
+    手动完成占位行 99 与独立工序 90/91 不属于排产计划，不计入。
+
+    Returns:
+        {"months": {'YYYY-MM': 行数}, "last_plan_month": str|None, "legacy_rows": int}
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = ("SELECT plan_month, COUNT(*) AS c FROM process_node_plans "
+                   "WHERE project_id = %s AND process_order BETWEEN %s AND %s")
+            args: list = [project_id, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
+            if manager is not None:
+                sql += " AND manager <=> %s"
+                args.append(str(manager).strip())
+            sql += " GROUP BY plan_month"
+            cursor.execute(sql, tuple(args))
+            months: dict[str, int] = {}
+            legacy = 0
+            for r in cursor.fetchall():
+                if r["plan_month"]:
+                    months[str(r["plan_month"])] = int(r["c"])
+                else:
+                    legacy = int(r["c"])
+            return {
+                "months": months,
+                "last_plan_month": max(months) if months else None,
+                "legacy_rows": legacy,
+            }
+    finally:
+        conn.close()
+
+
+def get_node_plans_batch(project_ids: list[int],
+                         month: str | None = None) -> dict[int, list[dict]]:
     """批量查询多个项目的工序节点计划，返回 {project_id: [plan, ...]}（消除列表页 N+1）。
 
     按 900 分片执行 IN 查询，规避 MySQL 单语句占位符上限。
+    month（v7.4）：按月隔离——只取「该月导入的行 ∪ 未标注月行」，None=不限定月份。
+    ⚠️ 项目列表的「整体进度 / 风险」由本结果聚合，忘记传 month 会让跨月行相加、进度虚高。
     """
     if not project_ids:
         return {}
@@ -1539,11 +1651,12 @@ def get_node_plans_batch(project_ids: list[int]) -> dict[int, list[dict]]:
             result: dict[int, list[dict]] = {}
             for chunk in _chunked(project_ids):
                 fmt = ",".join(["%s"] * len(chunk))
-                cur.execute(f"""
-                    SELECT * FROM process_node_plans
-                    WHERE project_id IN ({fmt})
-                    ORDER BY project_id, process_order, plan_date
-                """, chunk)
+                args: list = list(chunk)
+                sql = (f"SELECT * FROM process_node_plans "
+                       f"WHERE project_id IN ({fmt})")
+                sql += _month_scope("", month, args)
+                sql += " ORDER BY project_id, process_order, plan_date"
+                cur.execute(sql, tuple(args))
                 for row in cur.fetchall():
                     d = dict(row)
                     result.setdefault(int(d["project_id"]), []).append(d)
@@ -1587,39 +1700,30 @@ def get_attachment_plans_by_month(month_start: str, month_end: str, month: str |
 
     month 传入时约束项目 created_at 月份（调度令月份口径，三页联动一致），并带回 delivery_person。
     big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
+    month（v7.4）：同时叠加排产归属月作用域（该月 ∪ 未标注月）——
+    同一 (项目, 计划日) 可能同时存在其他月份导入的行，不隔离会重复计数；
+    「手动完成」占位行（plan_month NULL）始终可见。
     """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
+            sql = """
+                SELECT pnp.id, pnp.project_id, pnp.process_name, pnp.plan_date, pnp.plan_qty,
+                       p.delivery_person
+                FROM process_node_plans pnp
+                JOIN projects p ON pnp.project_id = p.id
+                WHERE pnp.process_name = '附件安装'
+                  AND pnp.plan_date >= %s AND pnp.plan_date < %s
+            """
+            params: list = [month_start, month_end]
             if month:
-                sql = """
-                    SELECT pnp.id, pnp.project_id, pnp.process_name, pnp.plan_date, pnp.plan_qty,
-                           p.delivery_person
-                    FROM process_node_plans pnp
-                    JOIN projects p ON pnp.project_id = p.id
-                    WHERE pnp.process_name = '附件安装'
-                      AND DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
-                      AND pnp.plan_date >= %s AND pnp.plan_date < %s
-                """
-                params = [month, month_start, month_end]
-                if big_area_person:
-                    sql += " AND p.big_area_person = %s"
-                    params.append(big_area_person)
-                cur.execute(sql, params)
-            else:
-                sql = """
-                    SELECT pnp.id, pnp.project_id, pnp.process_name, pnp.plan_date, pnp.plan_qty,
-                           p.delivery_person
-                    FROM process_node_plans pnp
-                    JOIN projects p ON pnp.project_id = p.id
-                    WHERE pnp.process_name = '附件安装'
-                      AND pnp.plan_date >= %s AND pnp.plan_date < %s
-                """
-                params = [month_start, month_end]
-                if big_area_person:
-                    sql += " AND p.big_area_person = %s"
-                    params.append(big_area_person)
-                cur.execute(sql, params)
+                sql += " AND DATE_FORMAT(p.created_at, '%%Y-%%m') = %s"
+                params.append(month)
+            if big_area_person:
+                sql += " AND p.big_area_person = %s"
+                params.append(big_area_person)
+            sql += _month_scope("pnp.", month, params)
+            cur.execute(sql, tuple(params))
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -1676,10 +1780,13 @@ def get_delivery_persons_by_projects(project_ids: list[int]) -> dict[int, str]:
 
 
 def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: str,
-                                      big_area_person: str | None = None) -> list[dict]:
+                                      big_area_person: str | None = None,
+                                      month: str | None = None) -> list[dict]:
     """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。
 
     big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
+    month（v7.4）：排产归属月作用域（该月 ∪ 未标注月）——同一 (项目, 计划日) 可能存在其他
+    月份导入的行，不隔离会在「逾期/提前明细」里重复计数。
     """
     conn = get_connection()
     try:
@@ -1695,12 +1802,13 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
                 WHERE (n.manager = %s OR (n.manager IS NULL AND p.delivery_person = %s))
                   AND n.plan_date >= %s AND n.plan_date < %s
             """
-            params = [person, person, month_start, month_end]
+            params: list = [person, person, month_start, month_end]
             if big_area_person:
                 sql += " AND p.big_area_person = %s"
                 params.append(big_area_person)
+            sql += _month_scope("n.", month, params)
             sql += " ORDER BY p.id, n.process_order, n.plan_date"
-            cur.execute(sql, params)
+            cur.execute(sql, tuple(params))
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -1775,6 +1883,10 @@ def get_ranking_manager_rows_by_month(month: str,
                 declared[(int(r["project_id"]), str(r["manager"]).strip())] = int(r["monthly_plan"] or 0)
 
             # 3) 各负责人名下『附件安装』实际完成量
+            #    v7.4：叠加排产归属月作用域（该月 ∪ 未标注月），避免其他月份导入的
+            #    「附件安装」行与手动完成占位行共同存在时把完成量重复计入。
+            actual_args: list = list(pids)
+            actual_month_sql = _month_scope("pnp.", month, actual_args)
             cur.execute(f"""
                 SELECT pnp.project_id, pnp.manager, SUM(nap.actual_qty) AS total_actual
                 FROM process_node_plans pnp
@@ -1782,8 +1894,9 @@ def get_ranking_manager_rows_by_month(month: str,
                 WHERE pnp.project_id IN ({ph})
                   AND pnp.process_name = '附件安装'
                   AND pnp.manager IS NOT NULL
+                  {actual_month_sql}
                 GROUP BY pnp.project_id, pnp.manager
-            """, pids)
+            """, tuple(actual_args))
             actuals: dict[tuple[int, str], int] = {}
             for r in cur.fetchall():
                 actuals[(int(r["project_id"]), str(r["manager"]).strip())] = int(r["total_actual"] or 0)
@@ -1833,6 +1946,10 @@ def get_ranking_summary_by_month(month: str, big_area_person: str | None = None)
     try:
         with conn.cursor() as cur:
             ba_sql = " AND p.big_area_person = %s" if big_area_person else ""
+            # v7.4：完成侧按月隔离的 WHERE 片段（占位符落在 act 子查询内，参数顺序见下方 params）
+            _ph: list = []
+            act_month_sql = _month_scope("pnp.", month, _ph)
+            act_month_args = list(_ph)      # [] 或 [month]
             sql = f"""
                 SELECT plan.delivery_person,
                        plan.total_plan,
@@ -1859,6 +1976,7 @@ def get_ranking_summary_by_month(month: str, big_area_person: str | None = None)
                       AND p.delivery_person IS NOT NULL AND TRIM(p.delivery_person) <> ''
                       AND p.delivery_person NOT REGEXP '^[0-9]+$'
                       {ba_sql}
+                      {act_month_sql}
                     GROUP BY p.delivery_person
                 ) act ON act.delivery_person = plan.delivery_person
                 ORDER BY plan.total_plan DESC
@@ -1869,6 +1987,8 @@ def get_ranking_summary_by_month(month: str, big_area_person: str | None = None)
             params.append(month)
             if big_area_person:
                 params.append(big_area_person)
+            # v7.4：完成侧同样按排产归属月隔离（该月 ∪ 未标注月）
+            params.extend(act_month_args)
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
     finally:
