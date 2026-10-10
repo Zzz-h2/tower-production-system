@@ -317,6 +317,45 @@ function onFilterClear(field) {
   onFilterChange()
 }
 
+/**
+ * 重新拉取筛选下拉选项，并校验当前选中值是否仍然有效。
+ *
+ * 用于「项目删除 / 编辑 / 新增 / 导入」之后：这些操作会改变交付负责人、大区负责人集合。
+ * 若不刷新，已失效的选中值会被 el-select（单值 + filterable）原样渲染成标签，
+ * 表现为「项目已删除，筛选栏仍残留旧记录，列表恒 0 条」。
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.reload=true] 清除了失效值时是否立即重跑列表查询
+ * @returns {Promise<boolean>} 是否清除了失效的筛选值
+ */
+async function refreshFilterOptions({ reload = true } = {}) {
+  await Promise.all([store.loadAllPersons(), store.loadAllBigAreaPersons()])
+  const cleared = store.reconcilePersonFilter({
+    // 大区账号的区域锁定值受后端强制隔离，不参与「失效清理」
+    lockedBigArea: auth.isAdmin ? '' : auth.lockedBigAreaName,
+  })
+  // store.filters 是筛选值的唯一来源，清空后同步回本地表单
+  filterForm.person = store.filters.person
+  filterForm.bigAreaPerson = store.filters.bigAreaPerson
+  if (!cleared.length) return false
+
+  ElMessage.warning(
+    `「${cleared.map((c) => c.value).join('、')}」已不存在，已自动清除对应筛选条件`
+  )
+  if (reload) {
+    store.pagination.page = 1
+    store.loadProjects({
+      keyword: filterForm.keyword,
+      person: filterForm.person,
+      bigAreaPerson: filterForm.bigAreaPerson,
+      status: filterForm.status,
+      page: 1,
+    })
+    store.loadDashboard()
+  }
+  return true
+}
+
 // 刷新 = 重置全部筛选条件 + 回到第 1 页 + 加载全量（保留共享月份）
 function onRefresh() {
   filterForm.keyword = ''
@@ -327,6 +366,8 @@ function onRefresh() {
   store.pagination.page = 1
   store.loadProjects({ keyword: '', person: '', bigAreaPerson: filterForm.bigAreaPerson, status: 'all', page: 1 })
   store.loadDashboard()
+  // 手动刷新时一并重取下拉选项，保证选项与被删改的项目同步
+  refreshFilterOptions({ reload: false })
 }
 
 // 月份切换：三页联动（共享 store.filters.month）→ 列表 + KPI 同步刷新
@@ -406,20 +447,39 @@ async function onDelete(row) {
     await deleteProjectApi(row.id)
     ElMessage.success(`项目「${row.project_name}」已删除`)
     // 删除后回到第 1 页并刷新（避免当前页数据不足）
-    store.loadProjects({ page: 1 })
+    store.pagination.page = 1
+    // 被删项目可能带走最后一位交付负责人 → 先重取选项并清理失效选中值，再刷列表
+    await refreshFilterOptions({ reload: false })
+    store.loadProjects({
+      page: 1,
+      person: filterForm.person,
+      bigAreaPerson: filterForm.bigAreaPerson,
+    })
     store.loadDashboard()
   } catch (e) {
     // 404/500 已由 axios 拦截器统一提示
   }
 }
 
-function onUpdated() {
-  store.loadProjects({ page: store.pagination.page })
+async function onUpdated() {
+  // 编辑可能改动交付负责人/大区负责人 → 同步刷新下拉选项并清理失效值
+  await refreshFilterOptions({ reload: false })
+  store.loadProjects({
+    page: store.pagination.page,
+    person: filterForm.person,
+    bigAreaPerson: filterForm.bigAreaPerson,
+  })
   store.loadDashboard()
 }
 
-function onDispatchImported(res) {
-  store.loadProjects({ page: 1 })
+async function onDispatchImported(res) {
+  // 导入会批量新增项目/负责人 → 同步刷新下拉选项并清理失效值
+  await refreshFilterOptions({ reload: false })
+  store.loadProjects({
+    page: 1,
+    person: filterForm.person,
+    bigAreaPerson: filterForm.bigAreaPerson,
+  })
   store.loadDashboard()
   // 调度令导入后：若后端已自动开通大区账号则提示数量，否则提示联系管理员发放密码
   const accountsReady = Number(res?.accounts_ready || 0)
@@ -429,18 +489,24 @@ function onDispatchImported(res) {
     ElMessage.info('导入成功，可联系管理员为相应大区账号发放密码')
   }
 }
-function onAdded() {
+async function onAdded() {
+  await refreshFilterOptions({ reload: false })
   store.loadProjects({ page: 1 })
 }
 
-onMounted(() => {
+onMounted(async () => {
   store.ensureMonth()            // 默认共享月份 = 当前自然月
-  store.loadAllPersons()         // 加载全量交付负责人（下拉框数据源）
-  store.loadAllBigAreaPersons()  // 加载全量大区负责人（下拉框数据源）
   // 大区账号：区域锁定，前端筛选同步锁定（隐藏下拉框；后端同样强制隔离，此处仅保持 UX 一致）
   filterForm.bigAreaPerson = auth.isAdmin ? '' : auth.lockedBigAreaName
+  // 先重取下拉选项并清理失效选中值，再加载列表：
+  // Pinia 未启用持久化，但筛选值在本次会话内跨路由留存，可能指向已被删除项目的负责人。
+  await refreshFilterOptions({ reload: false })
   store.loadDashboard()
-  store.loadProjects({ page: 1, bigAreaPerson: filterForm.bigAreaPerson })
+  store.loadProjects({
+    page: 1,
+    person: filterForm.person,
+    bigAreaPerson: filterForm.bigAreaPerson,
+  })
 })
 </script>
 

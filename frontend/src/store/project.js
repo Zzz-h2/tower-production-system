@@ -19,6 +19,8 @@ export const useProjectStore = defineStore('project', {
 
     allPersons: [],       // 全量交付负责人（下拉框数据源，与筛选结果隔离）
     allBigAreaPersons: [], // 全量大区负责人（下拉框数据源，与筛选结果隔离）
+    personsLoaded: false,        // 下拉选项是否已成功加载（失败时不得据此清理筛选值）
+    bigAreaPersonsLoaded: false,
 
     // 排产工序配置（启动时拉取一次，前端唯一来源；不再手工复制 11 道工序/工期）
     scheduleConfig: {
@@ -105,14 +107,21 @@ export const useProjectStore = defineStore('project', {
       }
     },
 
-    /** 加载全量交付负责人（下拉框数据源，与筛选结果隔离）。 */
+    /**
+     * 加载全量交付负责人（下拉框数据源，与筛选结果隔离）。
+     * @returns {Promise<boolean>} 是否加载成功（失败时不得据此判定筛选值失效）
+     */
     async loadAllPersons() {
       try {
         const res = await fetchAllPersons()
         this.allPersons = res.items || []
+        this.personsLoaded = true
+        return true
       } catch (err) {
-        // 错误已由 axios 拦截器统一提示；兜底置空
+        // 错误已由 axios 拦截器统一提示；兜底置空但不置 loaded（避免误清筛选值）
         this.allPersons = []
+        this.personsLoaded = false
+        return false
       }
     },
 
@@ -121,10 +130,48 @@ export const useProjectStore = defineStore('project', {
       try {
         const res = await fetchBigAreaPersons()
         this.allBigAreaPersons = res.items || []
+        this.bigAreaPersonsLoaded = true
+        return true
       } catch (err) {
-        // 错误已由 axios 拦截器统一提示；兜底置空
+        // 错误已由 axios 拦截器统一提示；兜底置空但不置 loaded（避免误清筛选值）
         this.allBigAreaPersons = []
+        this.bigAreaPersonsLoaded = false
+        return false
       }
+    },
+
+    /**
+     * 下拉选项重载后，校验当前筛选选中值是否仍然存在于存活选项中。
+     *
+     * 背景：筛选值（person / bigAreaPerson）是自由字符串，项目删除/改名后该值可能
+     * 已不存在；el-select 单值 + filterable 会把失效值**原样渲染成标签**，
+     * 导致「项目已删除，筛选栏仍残留旧记录，列表恒 0 条」。此方法负责清空这类孤儿值。
+     *
+     * 安全边界：
+     *   - 仅在「选项确实加载成功」时校验（加载失败会把列表置空，此时清空会误伤）；
+     *   - 大区账号的区域锁定值（lockedBigArea）受后端强制隔离，不参与校验。
+     *
+     * @param {object} [opts]
+     * @param {string} [opts.lockedBigArea=''] 大区账号锁定的区域名（非空时跳过校验）
+     * @returns {Array<{label:string,value:string}>} 被清空的筛选项（供上层提示）
+     */
+    reconcilePersonFilter({ lockedBigArea = '' } = {}) {
+      const cleared = []
+
+      if (this.personsLoaded && this.filters.person
+          && !this.allPersons.includes(this.filters.person)) {
+        cleared.push({ label: '交付负责人', value: this.filters.person })
+        this.filters.person = ''
+      }
+
+      const areaLocked = !!lockedBigArea && this.filters.bigAreaPerson === lockedBigArea
+      if (!areaLocked && this.bigAreaPersonsLoaded && this.filters.bigAreaPerson
+          && !this.allBigAreaPersons.includes(this.filters.bigAreaPerson)) {
+        cleared.push({ label: '大区负责人', value: this.filters.bigAreaPerson })
+        this.filters.bigAreaPerson = ''
+      }
+
+      return cleared
     },
 
     /** 手动添加项目，成功后刷新列表（保留当前筛选/分页）。 */
