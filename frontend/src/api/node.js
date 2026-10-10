@@ -104,13 +104,3 @@ export const fetchManualCompletes = (pid, month) =>
 // 删除一条手动完成记录（纠正误录 / 减少套数）；id = node_plan_id
 export const deleteManualComplete = (pid, nodePlanId) =>
   http.delete(`/projects/${pid}/manual-completes/${nodePlanId}`)
-
-// 「预计完成」登记（2026-10-10 新增）：即将完成但还没有排产计划的项目，登记「预计完成日期 + 当日套数」
-// 返回 { items:[{id, forecast_date, forecast_qty, manager}], total_qty }
-export const fetchCompletionForecasts = (pid) =>
-  http.get(`/projects/${pid}/completion-forecasts`)
-// 新增/更新一条（同项目+同日+同负责人 = 覆盖）；返回 { id, items, total_qty }
-export const saveCompletionForecast = (pid, payload) =>
-  http.post(`/projects/${pid}/completion-forecasts`, payload)
-export const deleteCompletionForecast = (pid, forecastId) =>
-  http.delete(`/projects/${pid}/completion-forecasts/${forecastId}`)

@@ -313,35 +313,6 @@ def delete_manual_complete(project_id: int, node_plan_id: int) -> int:
     return getattr(_fn, "__wrapped__", _fn)(project_id, node_plan_id)
 
 
-# ---------- 「预计完成」登记（project_completion_forecasts，2026-10-10 新增） ----------
-# 「即将完成但还没有排产计划」的项目登记「预计完成日期 + 当日预计完成套数」；
-# 独立表，只作登记与展示，不参与节点状态判定 / 整体进度 / 排名。
-
-def get_completion_forecasts(project_id: int) -> list[dict]:
-    """列出项目的「预计完成」登记（按预计日期升序）。"""
-    from database import get_completion_forecasts as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id)
-
-
-def upsert_completion_forecast(project_id: int, forecast_date: str, forecast_qty: int,
-                               manager: str | None = None) -> int:
-    """新增/更新一条「预计完成」登记（同项目+同日+同负责人 = 覆盖），返回记录 id。"""
-    from database import upsert_completion_forecast as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, forecast_date, forecast_qty, manager)
-
-
-def delete_completion_forecast(project_id: int, forecast_id: int) -> int:
-    """删除一条「预计完成」登记，返回删除行数（0=未命中）。"""
-    from database import delete_completion_forecast as _fn
-    return getattr(_fn, "__wrapped__", _fn)(project_id, forecast_id)
-
-
-def get_all_completion_forecasts() -> dict[int, list[dict]]:
-    """批量取全部「预计完成」登记 → {project_id: [记录, ...]}（项目列表展示用，消除 N+1）。"""
-    from database import get_all_completion_forecasts as _fn
-    return getattr(_fn, "__wrapped__", _fn)()
-
-
 def list_project_managers(project_id: int, month: str | None = None) -> list[dict]:
     """列出项目负责人清单及概况（供「多负责人管理」弹窗使用）。
 
@@ -616,25 +587,6 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
             for r in cur.fetchall():
                 if r["m"]:
                     manual_months.setdefault(int(r["project_id"]), set()).add(str(r["m"]))
-
-            # ---- 「预计完成」登记（project_completion_forecasts，2026-10-10 新增）----
-            # 场景：即将完成但还没排产计划的项目 → 登记「预计完成日期 + 当日预计完成套数」。
-            # 表可能尚未创建（未跑迁移）→ try/except 兜底，不阻塞列表。
-            forecast_map: dict[int, list[dict]] = {}
-            try:
-                cur.execute(
-                    "SELECT project_id, forecast_date, forecast_qty, manager "
-                    "FROM project_completion_forecasts ORDER BY project_id, forecast_date, id"
-                )
-                for r in cur.fetchall():
-                    forecast_map.setdefault(int(r["project_id"]), []).append({
-                        "forecast_date": str(r["forecast_date"])[:10],
-                        "forecast_qty": int(r["forecast_qty"] or 0),
-                        "manager": r["manager"],
-                    })
-            except Exception as e:  # noqa: BLE001 — 未建表不阻塞列表
-                import logging
-                logging.getLogger(__name__).info("project_completion_forecasts 不可用：%s", e)
     finally:
         conn.close()
 
@@ -654,23 +606,6 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         p["has_manual_complete"] = bool(_mmonths)
         p["manual_complete_month"] = max(_mmonths) if _mmonths else None
         p["manual_completed_this_month"] = bool(month and month in _mmonths)
-
-        # 「预计完成」登记（2026-10-10）：供「未上传排产」表格提示
-        # 「即将完成但还没排产」的项目 —— 例如「预计 10-20 · 5 套」。
-        #   has_forecast              —— 是否登记过
-        #   forecast_date/qty         —— **最近一条未到期**登记（都过期则取最后一条）
-        #   forecast_upcoming_qty     —— 未到期登记的预计套数合计
-        #   forecast_count            —— 登记条数
-        _fc = forecast_map.get(pid) or []
-        p["has_forecast"] = bool(_fc)
-        p["forecast_count"] = len(_fc)
-        _today_s = str(date.today())
-        _upcoming = [x for x in _fc if x["forecast_date"] >= _today_s]
-        _pick = _upcoming[0] if _upcoming else (_fc[-1] if _fc else None)
-        p["forecast_date"] = _pick["forecast_date"] if _pick else None
-        p["forecast_qty"] = _pick["forecast_qty"] if _pick else 0
-        p["forecast_upcoming_qty"] = sum(x["forecast_qty"] for x in _upcoming)
-        p["forecast_items"] = _fc
 
         plans = plans_map.get(pid, [])
         actuals = actuals_map.get(pid, {})

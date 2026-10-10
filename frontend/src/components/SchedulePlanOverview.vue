@@ -95,17 +95,11 @@
             {{ row.plan_start_date || '-' }} → {{ row.plan_end_date || '-' }}
           </template>
         </el-table-column>
-        <el-table-column label="上次上传" width="150">
+        <el-table-column label="上次上传" width="140">
           <template #default="{ row }">
             <span v-if="row.schedule_upload_month" class="last-month">{{ row.schedule_upload_month }}</span>
             <span v-else-if="row.has_schedule_plan_ever" class="last-month muted">历史数据（月份未标记）</span>
             <span v-else class="last-month muted">从未上传</span>
-            <!-- 预计完成登记（2026-10-10）：即将完成但还没排产计划的项目，提示预计完成日与套数 -->
-            <div v-if="row.has_forecast" class="fc-line"
-                 :title="`已登记预计完成：${row.forecast_date || '-'} · ${row.forecast_qty || 0} 套${row.forecast_count > 1 ? `（共 ${row.forecast_count} 条，未到期合计 ${row.forecast_upcoming_qty} 套）` : ''}`">
-              📅 预计 {{ (row.forecast_date || '').slice(5) }} · {{ row.forecast_qty }} 套
-              <span v-if="row.forecast_count > 1" class="fc-more">+{{ row.forecast_count - 1 }}</span>
-            </div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="110">
@@ -437,19 +431,6 @@ onMounted(async () => {
 .mc-sub { font-size: 11px; color: #a0aec0; }
 .last-month { font-size: 12px; color: #4a5568; }
 .last-month.muted { color: #a0aec0; }
-/* 预计完成提示（未上传表格内，浅蓝） */
-.fc-line {
-  margin-top: 2px;
-  font-size: 12px;
-  color: #2c5282;
-  background: #ebf8ff;
-  border: 1px solid #bee3f8;
-  border-radius: 4px;
-  padding: 0 6px;
-  display: inline-block;
-  white-space: nowrap;
-}
-.fc-more { color: #3182ce; font-weight: 600; margin-left: 2px; }
 .proj-link { color: #3182ce; cursor: pointer; font-weight: 500; }
 .proj-link:hover { text-decoration: underline; }
 .import-dialog-actions {
