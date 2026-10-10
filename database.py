@@ -36,29 +36,46 @@ SCHEDULE_ORDER_MAX = len(SCHEDULE_PROCESS_NAMES)
 MANUAL_COMPLETE_ORDER = 99
 
 
-def _month_scope(alias: str, month: str | None, args: list) -> str:
-    """排产归属月过滤片段（**仅用于读取**）：
-    ``AND (<alias>plan_month <=> %s OR <alias>plan_month IS NULL)``。
+def _month_scope(alias: str, month: str | None, args: list,
+                 with_manual_order: bool = True) -> str:
+    """排产归属月过滤片段（**仅用于读取**，命中时向 args 追加 1~2 个 month 参数）。
 
-    口径（用户 2026-10-10 最终确认）：
-      - 写入 = **导入即整体覆盖**（不分月份，见 insert_node_plans），主表每个(项目×负责人)
-        只保留最新一份计划；因此本片段**绝不再用于删除/归档条件**，只用于"读哪一份"。
-      - 读取 ``month`` 指定时：命中该月的行 **∪** 「未标注月」行（plan_month IS NULL）。
-        后者 = 独立工序 90/91、手动完成占位行 99、以及历史导入但未打月份标记的排产行；
-        这样历史数据不会凭空消失（零回归），而**其他月份**的行不参与本月口径
-        （避免同一 (工序, 计划日) 跨月累加把 plan_qty 翻倍）。
+    口径（用户 2026-10-10 确认）：
+      - 写入 = 导入即整体覆盖（不分月份，见 insert_node_plans），主表只保留最新一份排产计划；
+        本片段**只决定"读哪一份 / 读哪些行"**，绝不用于删除或归档条件。
+      - ``month`` 指定时保留两类行：
+        ① ``plan_month = 本月``   —— 本月导入（或被本月导入覆盖）的排产计划；
+        ② ``plan_month IS NULL``  —— 「未标注月」行：独立工序 90/91、历史未标注排产行，
+           **以及手动完成占位行 99（按「完成时间」所在月归属）**。
+      - 🔴 手动完成占位行 99 特殊处理（2026-10-10 修复「跨月展示」）：
+        它的 plan_month 恒为 NULL（无排产归属月语义），若按 ② 一律放行，就会在**每个月**的
+        详情页里都出现（用户反馈：手动完成的套数因项目跨月而重复展示）。
+        故 99 行改为按 **plan_date（完成时间）所在月** 归属：只有完成月与查询月一致的才可见。
       - ``month`` 为 None：不加任何条件（跨月汇总视图，历史行为）。
 
     Args:
         alias: 表别名前缀，如 ``''`` 或 ``'pnp.'``
         month: 'YYYY-MM'；None/空 = 不限定月份
-        args: 参数列表（命中时会 append 一次 month）
+        args: 参数列表（命中时会 append 1~2 次 month）
+        with_manual_order: 被查表是否有 ``process_order`` / 是否含手动完成占位行。
+            排产相关表（process_node_plans）→ True（默认，追加 2 个参数）；
+            ``project_process_durations``（无 process_order 列、也无需区分 99 行）→ False（追加 1 个参数）。
+            ⚠️ 传 True 而表里没有 process_order 会直接 1054 Unknown column → HTTP 500。
     """
     m = str(month).strip() if month else ''
     if not m:
         return ""
-    args.append(m)
-    return f" AND ({alias}plan_month <=> %s OR {alias}plan_month IS NULL)"
+    if not with_manual_order:
+        args.append(m)
+        return f" AND ({alias}plan_month <=> %s OR {alias}plan_month IS NULL)"
+    args.extend([m, m])
+    return (
+        f" AND ({alias}plan_month <=> %s"
+        f" OR ({alias}plan_month IS NULL"
+        f"     AND ({alias}process_order <> {MANUAL_COMPLETE_ORDER}"
+        f"          OR {alias}plan_date IS NULL"
+        f"          OR DATE_FORMAT({alias}plan_date, '%%Y-%%m') = %s)))"
+    )
 
 
 def get_connection() -> pymysql.Connection:
@@ -389,6 +406,12 @@ def delete_project(project_id: int) -> None:
             cursor.execute("DELETE FROM schedule_imports WHERE project_id = %s", (project_id,))
             cursor.execute("DELETE FROM process_node_plans_history WHERE project_id = %s", (project_id,))
             cursor.execute("DELETE FROM project_process_durations WHERE project_id = %s", (project_id,))
+            # 「预计完成」登记（2026-10-10 新增；新表带 FK CASCADE，此处兜底存量无外键库）
+            try:
+                cursor.execute(
+                    "DELETE FROM project_completion_forecasts WHERE project_id = %s", (project_id,))
+            except Exception:  # noqa: BLE001 — 表可能尚未创建（未跑迁移）时不阻塞删项目
+                pass
             cursor.execute("DELETE FROM projects WHERE id = %s", (project_id,))
             conn.commit()
     finally:
@@ -897,7 +920,8 @@ def get_project_process_durations(project_id: int, manager: str | None = None,
             if manager is not None:
                 sql += " AND manager <=> %s"
                 args.append(str(manager).strip())
-            sql += _month_scope("", month, args)
+            # project_process_durations 无 process_order 列 → 用简化片段（否则 1054 → 500）
+            sql += _month_scope("", month, args, with_manual_order=False)
             cursor.execute(sql, tuple(args))
             raw = [dict(r) for r in cursor.fetchall()]
     finally:
@@ -947,7 +971,8 @@ def get_project_process_durations_batch(project_ids: list[int],
                 args: list = list(chunk)
                 sql = (f"SELECT project_id, process_name, plan_date, duration_days, offset_days "
                        f"FROM project_process_durations WHERE project_id IN ({fmt})")
-                sql += _month_scope("", month, args)
+                # 同 get_project_process_durations：该表无 process_order，用简化片段
+                sql += _month_scope("", month, args, with_manual_order=False)
                 cur.execute(sql, tuple(args))
                 for row in cur.fetchall():
                     by_pid.setdefault(int(row['project_id']), []).append(dict(row))
@@ -1292,6 +1317,15 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
       ``pnp.manager IS NOT NULL`` 过滤并按 manager 归属（get_ranking_manager_rows_by_month），
       manager=NULL 的行会被排名整体漏掉（2026-09-03 修复的根因）。
       同日覆盖时同步更新 manager（管理员可改归属）。
+    - 🔴 **月份归属（2026-10-10）**：99 行的 `plan_month` **刻意保持 NULL**（它没有「排产归属月」
+      语义），月份归属改由 **plan_date（完成时间）所在月** 决定，读取侧
+      `_month_scope` 专门为 99 行按 `DATE_FORMAT(plan_date,'%Y-%m')` 过滤。
+      千万不要给它写 plan_month —— 那会与「排产第 9 道 附件安装行（order 10、同 process_name、
+      同 plan_date）」撞唯一键，导致把排产行的 plan_qty 覆盖成手动完成套数。
+
+    减少 / 纠正已录成套数（2026-10-10）：
+      - **同日重复提交 = 覆盖** → 改小数值即「减少」；
+      - 或先 `get_manual_completes()` 看到记录、再 `delete_manual_complete()` 整条删除。
 
     Args:
         project_id: 项目ID
@@ -1318,10 +1352,13 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
             node_plan_id = cursor.lastrowid
             if not node_plan_id:
                 # ON DUPLICATE 走 UPDATE 分支时 lastrowid 可能为 0，回查取回 id
+                # ⚠️ 必须带 process_order = 99：项目里可能同时存在排产工序行（process_name 同为
+                #    「附件安装」）甚至 90/91 行，只按 (project, 附件安装, 日期) 回查会取错行。
                 cursor.execute(
                     "SELECT id FROM process_node_plans "
-                    "WHERE project_id=%s AND process_name=%s AND plan_date=%s LIMIT 1",
-                    (project_id, "附件安装", complete_date),
+                    "WHERE project_id=%s AND process_name=%s AND plan_date=%s "
+                    "  AND process_order=%s AND manager <=> %s LIMIT 1",
+                    (project_id, "附件安装", complete_date, MANUAL_COMPLETE_ORDER, mgr),
                 )
                 row = cursor.fetchone()
                 node_plan_id = row['id'] if row else 0
@@ -1332,6 +1369,168 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
     upsert_node_actual(project_id, node_plan_id, "附件安装",
                        int(complete_qty or 0), complete_date)
     return node_plan_id
+
+
+def get_manual_completes(project_id: int, month: str | None = None) -> list[dict]:
+    """列出手动完成记录（process_order=99 占位行）及其实际完成量（供「手动完成」弹窗展示/修改）。
+
+    month（可选）：'YYYY-MM' 时只返回「完成月」匹配的记录；None=全部。
+        ⚠️ 归属月口径与读取过滤一致：99 行没有排产归属月，按 **plan_date（完成时间）所在月** 归属。
+
+    Returns:
+        list[dict]，每项：node_plan_id / plan_date / plan_qty / manager / actual_qty / report_date
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = ("SELECT pnp.id AS node_plan_id, pnp.plan_date, pnp.plan_qty, pnp.manager, "
+                   "       COALESCE(nap.actual_qty, 0) AS actual_qty, nap.report_date "
+                   "FROM process_node_plans pnp "
+                   "LEFT JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id "
+                   "WHERE pnp.project_id = %s AND pnp.process_order = %s")
+            args: list = [project_id, MANUAL_COMPLETE_ORDER]
+            if month and str(month).strip():
+                sql += (" AND pnp.plan_date IS NOT NULL "
+                        "AND DATE_FORMAT(pnp.plan_date, '%%Y-%%m') = %s")
+                args.append(str(month).strip())
+            sql += " ORDER BY pnp.plan_date DESC, pnp.id DESC"
+            cursor.execute(sql, tuple(args))
+            return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def delete_manual_complete(project_id: int, node_plan_id: int) -> int:
+    """删除一条「手动完成」记录及其实际完成量（用于纠正误录 / 减少已录成套数）。
+
+    安全约束（防止误删排产计划行）：
+      - 只允许删除 ``process_order = MANUAL_COMPLETE_ORDER(99)`` 且属于该项目的行；
+      - 先删计划行（带上述约束），**确实删到了**才继续清理它的 node_actual_progress
+        （该表无 FK，手工清理避免孤儿行）；node_segment_progress 由 FK CASCADE 自动清理。
+
+    Returns:
+        int: 实际删除的计划行数（0 = 不存在 / 不属于该项目 / 不是手动完成行）
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM process_node_plans "
+                "WHERE id = %s AND project_id = %s AND process_order = %s",
+                (int(node_plan_id), int(project_id), MANUAL_COMPLETE_ORDER),
+            )
+            deleted = int(cursor.rowcount or 0)
+            if deleted:
+                cursor.execute(
+                    "DELETE FROM node_actual_progress "
+                    "WHERE project_id = %s AND node_plan_id = %s",
+                    (int(project_id), int(node_plan_id)),
+                )
+            conn.commit()
+            return deleted
+    finally:
+        conn.close()
+
+
+# ---------- 「预计完成」登记（project_completion_forecasts，2026-10-10 新增） ----------
+# 场景（用户 2026-10-10 提出）：存在「即将完成但还没有排产计划」的项目 —— 这类项目既要能看到
+# 「预计哪天完成、当天预计完成多少套」，又不应写进 process_node_plans 变成节点计划
+# （否则会被 judge_node_status 当成待完成/逾期节点、污染进度与排名）。
+# 故独立建表，只作**登记与展示**：不参与节点状态判定、不计入整体进度与排名。
+# 唯一键 (project_id, forecast_date, manager)：同项目同日同负责人重复提交 = 覆盖。
+
+
+def get_completion_forecasts(project_id: int) -> list[dict]:
+    """列出项目的「预计完成」登记：{id, forecast_date, forecast_qty, manager, updated_at}。
+
+    排序：预计完成日期升序（越近越靠前），同日按 id 升序。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, project_id, forecast_date, forecast_qty, manager, updated_at "
+                "FROM project_completion_forecasts WHERE project_id = %s "
+                "ORDER BY forecast_date, id",
+                (int(project_id),),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def upsert_completion_forecast(project_id: int, forecast_date: str, forecast_qty: int,
+                               manager: str | None = None) -> int:
+    """新增/更新一条「预计完成」登记（同项目+同日+同负责人 = 覆盖）。
+
+    Args:
+        project_id: 项目ID
+        forecast_date: 预计完成日期 'YYYY-MM-DD'
+        forecast_qty: 当日预计完成套数（正整数，上限由路由层校验）
+        manager: 归属负责人；单负责人项目由路由层自动推导，多负责人必须显式指定
+
+    Returns:
+        int: 该条记录的 id
+    """
+    d = str(forecast_date)[:10]
+    mgr = (str(manager).strip() if manager else '') or None
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO project_completion_forecasts "
+                "  (project_id, forecast_date, forecast_qty, manager) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON DUPLICATE KEY UPDATE forecast_qty = VALUES(forecast_qty)",
+                (int(project_id), d, int(forecast_qty or 0), mgr),
+            )
+            fid = cursor.lastrowid
+            if not fid:
+                # ON DUPLICATE 走 UPDATE 分支时 lastrowid 可能为 0 → 回查取回 id
+                cursor.execute(
+                    "SELECT id FROM project_completion_forecasts "
+                    "WHERE project_id = %s AND forecast_date = %s AND manager <=> %s LIMIT 1",
+                    (int(project_id), d, mgr),
+                )
+                row = cursor.fetchone()
+                fid = int(row['id']) if row else 0
+            conn.commit()
+            return fid
+    finally:
+        conn.close()
+
+
+def delete_completion_forecast(project_id: int, forecast_id: int) -> int:
+    """删除一条「预计完成」登记（只按 项目 + id 定位，防越权删别的项目）。返回删除行数。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM project_completion_forecasts WHERE id = %s AND project_id = %s",
+                (int(forecast_id), int(project_id)),
+            )
+            deleted = int(cursor.rowcount or 0)
+            conn.commit()
+            return deleted
+    finally:
+        conn.close()
+
+
+def get_all_completion_forecasts() -> dict[int, list[dict]]:
+    """一次性取回全部「预计完成」登记 → {project_id: [记录, ...]}（供项目列表批量展示，消除 N+1）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, project_id, forecast_date, forecast_qty, manager "
+                "FROM project_completion_forecasts ORDER BY project_id, forecast_date, id"
+            )
+            out: dict[int, list[dict]] = {}
+            for r in cursor.fetchall():
+                out.setdefault(int(r["project_id"]), []).append(dict(r))
+            return out
+    finally:
+        conn.close()
 
 
 # ---------- 按段填报（v7.1 行级化，node_segment_progress） ----------

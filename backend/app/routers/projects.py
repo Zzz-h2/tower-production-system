@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from ..core import db
 from ..core.deps import get_current_user, get_scope_big_area, require_admin, require_project_access
-from ..schemas import ManualCompleteRequest, ProjectUpdateRequest
+from ..schemas import CompletionForecastRequest, ManualCompleteRequest, ProjectUpdateRequest
 from ..services.node_service import build_overview, build_process_detail, enrich_rows
 from ..services.business_logic import compute_real_overdue
 
@@ -210,6 +210,163 @@ def clear_node_plans(pid: int, user: dict = Depends(require_admin)):
     require_project_access(project, user)
     db.delete_all_node_plans(pid)  # 彻底清空该项目所有节点计划（含独立工序）
     return {"message": "✅ 已清空该项目的节点计划"}
+
+
+@router.get("/{pid}/manual-completes")
+def list_manual_completes(pid: int, month: Optional[str] = None,
+                          user: dict = Depends(get_current_user)):
+    """列出该项目的手动完成记录（供「手动完成」弹窗展示 / 修改 / 减少）。（仅 admin 可改，此处只读）
+
+    返回：
+      items            [{node_plan_id, plan_date, plan_qty, actual_qty, manager, report_date}]
+      contract_count   合同总数
+      completed_sets   已完成套数（全部「附件安装」实际完成量合计，与保存时的上限口径一致）
+      remaining_sets   剩余未完成套数
+
+    排产按月隔离（2026-10-10）：99 占位行无排产归属月，按 **完成时间(plan_date)所在月** 归属；
+    传 month 时只返回该完成月的记录（弹窗默认按月看，避免「跨月重复展示」）。
+    """
+    project = db.get_project_by_id(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
+
+    mth = month.strip() if month and month.strip() else None
+    items = db.get_manual_completes(pid, mth)
+    total = int(project.get("contract_count") or 0)
+    plans = db.get_node_plans(pid)
+    actuals = db.get_node_actuals(pid)
+    done = sum(
+        int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0)
+        for n in plans if n.get("process_name") == "附件安装"
+    )
+    return {
+        "items": items,
+        "month": mth,
+        "contract_count": total,
+        "completed_sets": done,
+        "remaining_sets": max(0, total - done),
+    }
+
+
+@router.delete("/{pid}/manual-completes/{node_plan_id}")
+def delete_manual_complete(pid: int, node_plan_id: int, user: dict = Depends(require_admin)):
+    """删除一条手动完成记录（纠正误录 / 减少已录完成套数）。（仅 admin）
+
+    只允许删 process_order=99 且属于该项目的行（排产工序行绝不会被删）；连同其实际完成量一起清理。
+    """
+    project = db.get_project_by_id(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
+    deleted = db.delete_manual_complete(pid, node_plan_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "MANUAL_COMPLETE_NOT_FOUND",
+                    "message": "该手动完成记录不存在（或已被删除）"},
+        )
+    return {"message": "✅ 已删除该手动完成记录", "deleted": deleted,
+            "node_plan_id": node_plan_id}
+
+
+@router.get("/{pid}/completion-forecasts")
+def list_completion_forecasts(pid: int, user: dict = Depends(get_current_user)):
+    """列出项目的「预计完成」登记（2026-10-10 新增）。
+
+    场景：项目即将完成但**还没有排产计划** → 登记「预计完成日期 + 当日预计完成套数」，
+    便于提前掌握产出节奏。该登记独立于排产计划：不写入 process_node_plans、
+    不参与节点状态判定 / 整体进度 / 排名。
+
+    返回：{items: [{id, forecast_date, forecast_qty, manager}], total_qty}
+    """
+    project = db.get_project_by_id(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
+    items = db.get_completion_forecasts(pid)
+    return {"items": items, "total_qty": sum(int(x.get("forecast_qty") or 0) for x in items)}
+
+
+@router.post("/{pid}/completion-forecasts")
+def upsert_completion_forecast(pid: int, payload: CompletionForecastRequest,
+                               user: dict = Depends(require_admin)):
+    """新增/更新一条「预计完成」登记（同项目+同日+同负责人 = 覆盖）。（仅 admin）"""
+    project = db.get_project_by_id(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
+
+    # 负责人解析与校验（与手动完成同口径：多负责人项目必须显式指定）
+    managers = db.split_managers(project.get("delivery_person"))
+    mgr = payload.manager.strip() if (payload.manager and payload.manager.strip()) else None
+    if len(managers) > 1:
+        if not mgr:
+            raise HTTPException(
+                status_code=400,
+                detail=f"该项目有 {len(managers)} 位负责人（{'/'.join(managers)}），请先选择本次预计完成归属的负责人",
+            )
+        if mgr not in managers:
+            raise HTTPException(
+                status_code=400,
+                detail=f"负责人「{mgr}」不在该项目的负责人名单内（{'/'.join(managers)}）",
+            )
+    elif len(managers) == 1:
+        mgr = mgr or managers[0]
+
+    fdate = (payload.forecast_date or "").strip()
+    try:
+        datetime.strptime(fdate, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_DATE", "message": "预计完成日期格式必须为 YYYY-MM-DD"},
+        )
+    try:
+        fqty = int(payload.forecast_qty)
+    except (TypeError, ValueError):
+        fqty = 0
+    if fqty <= 0 or fqty != payload.forecast_qty:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BAD_QTY", "message": "预计完成套数必须为正整数"},
+        )
+    total = int(project.get("contract_count") or 0)
+    if total > 0 and fqty > total:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "QTY_EXCEED_CONTRACT",
+                    "message": f"预计完成套数不能超过合同总数 {total} 套"},
+        )
+
+    fid = db.upsert_completion_forecast(pid, fdate, fqty, mgr)
+    items = db.get_completion_forecasts(pid)
+    return {
+        "message": f"✅ 已登记预计完成：{fdate} · {fqty} 套",
+        "id": fid,
+        "manager": mgr,
+        "items": items,
+        "total_qty": sum(int(x.get("forecast_qty") or 0) for x in items),
+    }
+
+
+@router.delete("/{pid}/completion-forecasts/{forecast_id}")
+def delete_completion_forecast(pid: int, forecast_id: int,
+                               user: dict = Depends(require_admin)):
+    """删除一条「预计完成」登记。（仅 admin）"""
+    project = db.get_project_by_id(pid)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    require_project_access(project, user)
+    deleted = db.delete_completion_forecast(pid, forecast_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "FORECAST_NOT_FOUND", "message": "该预计完成登记不存在（或已被删除）"},
+        )
+    items = db.get_completion_forecasts(pid)
+    return {"message": "✅ 已删除该预计完成登记", "deleted": deleted,
+            "items": items, "total_qty": sum(int(x.get("forecast_qty") or 0) for x in items)}
 
 
 @router.post("/{pid}/manual-complete")

@@ -70,6 +70,20 @@ class ManualCompleteRequest(BaseModel):
     manager: Optional[str] = None
 
 
+class CompletionForecastRequest(BaseModel):
+    """「预计完成」登记（2026-10-10 新增）：即将完成但还没有排产计划的项目。
+
+    forecast_date：预计完成日期 YYYY-MM-DD
+    forecast_qty ：当日预计完成套数（正整数）
+    manager      ：归属负责人。单负责人项目由路由层自动推导；
+                   多负责人项目（delivery_person 含 '/'）必须显式指定，否则 400。
+    同项目 + 同日期 + 同负责人 重复提交 = 覆盖（便于改小/修正）。
+    """
+    forecast_date: str
+    forecast_qty: int
+    manager: Optional[str] = None
+
+
 # ---------- 按段填报（v7.1 行级化） ----------
 
 class SaveSegmentRequest(BaseModel):

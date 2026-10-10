@@ -94,4 +94,23 @@ export const importSchedule = (pid, file, manager, monthlyPlan, planMonth) => {
 
 // 手动完成（仅 admin）：为「提前完工但无排产计划」的项目补录『附件安装』产出
 // payload: { complete_qty: int, complete_date: 'YYYY-MM-DD' }；返回 { message, node_plan_id, completed_sets, remaining_sets }
+// 同日重复提交 = 覆盖（改小数值即「减少」已录成套数）
 export const manualComplete = (pid, payload) => http.post(`/projects/${pid}/manual-complete`, payload)
+
+// 手动完成记录（2026-10-10）：列出已录入记录（含完成月/套数/负责人），供弹窗查看并纠正
+// 返回 { items, month, contract_count, completed_sets, remaining_sets }
+export const fetchManualCompletes = (pid, month) =>
+  http.get(`/projects/${pid}/manual-completes`, { params: month ? { month } : {} })
+// 删除一条手动完成记录（纠正误录 / 减少套数）；id = node_plan_id
+export const deleteManualComplete = (pid, nodePlanId) =>
+  http.delete(`/projects/${pid}/manual-completes/${nodePlanId}`)
+
+// 「预计完成」登记（2026-10-10 新增）：即将完成但还没有排产计划的项目，登记「预计完成日期 + 当日套数」
+// 返回 { items:[{id, forecast_date, forecast_qty, manager}], total_qty }
+export const fetchCompletionForecasts = (pid) =>
+  http.get(`/projects/${pid}/completion-forecasts`)
+// 新增/更新一条（同项目+同日+同负责人 = 覆盖）；返回 { id, items, total_qty }
+export const saveCompletionForecast = (pid, payload) =>
+  http.post(`/projects/${pid}/completion-forecasts`, payload)
+export const deleteCompletionForecast = (pid, forecastId) =>
+  http.delete(`/projects/${pid}/completion-forecasts/${forecastId}`)

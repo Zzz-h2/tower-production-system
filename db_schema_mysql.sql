@@ -333,6 +333,26 @@ CREATE TABLE IF NOT EXISTS schedule_imports (
 
 
 -- ============================================================
+-- 表：project_completion_forecasts（「预计完成」登记，2026-10-10 新增）
+-- 场景：项目「即将完成但还没有排产计划」→ 登记「预计完成日期 + 当日预计完成套数」。
+-- 独立于排产计划：不写 process_node_plans、不参与节点状态判定 / 整体进度 / 排名，只作登记与展示。
+-- 唯一键 (project_id, forecast_date, manager)：同项目同日同负责人重复提交 = 覆盖。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS project_completion_forecasts (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    project_id      INT NOT NULL,
+    manager         VARCHAR(64) NULL COMMENT '归属负责人（多负责人项目按人登记；NULL=未拆分/不区分）',
+    forecast_date   DATE NOT NULL COMMENT '预计完成日期',
+    forecast_qty    INT NOT NULL DEFAULT 1 COMMENT '该日预计完成套数',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_proj_forecast_date_mgr (project_id, forecast_date, manager),
+    KEY idx_forecast_date (forecast_date),
+    CONSTRAINT fk_pcf_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ============================================================
 -- 表11：process_node_plans_history（排产明细归档表，v7.2 新增）
 -- ============================================================
 -- 语义：覆盖式重排前，把即将被 DELETE 的排产工序行原样归档一份，做到「替换而非销毁」。
