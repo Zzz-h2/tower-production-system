@@ -12,7 +12,7 @@
           @change="load"
         />
         <el-button type="primary" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <span class="hint">统计口径：多负责人按单人分别排名；累计计划套数=各负责人申报的本月计划数之和；累计完成套数=附件安装实际完成；按调度令月份归类</span>
+        <span class="hint">统计口径：多负责人按单人分别排名；累计计划套数=各负责人申报的本月计划数之和；累计完成套数=附件安装实际完成；完成率=累计完成套数÷累计计划套数×100%；按调度令月份归类</span>
       </div>
     </div>
 
@@ -32,7 +32,7 @@
       </div>
       <div class="kpi-card">
         <div class="kpi-value" style="color:#3182ce;">{{ stats.avgRate }}</div>
-        <div class="kpi-label">平均完成率</div>
+        <div class="kpi-label">整体完成率</div>
       </div>
     </div>
 
@@ -141,11 +141,11 @@ const rows = ref([])
 const stats = computed(() => {
   const totalPlan = rows.value.reduce((s, r) => s + (r.total_plan || 0), 0)
   const totalActual = rows.value.reduce((s, r) => s + (r.total_actual || 0), 0)
-  const valid = rows.value.filter((r) => r.completion_rate !== null && r.completion_rate !== undefined)
-  const avg = valid.length
-    ? (valid.reduce((s, r) => s + r.completion_rate, 0) / valid.length).toFixed(1)
-    : '—'
-  return { persons: rows.value.length, totalPlan, totalActual, avgRate: `${avg}%` }
+  // 完成率 = 累计完成套数 / 累计计划套数 × 100%（整体口径）
+  // ⚠️ 不可用「各负责人完成率的算术平均」：那会让小组负责人的权重被放大，
+  //    例如 1/1=100% 与 10/100=10% 各占 50%，与真实产出占比严重不符。
+  const rate = totalPlan > 0 ? ((totalActual / totalPlan) * 100).toFixed(1) : '—'
+  return { persons: rows.value.length, totalPlan, totalActual, avgRate: totalPlan > 0 ? `${rate}%` : rate }
 })
 
 const fmtQty = (v) => (v === null || v === undefined ? '0' : Number(v).toLocaleString())
