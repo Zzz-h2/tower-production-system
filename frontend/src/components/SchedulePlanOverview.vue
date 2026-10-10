@@ -15,6 +15,10 @@
         <div class="kpi-label">{{ monthLabel }}未上传排产</div>
       </div>
       <div class="kpi-card">
+        <div class="kpi-value" style="color:#3182ce;">{{ manualDoneCount }}</div>
+        <div class="kpi-label">{{ monthLabel }}手动完成（免传）</div>
+      </div>
+      <div class="kpi-card">
         <div class="kpi-value">{{ monthDueCount }}</div>
         <div class="kpi-label">本月应交项目</div>
       </div>
@@ -53,6 +57,7 @@
           <el-option label="全部" value="all" />
           <el-option label="本月已上传" value="uploaded" />
           <el-option label="本月未上传" value="not_uploaded" />
+          <el-option label="本月手动完成" value="manual_done" />
         </el-select>
         <el-date-picker
           v-model="store.filters.month"
@@ -72,7 +77,7 @@
         <span class="section-dot" style="background:#ed8936;"></span>
         <span class="block-title" style="color:#ed8936;">{{ monthLabel }}未上传排产计划</span>
         <el-tag type="warning" size="small">{{ notUploadedList.length }}</el-tag>
-        <span class="block-hint">含「本月未上传 · 上次上传 X 月」与「从未上传」两类，请按需补传</span>
+        <span class="block-hint">含「本月未上传 · 上次上传 X 月」与「从未上传」两类，请按需补传；已手动完成的项目已单独归入下方「手动完成（免传）」分组</span>
       </div>
       <el-table :data="notUploadedList" style="width: 100%" :row-style="{ height: '48px' }">
         <el-table-column label="项目名称" min-width="240">
@@ -90,7 +95,7 @@
             {{ row.plan_start_date || '-' }} → {{ row.plan_end_date || '-' }}
           </template>
         </el-table-column>
-        <el-table-column label="上次上传" width="130">
+        <el-table-column label="上次上传" width="140">
           <template #default="{ row }">
             <span v-if="row.schedule_upload_month" class="last-month">{{ row.schedule_upload_month }}</span>
             <span v-else-if="row.has_schedule_plan_ever" class="last-month muted">历史数据（月份未标记）</span>
@@ -115,7 +120,62 @@
       <el-empty v-if="!notUploadedList.length" description="暂无未上传排产计划的项目" :image-size="80" />
     </div>
 
-    <!-- ④ 已上传排产计划 -->
+    <!-- ④ 手动完成（本月免传排产） -->
+    <div class="block-card" style="margin-top: 20px;">
+      <div class="block-header">
+        <span class="section-dot" style="background:#3182ce;"></span>
+        <span class="block-title" style="color:#3182ce;">{{ monthLabel }}手动完成（免传排产）</span>
+        <el-tag size="small" type="primary">{{ manualDoneList.length }}</el-tag>
+        <span class="block-hint">提前完工且无排产计划，已由管理员手动补录产出（占位行 process_order=99）；无需再上传排产</span>
+      </div>
+      <el-table :data="manualDoneList" style="width: 100%" :row-style="{ height: '48px' }">
+        <el-table-column label="项目名称" min-width="240">
+          <template #default="{ row }">
+            <a class="proj-link" @click="goDetail(row)">{{ row.project_name }}</a>
+          </template>
+        </el-table-column>
+        <el-table-column label="机号" prop="machine_type" width="100">
+          <template #default="{ row }">{{ row.machine_type || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="塔筒厂家" prop="factory_name" min-width="140" />
+        <el-table-column label="交付负责人" prop="delivery_person" width="110" />
+        <el-table-column label="计划开工 → 交付" min-width="200">
+          <template #default="{ row }">
+            {{ row.plan_start_date || '-' }} → {{ row.plan_end_date || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="完成归属月" width="140">
+          <template #default="{ row }">
+            <div class="mc-cell">
+              <span class="st-pill" style="background:#ebf8ff; color:#3182ce;">手动完成</span>
+              <span class="mc-sub">{{ row.manual_complete_month || '-' }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="整体进度" width="100">
+          <template #default="{ row }">{{ Number(row.progress_pct || 0).toFixed(1) }}%</template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <span
+              class="st-pill"
+              style="background:#f0fff4; color:#38a169;"
+              :title="`已手动完成补录（归属月 ${row.manual_complete_month || '-'}），无需再上传排产`"
+            >手动完成</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="170" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" type="primary" plain :disabled="!auth.canEdit"
+                       title="如需补传排产计划可点击导入" @click="openImport(row)">导入</el-button>
+            <el-button size="small" @click="goDetail(row)">查看</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-empty v-if="!manualDoneList.length" description="本月暂无手动完成的项目" :image-size="80" />
+    </div>
+
+    <!-- ⑤ 已上传排产计划 -->
     <div class="block-card" style="margin-top: 20px;">
       <div class="block-header">
         <span class="section-dot" style="background:#38a169;"></span>
@@ -223,10 +283,16 @@ const monthLabel = computed(() => {
   return m ? `${m} ` : ''
 })
 
-// 统计
+// 统计（三个分组互斥且穷尽：已上传 ∪ 手动完成 ∪ 未上传 = 项目总数）
 const totalCount = computed(() => allItems.value.length)
 const uploadedCount = computed(() => allItems.value.filter((p) => p.has_schedule_plan).length)
-const notUploadedCount = computed(() => totalCount.value - uploadedCount.value)
+// 本月手动完成（免传排产）：提前完工无排产计划 → 从「未上传」分组/KPI 摘出，单列一组
+const manualDoneCount = computed(
+  () => allItems.value.filter((p) => !p.has_schedule_plan && p.manual_completed_this_month).length,
+)
+const notUploadedCount = computed(
+  () => totalCount.value - uploadedCount.value - manualDoneCount.value,
+)
 const monthDueCount = computed(
   () => allItems.value.filter((p) => Number(p.monthly_plan || 0) > 0).length,
 )
@@ -247,11 +313,23 @@ const filtered = computed(() => {
   }
   const st = filters.value.uploadStatus
   if (st === 'uploaded') list = list.filter((p) => p.has_schedule_plan)
-  if (st === 'not_uploaded') list = list.filter((p) => !p.has_schedule_plan)
+  // 手动完成（process_order=99 占位行）：提前完工无排产计划，按「本月归属月」筛选
+  if (st === 'manual_done') {
+    list = list.filter((p) => !p.has_schedule_plan && p.manual_completed_this_month)
+  }
+  // 「未上传」不含本月手动完成的项目（与分组/KPI 口径一致）
+  if (st === 'not_uploaded') {
+    list = list.filter((p) => !p.has_schedule_plan && !p.manual_completed_this_month)
+  }
   return list
 })
-const notUploadedList = computed(() => filtered.value.filter((p) => !p.has_schedule_plan))
 const uploadedList = computed(() => filtered.value.filter((p) => p.has_schedule_plan))
+const manualDoneList = computed(
+  () => filtered.value.filter((p) => !p.has_schedule_plan && p.manual_completed_this_month),
+)
+const notUploadedList = computed(
+  () => filtered.value.filter((p) => !p.has_schedule_plan && !p.manual_completed_this_month),
+)
 
 function applyFilter() { /* computed 自动响应 */ }
 
@@ -306,9 +384,27 @@ async function load() {
   allItems.value = res.items || []
 }
 
-onMounted(() => {
-  if (!store.allPersons.length) store.loadAllPersons()
-  load()
+/**
+ * 校验本页「交付负责人」选中值是否仍存在于存活选项中，失效则清空并提示。
+ *
+ * 选项来源为全量列表 store.allPersons；项目被删除后该负责人可能已不存在，
+ * 而 el-select（单值 + filterable）会把失效值原样渲染成标签 → 表现「筛选残留、列表空」。
+ */
+function reconcilePersonFilter() {
+  const cur = filters.value.person
+  if (!cur) return
+  // 仅在选项确实加载成功时校验（加载失败会把列表置空，此时清空会误伤）
+  if (store.personsLoaded && !store.allPersons.includes(cur)) {
+    filters.value.person = ''
+    ElMessage.warning(`「${cur}」已不存在，已自动清除交付负责人筛选`)
+  }
+}
+
+onMounted(async () => {
+  await load()
+  // 每次进入都重取下拉选项：项目可能在别处被删除/新增，避免下拉残留失效负责人
+  await store.loadAllPersons()
+  reconcilePersonFilter()
 })
 </script>
 
@@ -328,6 +424,9 @@ onMounted(() => {
 .block-hint { font-size: 12px; color: #a0aec0; margin-left: 4px; }
 .search-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .st-pill { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+/* 「上次上传」列的手动完成单元格：主标签 + 上一次上传月份副行 */
+.mc-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.mc-sub { font-size: 11px; color: #a0aec0; }
 .last-month { font-size: 12px; color: #4a5568; }
 .last-month.muted { color: #a0aec0; }
 .proj-link { color: #3182ce; cursor: pointer; font-weight: 500; }

@@ -15,6 +15,12 @@ from .config import MYSQL_CONFIG, SCHEDULE_PROCESS_NAMES
 SCHEDULE_ORDER_MIN = 1
 SCHEDULE_ORDER_MAX = len(SCHEDULE_PROCESS_NAMES)
 
+# 「手动完成」占位行的 process_order（与根 database.py 同源）：
+# 提前完工但无排产计划的项目用该行补录产出（process_name 仍是「附件安装」，
+# 与排产第 9 道工序同名，因此**只能靠 process_order 区分**）。
+# 排产计划总览据此展示「手动完成」痕迹（原实现完全不可见）。
+MANUAL_COMPLETE_ORDER = 99
+
 
 def get_connection():
     """获取 pymysql 连接（与原 database.py 同配置）。"""
@@ -517,6 +523,22 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
             last_schedule_months = {
                 int(r["project_id"]): str(r["m"]) for r in cur.fetchall() if r["m"]
             }
+
+            # ---- 手动完成痕迹（process_order=99 占位行）----
+            # 背景：提前完工但没有排产计划的项目走「手动完成」补录，写入的是
+            # process_order=99 / process_name='附件安装' 的占位行（plan_month 恒为 NULL）。
+            # 该行既不进排产白名单（1..11）、也不进上传台账 → 排产总览此前**完全看不到痕迹**，
+            # 管理员无法判断这些项目是「漏传」还是「已手动完成」。
+            # 这里按 plan_date 的归属月聚合，供前端展示「手动完成」状态。
+            cur.execute(
+                "SELECT DISTINCT project_id, DATE_FORMAT(plan_date, '%%Y-%%m') AS m "
+                "FROM process_node_plans WHERE process_order = %s AND plan_date IS NOT NULL",
+                (MANUAL_COMPLETE_ORDER,),
+            )
+            manual_months: dict[int, set] = {}
+            for r in cur.fetchall():
+                if r["m"]:
+                    manual_months.setdefault(int(r["project_id"]), set()).add(str(r["m"]))
     finally:
         conn.close()
 
@@ -527,6 +549,16 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         # 「本月未上传 · 上次上传 9 月」与「从未上传」两种不同状态。
         p["has_schedule_plan_ever"] = pid in has_schedule_ids
         p["schedule_upload_month"] = last_schedule_months.get(pid)
+
+        # 手动完成痕迹（v7.3）：供排产总览展示「手动完成」，避免提前完工项目被误读为漏传。
+        #   has_manual_complete          —— 曾经手动完成过（任何月份）
+        #   manual_complete_month        —— 最近一次手动完成的归属月（'YYYY-MM'）
+        #   manual_completed_this_month  —— 该手动完成是否落在当前查询月份（无 month 时恒 False）
+        _mmonths = manual_months.get(pid) or set()
+        p["has_manual_complete"] = bool(_mmonths)
+        p["manual_complete_month"] = max(_mmonths) if _mmonths else None
+        p["manual_completed_this_month"] = bool(month and month in _mmonths)
+
         plans = plans_map.get(pid, [])
         actuals = actuals_map.get(pid, {})
         nodes = enrich_rows(plans, actuals, durations=durations_map.get(pid),
