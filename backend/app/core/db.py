@@ -114,13 +114,13 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
 def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None,
                       durations: list[dict] | None = None,
                       plan_month: str | None = None) -> int:
-    """批量写入节点计划（覆盖式）。
+    """批量写入节点计划（**整体覆盖式**）。
 
     多负责人（v6.0）：manager 非 None 时只覆盖该负责人名下的排产工序行（并吸收历史 NULL 行），
-    实现各负责人分别导入、互不覆盖。manager=None 保持历史行为（清空该项目全部排产工序行）。
-    durations：按「套」的工序计划时长/相对下料偏移（工序时间规则升级用），与 plan 行同范围覆盖式重建。
-    plan_month（v7.2）：排产归属月 'YYYY-MM'，记到每个排产工序行上；被替换掉的行先归档到
-    process_node_plans_history 再删除（替换而非销毁，历史月份可回溯）。
+    实现各负责人分别导入、互不覆盖。manager=None 时覆盖该项目全部排产工序行。
+    durations：按「套」的工序计划时长/相对下料偏移，与 plan 行同范围覆盖式重建。
+    plan_month：排产归属月 'YYYY-MM'，只作为**标记 + 读取口径**；导入本身不分月份，
+    一律整体覆盖旧计划（旧行先归档到 process_node_plans_history 再删除，历史可回溯/恢复）。
     """
     from database import insert_node_plans as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_id, plans, manager, durations, plan_month)

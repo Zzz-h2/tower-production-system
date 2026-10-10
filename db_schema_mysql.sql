@@ -127,8 +127,8 @@ CREATE TABLE IF NOT EXISTS process_node_plans (
     plan_date       DATE NULL,
     plan_qty        INT NOT NULL DEFAULT 1,
     manager         VARCHAR(64) NULL COMMENT '归属负责人（多负责人项目按 / 拆分后逐位导入；NULL=历史/未拆分数据，仅汇总视图可见）',
-    plan_month      CHAR(7) NULL COMMENT '排产归属月 YYYY-MM（仅排产导入的工序行有值；NULL=独立工序 90/91、手动完成占位行 99、或 v7.4 迁移前的历史行）',
-    -- v7.4 按月隔离：唯一键必须含月份，否则跨月同 (工序, 计划日, 负责人) 会撞 1062。
+    plan_month      CHAR(7) NULL COMMENT '排产归属月 YYYY-MM（仅排产导入的工序行有值；NULL=独立工序 90/91、手动完成占位行 99、或历史行）。⚠️ 仅作标记与读取口径：排产导入是「整体覆盖」，主表每个(项目×负责人)只保留最新一份计划，旧行归档到 process_node_plans_history',
+    -- 唯一键含月份：同一 (项目, 工序, 计划日, 负责人) 在不同负责人各自导入不同归属月时需共存。
     -- 但 MySQL 唯一索引中 NULL≠NULL，直接把可空 plan_month 放进唯一键会让
     -- upsert_manual_complete / save_independent_fill 的 ON DUPLICATE 永不触发，
     -- 故用生成列把 NULL 映射为 ''（业务语义不变，代码仍只读写 plan_month）。

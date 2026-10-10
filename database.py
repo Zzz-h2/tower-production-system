@@ -37,17 +37,17 @@ MANUAL_COMPLETE_ORDER = 99
 
 
 def _month_scope(alias: str, month: str | None, args: list) -> str:
-    """v7.4 排产按月隔离：生成 SQL 片段 ``AND (<alias>plan_month <=> %s OR <alias>plan_month IS NULL)``。
+    """排产归属月过滤片段（**仅用于读取**）：
+    ``AND (<alias>plan_month <=> %s OR <alias>plan_month IS NULL)``。
 
-    统一口径（读 / 写完全一致，保证「归档集合 == 删除集合」「读到的行 == 写过的行」）：
-      - ``month`` 指定时：命中该月的行 **∪** 「未标注月」行（plan_month IS NULL）。
-        后者 = 独立工序 90/91、手动完成占位行 99、以及 v7.4 之前导入的历史排产行。
-        这样历史数据不会凭空消失（零回归），而**其他月份**的行被彻底隔离（不再跨月累加/翻倍）。
-      - ``month`` 为 None：不加任何条件（跨月汇总视图，行为与 v7.4 之前完全一致）。
-
-    写入侧复用同一片段即得到「首次按月导入接管历史未标注行」的语义：
-    项目在本月重新导入排产 → 该项目的历史未标注排产行被本月吸收（同 manager 的历史行同理由
-    ``manager <=> %s OR manager IS NULL`` 吸收），此后该项目严格按月隔离。
+    口径（用户 2026-10-10 最终确认）：
+      - 写入 = **导入即整体覆盖**（不分月份，见 insert_node_plans），主表每个(项目×负责人)
+        只保留最新一份计划；因此本片段**绝不再用于删除/归档条件**，只用于"读哪一份"。
+      - 读取 ``month`` 指定时：命中该月的行 **∪** 「未标注月」行（plan_month IS NULL）。
+        后者 = 独立工序 90/91、手动完成占位行 99、以及历史导入但未打月份标记的排产行；
+        这样历史数据不会凭空消失（零回归），而**其他月份**的行不参与本月口径
+        （避免同一 (工序, 计划日) 跨月累加把 plan_qty 翻倍）。
+      - ``month`` 为 None：不加任何条件（跨月汇总视图，历史行为）。
 
     Args:
         alias: 表别名前缀，如 ``''`` 或 ``'pnp.'``
@@ -673,12 +673,15 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
         历史月份明细可回溯、可恢复（backend/scripts/restore_schedule_month.py）。
 
     v7.4 按月隔离（重大语义变更）：
-      - 删除范围 = `项目[+负责人] × 本次归属月`，**不再**清空该项目全部排产行：
-        重新导入某月只替换该月的行，**其他月份的行及其已填报进度/按段进度完全不受影响**；
-      - 首次按月导入时，会顺带接管该项目「未标注月」的历史排产行（plan_month IS NULL），
-        完成一次性的月份归属，之后严格按月隔离；
-      - 读路径用同一口径过滤（`plan_month = 本月 OR plan_month IS NULL`），因此
-        跨月不会出现同一 (工序, 计划日) 的 plan_qty 翻倍。
+      - **导入即整体覆盖**：删除范围 = `项目[+负责人]` 的全部排产工序行（**不分月份**），
+        新计划直接替换旧计划——绝不在原有基础上叠加。
+        即「上月排产不会被保留成两套」，重新导入后该项目只存在本次这一份排产计划；
+      - 被替换掉的旧行**先原样归档**到 process_node_plans_history（保留其原归属月 plan_month）
+        再删除，历史月份明细仍可回溯、可按月恢复（backend/scripts/restore_schedule_month.py）；
+      - plan_month 只用于**标记 + 读取口径**：判断「该项目本月是否上传过排产」、
+        详情页只展示「本月计划」（`plan_month = 本月 OR plan_month IS NULL`）。
+        因此「上月已存在的项目，本月不重新导入」时，旧计划不会被当作本月结果展示，
+        而是提示「历史结转」，等本月导入才成为当月计划。
 
     Args:
         project_id: 项目ID
@@ -702,8 +705,9 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # 删除范围：指定 manager 时只删该负责人名下的排产工序行（不含独立工序 90/91）；
-            # v7.4 再叠加月份作用域（本月 ∪ 未标注月），其他月份的行保持不动。
+            # 删除范围：**该项目[+负责人]的全部排产工序行（不分月份）** —— 导入 = 整体覆盖。
+            # 指定 manager 时只覆盖该负责人名的部分（其他负责人的计划各自独立、不动），
+            # 独立工序 90/91 与手动完成占位行 99 也一律不动（process_name 白名单排除）。
             del_cond = (
                 "project_id = %s "
                 "AND process_name NOT IN (%s, %s)"
@@ -715,13 +719,13 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                 # 导致汇总视图 plan_qty 翻倍。首个导入的负责人会接管这些历史行。
                 del_cond += " AND (manager <=> %s OR manager IS NULL)"
                 del_args.append(str(manager).strip())
-            # v7.4：叠加月份作用域——只替换「本次归属月」的行（并接管未标注月的历史行）
-            del_cond += _month_scope("", month_val, del_args)
+            # ⚠️ 这里刻意**不加**月份作用域：排产导入是「整体覆盖」，不是按月追加。
+            #    曾经 v7.4 一度按 (项目 | 月份) 收窄删除范围，结果是主表同时留下上年月与本月的
+            #    两套计划（= 在原有基础上补充），与业务预期「导入即覆盖」相反，已回退。
 
 
             # v7.2：删除前先按**完全相同的 WHERE**归档一份（归档集合 == 删除集合，不重不漏）。
-            # v7.4：该 WHERE 已含月份作用域——主表按月共存，被「本月重导」替换掉的旧行归档留痕，
-            # 其他月份的行既不归档也不删除（原样保留，历史月份明细与进度均不受影响）。
+            # 因为是「整体覆盖」，被本次导入替换掉的旧计划（含其他月份的）全部进归档 → 可回溯/可恢复。
             cursor.execute(f"SELECT COUNT(*) AS c FROM process_node_plans WHERE {del_cond}",
                            tuple(del_args))
             _will_delete = int(cursor.fetchone()['c'] or 0)
@@ -742,7 +746,6 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
             if manager is not None:
                 snap_cond += " AND (pnp.manager <=> %s OR pnp.manager IS NULL)"
                 snap_args.append(str(manager).strip())
-            snap_cond += _month_scope("pnp.", month_val, snap_args)
 
             cursor.execute(
                 "SELECT pnp.process_name, pnp.plan_date, pnp.manager, nap.actual_qty, nap.report_date "
@@ -769,13 +772,12 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
             cursor.execute(f"DELETE FROM process_node_plans WHERE {del_cond}", tuple(del_args))
 
             # 工序时长表（按套）与 plan 行同范围覆盖式重建，避免重导残留孤儿行
-            # v7.4：同样按月作用域——只重建本次归属月的时长行（∪ 未标注月历史行）
+            # 与 del_cond 同口径：不分月份整体覆盖（导入 = 覆盖而非补充）
             dur_cond = "project_id = %s"
             dur_args: list = [project_id]
             if manager is not None:
                 dur_cond += " AND (manager <=> %s OR manager IS NULL)"
                 dur_args.append(str(manager).strip())
-            dur_cond += _month_scope("", month_val, dur_args)
             cursor.execute(f"DELETE FROM project_process_durations WHERE {dur_cond}", tuple(dur_args))
 
 
@@ -837,8 +839,8 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
                     "WHERE project_id = %s AND process_name = %s AND plan_date = %s "
                     "  AND manager <=> %s AND plan_month <=> %s LIMIT 1",
                     # <=> : NULL 安全等值（manager / plan_month 为 NULL 也能精确匹配）
-                    # v7.4：plan_month 必须**严格**匹配本次归属月——不能放宽到「未标注月」，
-                    # 否则会把其他月份的同行错挂。
+                    # plan_month 必须**严格**匹配本次归属月 —— 保证命中的一定是本次刚写入的那一行
+                    # （其他负责人的同键行月份可能不同，不能被误挂）。
                     (project_id, proc_name, plan_date, mgr_val, month_val),
                 )
                 row = cursor.fetchone()
