@@ -30,6 +30,11 @@ MYSQL_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db
 SCHEDULE_ORDER_MIN = 1
 SCHEDULE_ORDER_MAX = len(SCHEDULE_PROCESS_NAMES)
 
+# 「手动完成」占位行的 process_order（与 backend/app/core/db.py 同源）：
+# 提前完工但无排产计划的项目用该行补录产出，process_name 仍是「附件安装」，
+# 必须靠 process_order 与排产工序（1..11）、独立工序（90/91）区分。
+MANUAL_COMPLETE_ORDER = 99
+
 
 def get_connection() -> pymysql.Connection:
     """获取 MySQL 数据库连接，自动开启外键约束"""
@@ -919,10 +924,25 @@ def get_actuals_rich_by_node_ids(node_ids: list[int]) -> dict:
 
 
 def delete_all_node_plans(project_id: int) -> None:
-    """彻底清空项目全部节点计划（含两条独立工序），用于重置脏数据。"""
+    """彻底清空项目全部节点计划（含两条独立工序），用于重置脏数据。
+
+    v7.3 修正：同一事务内先清「挂在计划行上的派生数据」，再删计划行。
+      - `node_actual_progress` **没有指向 process_node_plans 的外键**（只有 project 外键），
+        只删计划行会让实际进度变成孤儿行：既不参与任何 JOIN/展示，又永久堆积。
+      - `project_process_durations`（按套时长/偏移）同理，随计划行覆盖式重建。
+      - `node_segment_progress` 有 ON DELETE CASCADE 外键，随计划行自动清理，无需显式删除。
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM node_actual_progress WHERE project_id = %s",
+                (project_id,),
+            )
+            cursor.execute(
+                "DELETE FROM project_process_durations WHERE project_id = %s",
+                (project_id,),
+            )
             cursor.execute(
                 "DELETE FROM process_node_plans WHERE project_id = %s",
                 (project_id,),
@@ -1218,7 +1238,7 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
             cursor.execute(
                 "INSERT INTO process_node_plans "
                     "(project_id, process_name, process_order, plan_date, plan_qty, manager) "
-                "VALUES (%s, %s, 99, %s, %s, %s) "
+                f"VALUES (%s, %s, {MANUAL_COMPLETE_ORDER}, %s, %s, %s) "
                 "ON DUPLICATE KEY UPDATE plan_qty = VALUES(plan_qty), manager = VALUES(manager)",
                 (project_id, "附件安装", complete_date, int(complete_qty or 0), mgr),
             )
