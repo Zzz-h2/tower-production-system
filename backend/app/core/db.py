@@ -104,7 +104,8 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
                                       month: str | None = None) -> list[dict]:
     """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。
 
-    v7.4：month 传入时叠加排产归属月隔离（该月 ∪ 未标注月），避免跨月行重复计数。
+    v7.4.x：month 传入时叠加排产归属月隔离，语义已收紧为**严格 plan_month = month**
+    （``plan_month IS NULL`` 的未标注月历史残留行一律排除），避免旧导入行混入详情页。
     """
     from database import get_all_plans_by_month_and_person as _fn
     return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, person,

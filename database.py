@@ -1879,8 +1879,13 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
     """取某负责人当月全部工序节点计划（含项目名/机号/厂家，供逾期/提前明细）。
 
     big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
-    month（v7.4）：排产归属月作用域（该月 ∪ 未标注月）——同一 (项目, 计划日) 可能存在其他
-    月份导入的行，不隔离会在「逾期/提前明细」里重复计数。
+
+    month（v7.4.x，语义已收紧）：排产归属月作用域 = **仅统计该排产归属月导入的行**，
+    即严格 ``n.plan_month = month``，``plan_month IS NULL`` 的「未标注月」历史残留行
+    **一律排除**。此前沿用 ``_month_scope``（该月 ∪ 未标注月），会把上几个月导入、
+    仅 plan_date 落在本月的 legacy 行一并放行进「逾期/提前明细」详情页（用户 2026-10
+    反馈的 bug）。此处刻意不复用 ``_month_scope``，以免改动它而波及其它读路径。
+    month 为空/None 时保持原行为：不加任何月份条件（跨月汇总）。
     """
     conn = get_connection()
     try:
@@ -1900,7 +1905,12 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
             if big_area_person:
                 sql += " AND p.big_area_person = %s"
                 params.append(big_area_person)
-            sql += _month_scope("n.", month, params)
+            # 详情页月份口径收紧：严格按排产归属月过滤，NULL（未标注月）不匹配。
+            # ``<=>`` 为 NULL-safe 等值：plan_month IS NULL 时结果为 0（假）→ 被排除。
+            m = str(month).strip() if month else ""
+            if m:
+                sql += " AND n.plan_month <=> %s"
+                params.append(m)
             sql += " ORDER BY p.id, n.process_order, n.plan_date"
             cur.execute(sql, tuple(params))
             return [dict(r) for r in cur.fetchall()]
