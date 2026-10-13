@@ -26,6 +26,17 @@ const RESET_THROTTLE_MS = 5000
 
 const ACTIVITY_EVENTS = ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart']
 
+/**
+ * WARNING 弹窗打开期间仍视为「用户明确回来了」的事件。
+ *
+ * 为什么需要区分：WARNING 弹窗上有「继续使用 / 退出登录」两个按钮，而用户想点按钮
+ * 就**必须先把鼠标移过去** —— 若 mousemove 也算活动，弹窗会在指针移动的瞬间被自动关闭，
+ * 按钮随之从 DOM 移除，鼠标永远点不中（既有 UX 缺陷，2026-10-13 修复）。
+ * 故 WARNING 期间只认键盘这类不会因"路过"而误触的显式操作；
+ * 鼠标移动/滚动/触摸一律忽略，把决定权交还给用户点按钮。
+ */
+const WARNING_EXPLICIT_EVENTS = new Set(['keydown'])
+
 function readIdleSeconds() {
   const minutes = Number(import.meta.env.VITE_IDLE_TIMEOUT_MINUTES)
   const safe = Number.isFinite(minutes) && minutes > 0 ? minutes : DEFAULT_IDLE_MINUTES
@@ -98,8 +109,18 @@ export function useIdleLogout() {
     }, idleToWarningMs)
   }
 
-  function startTouchLoop() {
-    clearTimer('touch')
+  /**
+   * 确保 IDLE 心跳循环处于运行状态（**绝不重置**既有定时器）。
+   *
+   * 为什么不能每次用户活动都重启定时器：doReset() 由用户活动高频触发（节流 5 秒），
+   * 若在此重启 setInterval，只要操作间隔 < TOUCH_INTERVAL_MS（真实使用几乎必然），
+   * 定时器会被无限期向后推，touch() 永不执行 → 后端 JWT 的 iat 停留在登录时刻 →
+   * 登录满空闲阈值后必被 401 IDLE_TIMEOUT 误判为空闲失效（越活跃越必然掉线）。
+   * 因此这里只在「不存在心跳定时器且处于 IDLE」时启动，已有定时器保持原有节奏。
+   */
+  function ensureTouchLoop() {
+    if (touchTimer !== null) return
+    if (state.value !== 'IDLE') return
     touchTimer = setInterval(() => {
       touch()
     }, TOUCH_INTERVAL_MS)
@@ -152,7 +173,7 @@ export function useIdleLogout() {
     remaining.value = warnSeconds
     clearTimer('tick')
     scheduleWarning()
-    startTouchLoop()
+    ensureTouchLoop()
     if (broadcast) postActivity()
   }
 
@@ -208,8 +229,12 @@ export function useIdleLogout() {
   }
 
   /** 活动事件回调：节流 5 秒，避免高频事件打爆 */
-  function onActivity() {
+  function onActivity(evt) {
     if (!auth.isLoggedIn || state.value === 'EXPIRED') return
+    // WARNING 弹窗期间：忽略鼠标移动/滚动等「易误触」活动，避免指针移向
+    // 「继续使用」按钮时弹窗被自动关闭导致按钮点不到（见 WARNING_EXPLICIT_EVENTS）。
+    // 此期间仅键盘这类显式操作可恢复会话；恢复会话的正规入口是弹窗按钮（extend()）。
+    if (state.value === 'WARNING' && !WARNING_EXPLICIT_EVENTS.has(evt?.type)) return
     if (Date.now() - lastResetAt < RESET_THROTTLE_MS) return
     reset()
   }
@@ -236,7 +261,7 @@ export function useIdleLogout() {
     ACTIVITY_EVENTS.forEach((evt) => window.addEventListener(evt, onActivity, { passive: true }))
     unsubscribe = subscribe(onBroadcast)
     scheduleWarning()
-    startTouchLoop()
+    ensureTouchLoop()
   }
 
   function stop() {
