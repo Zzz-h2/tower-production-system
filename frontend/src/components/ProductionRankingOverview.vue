@@ -43,25 +43,25 @@
         <el-tag type="info" size="small">{{ rows.length }}</el-tag>
       </div>
       <el-table :data="rows" border stripe style="width: 100%" :row-style="{ height: '48px' }">
-        <el-table-column label="排名" width="90" align="center">
+        <el-table-column label="排名" width="200" align="center">
           <template #default="{ row }">
             <el-tag v-if="row.rank === 1" type="warning" size="small">🏆 冠军</el-tag>
             <span v-else>{{ row.rank }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="负责人" prop="manager" min-width="140">
+        <el-table-column label="负责人" prop="manager" width="140" align="center">
           <template #default="{ row }">
             <span style="font-weight:600; color:#1a365d;">{{ row.manager }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="项目数" prop="project_count" width="90" align="center" />
-        <el-table-column label="累计计划套数" min-width="140" align="right">
+        <el-table-column label="项目数" prop="project_count" width="110" align="center" />
+        <el-table-column label="累计计划套数" width="160" align="center">
           <template #default="{ row }">{{ fmtQty(row.total_plan) }}</template>
         </el-table-column>
-        <el-table-column label="累计完成套数" min-width="140" align="right">
+        <el-table-column label="累计完成套数" width="160" align="center">
           <template #default="{ row }">{{ fmtQty(row.total_actual) }}</template>
         </el-table-column>
-        <el-table-column label="完成率" min-width="200">
+        <el-table-column label="完成率" min-width="300" align="center">
           <template #default="{ row }">
             <template v-if="row.completion_rate === null || row.completion_rate === undefined">
               <span style="color:#a0aec0;">—</span>
@@ -74,7 +74,7 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column label="操作" width="90" align="center" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="openDetail(row)">详情</el-button>
           </template>
