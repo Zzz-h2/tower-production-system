@@ -140,18 +140,19 @@
                     >更改填报日期</el-button>
                   </template>
                   <div class="rd-picker-panel">
+                    <div class="rd-picker-hint">
+                      上次保存：<b>{{ savedDates[groupNodes[0].id] || '无' }}</b>
+                    </div>
                     <el-date-picker
                       v-model="reportDates[groupNodes[0].id]"
                       type="date"
                       value-format="YYYY-MM-DD"
                       format="YYYY-MM-DD"
                       :clearable="false"
+                      :teleported="false"
                       style="width: 100%;"
                       @change="onDatePicked(groupNodes[0].id, $event)"
                     />
-                    <div class="rd-picker-hint">
-                      上次保存：<b>{{ savedDates[groupNodes[0].id] || '无' }}</b>
-                    </div>
                   </div>
                 </el-popover>
               </div>
@@ -189,18 +190,19 @@
                       >更改填报日期</el-button>
                     </template>
                     <div class="rd-picker-panel">
+                      <div class="rd-picker-hint">
+                        上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
+                      </div>
                       <el-date-picker
                         v-model="reportDates[node.id]"
                         type="date"
                         value-format="YYYY-MM-DD"
                         format="YYYY-MM-DD"
                         :clearable="false"
+                        :teleported="false"
                         style="width: 100%;"
                         @change="onDatePicked(node.id, $event)"
                       />
-                      <div class="rd-picker-hint">
-                        上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
-                      </div>
                     </div>
                   </el-popover>
                 </div>
@@ -248,18 +250,19 @@
                   >更改填报日期</el-button>
                 </template>
                 <div class="rd-picker-panel">
+                  <div class="rd-picker-hint">
+                    上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
+                  </div>
                   <el-date-picker
                     v-model="reportDates[node.id]"
                     type="date"
                     value-format="YYYY-MM-DD"
                     format="YYYY-MM-DD"
                     :clearable="false"
+                    :teleported="false"
                     style="width: 100%;"
                     @change="onDatePicked(node.id, $event)"
                   />
-                  <div class="rd-picker-hint">
-                    上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
-                  </div>
                 </div>
               </el-popover>
               <!-- 按段填报（v7.1 行级化）：按套（计划行）生效；状态胶囊保留在行右侧不动 -->
@@ -1119,7 +1122,7 @@ async function saveSegments() {
 .rd-today { background: #f7fafc; color: #2d3748; }   /* 未开始/未填写的「今天」标识稍灰 */
 .rd-btn { padding: 4px 10px; font-size: 12px; }
 .rd-picker-panel { padding: 4px 0; }
-.rd-picker-hint { margin-top: 8px; font-size: 11px; color: #64748b; }
+.rd-picker-hint { margin-bottom: 6px; font-size: 11px; color: #64748b; }
 
 /* 一键提报弹窗 */
 .batch-body { padding: 4px 0; }
