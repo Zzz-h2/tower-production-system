@@ -5,7 +5,8 @@ FastAPI 运行路径实际在用的函数（保留）：
 - judge_node_status：节点五态判定（done/pending/in_progress/warning/overdue）
 - judge_process_card_status：工序卡片双维度状态（总进度 + 时间维度标签）
 - split_node_groups / _group_nodes：今日/逾期/未来/已完成 四组互斥切分
-- validate_today_quota / prev_process_total：今日待填报前序联动校验
+- validate_today_quota / validate_today_quota_nodes：前序联动校验
+  （前序联动已于 2026-10-16 按业务要求停用：两者恒放行，保留骨架仅为兼容调用点与响应结构）
 
 已清理的历史遗留死代码：Streamlit 版 正向/倒排计划（12 道制造工序）、
 工序进度计算、预警判定、预计交付、里程碑对比、日计划拆解等不再被引用的函数。
@@ -390,131 +391,21 @@ def validate_today_quota_nodes(process_name: str, plans_all: list[dict], actuals
                                target_nodes: list[dict], input_values: dict) -> dict:
     """节点级前序联动校验（部分成功模式核心）：返回 ``{node_id: 错误文案}``，全部合规返回 ``{}``。
 
-    规则与 validate_today_quota 完全一致（见其 docstring），区别仅在于：
-    逐节点独立判定、失败不中断，供一键提报「部分成功」使用。
+    !! 前序联动已于 2026-10-16 按业务要求停用：后置工序完全独立填报——前序未开工亦可填报、
+    填报量也不受前序完成量限制。为保持调用点与响应结构不变（一键提报 partial_ok 的
+    ``skipped`` 字段、逐条保存的整批拒绝路径），此处保留函数骨架但恒返回空字典。
+    如需恢复联动，请从版本管理历史回退本函数与 ``validate_today_quota`` 的实现。
+
+    入参保留原签名，纯粹为兼容既有调用点（``nodes.py``）与 QA 脚本的 import。
     """
-    errors: dict = {}
-    proc_idx = SCHEDULE_PROCESS_NAMES.index(process_name) if process_name in SCHEDULE_PROCESS_NAMES else -1
-    # 独立工序（累计完成总数/累计发运总数）：不参与 11 道前序联动校验，直接放行
-    if process_name in INDEPENDENT_PROCESS_NAMES:
-        return errors
-    if proc_idx < 0:
-        msg = (
-            f"【配置缺失】工序「{process_name}」未在排产顺序配置（SCHEDULE_PROCESS_NAMES）中，"
-            f"无法执行前序联动校验。请联系管理员在 backend/app/core/config.py 中补齐该工序名后重新部署。"
-        )
-        return {p["id"]: msg for p in target_nodes}
-    # 钢板到货(0)、法兰到货(1)：原材料到货，无数量限制
-    if proc_idx <= 1:
-        return errors
-
-    steel_name = SCHEDULE_PROCESS_NAMES[0]  # 钢板到货（下料的数量主约束）
-    is_cutting = (process_name == "下料")   # 下料前置硬编码为钢板到货
-
-    def _total_after(upto_pd: str) -> int:
-        """本工序截至 upto_pd 的累计实际（口径：本批提交值覆盖同节点既有值，非叠加）。
-
-        本批已被拒（errors）的节点不会写入，不计入累计——按 plan_date 升序逐条判定时，
-        当前条只承受「存量 + 先行通过条目」的额度占用。
-        """
-        t = 0
-        for pl in plans_all:
-            if pl["process_name"] != process_name:
-                continue
-            if str(pl["plan_date"])[:10] > upto_pd:
-                continue
-            nid = pl["id"]
-            if nid in errors:   # 已拒条目不会落库
-                continue
-            if nid in input_values:
-                t += int(input_values.get(nid, input_values.get(str(nid), 0)) or 0)
-            else:
-                t += int(actuals.get(nid, {}).get("actual_qty", 0) or 0)
-        return t
-
-    for p in sorted(target_nodes, key=lambda x: str(x["plan_date"])[:10]):
-        target_pd = str(p["plan_date"])[:10]
-        qty = int(input_values.get(p["id"], input_values.get(str(p["id"]), 0)) or 0)
-        if qty <= 0:
-            continue
-
-        # === 硬卡 1：下料→钢板到货；其他→紧邻前序 ===
-        # ⚠️ 不按 plan_date 过滤前驱 actuals：actuals 是事实（已完成套数），即使前驱的 plan_date
-        # 晚于 target_pd（如"排产导入·已完成"识别产物 plan_date=导入当天），只要 actual_qty>0
-        # 就表示该套数已真实完成，可作为后续工序的前置可用量。
-        prev_proc_name = steel_name if is_cutting else SCHEDULE_PROCESS_NAMES[proc_idx - 1]
-        prev_started = any(
-            int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0) > 0
-            and pl["process_name"] == prev_proc_name
-            for pl in plans_all
-        )
-        if not prev_started:
-            errors[p["id"]] = (
-                f"【前一工序未开始】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
-                f"但前置工序「{prev_proc_name}」截至 {target_pd} 尚未开始实际进度，"
-                f"前序累计实际仅 0 套。请先完成「{prev_proc_name}」的进度填报后再来提交。"
-            )
-            continue
-
-        # === 硬卡 2（累计口径）：填报后「本工序截至 target_pd 的累计」不得超过「前序截至 target_pd 的累计实际」。
-        # 旧口径只比单条 qty ≤ 前序累计，一批多条逐条判 1≤1 全过、合计却超额（pid=60 防腐 3>黑塔 1 即此漏洞）。
-        # ⚠️ 前驱 actuals 同样不按 plan_date 过滤（理由同上），仅 steel_plan_total 保留过滤——后者是
-        # 排程计划量，用于"前驱是否按计划全部到货"判定，决定是否放行多填。
-        if is_cutting:
-            # 下料专属：钢板到货「全部完成」则放行多填（满足提前到货实际）
-            steel_total = sum(
-                int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0)
-                for pl in plans_all
-                if pl["process_name"] == steel_name
-            )
-            # steel_plan_total 仍按 plan_date 过滤，但"已完成"导入的 plan（plan_date=导入当天 > target_pd、
-            # actual_qty>0）也计入"已完成计划量"——其 plan_qty 是用户已确认的承诺量，应参与"是否全部到货"判定。
-            steel_plan_total = sum(
-                int(pl.get("plan_qty", 0) or 0)
-                for pl in plans_all
-                if pl["process_name"] == steel_name
-                and (
-                    str(pl["plan_date"])[:10] <= target_pd
-                    or int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0) > 0
-                )
-            )
-            total_after = _total_after(target_pd)
-            if steel_total < steel_plan_total and total_after > steel_total:
-                errors[p["id"]] = (
-                    f"【数量校验未通过】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
-                    f"填报后本工序截至 {target_pd} 累计将达 {total_after} 套，"
-                    f"但截至 {target_pd} 钢板到货累计实际仅 {steel_total} 套"
-                    f"（计划 {steel_plan_total} 套尚未全部到货）。"
-                    f"请先完成钢板到货的进度填报后再来提交。"
-                )
-            # 钢板到货全部完成 → 放行多填
-        else:
-            # 卷制及之后：仅卡「紧邻前一工序」实际累计
-            prev_total = sum(
-                int(actuals.get(pl["id"], {}).get("actual_qty", 0) or 0)
-                for pl in plans_all
-                if pl["process_name"] == prev_proc_name
-            )
-            total_after = _total_after(target_pd)
-            if total_after > prev_total:
-                errors[p["id"]] = (
-                    f"【数量校验未通过】{process_name} 节点 {target_pd} 拟填报 {qty} 套，"
-                    f"填报后本工序截至 {target_pd} 累计将达 {total_after} 套，"
-                    f"但截至 {target_pd} 前一工序「{prev_proc_name}」累计实际仅 {prev_total} 套。"
-                    f"请先完成「{prev_proc_name}」的进度填报后再来提交。"
-                )
-    return errors
+    return {}
 
 
 def validate_today_quota(process_name: str, plans_all: list[dict], actuals: dict,
                          target_nodes: list[dict], input_values: dict) -> Optional[str]:
     """填报前序联动校验（手动逐条保存路径：整批硬卡，任一节点失败即整批拒绝）。
 
-    部分成功模式（一键提报）请改用 validate_today_quota_nodes。
+    !! 前序联动已于 2026-10-16 按业务要求停用（详见 ``validate_today_quota_nodes``）。
+    恒返回 ``None``（无错误），使 ``nodes.py`` 的逐条保存路径不再因前序未完成而拒绝。
     """
-    errors = validate_today_quota_nodes(
-        process_name, plans_all, actuals, target_nodes, input_values,
-    )
-    if errors:
-        return next(iter(errors.values()))
     return None

@@ -503,17 +503,8 @@ function onExceptionChanged() {
 }
 
 // ---- 失败信息紧凑渲染工具（纯函数，放最前，不依赖响应式状态） ----
-// 从后端 message 中抽出关键事实，便于紧凑展示
-function parseQuotaMsg(msg) {
-  // 后端格式：「【数量校验未通过】{工序} 节点 {日期} 拟填报 {qty} 套，但截至 {日期} 前序工序（…）累计实际仅 {prev} 套。…」
-  const m1 = String(msg || '').match(/节点\s+(\S+)\s+拟填报/)
-  const m2 = String(msg || '').match(/拟填报\s+(\d+)\s+套/)
-  const m3 = String(msg || '').match(/累计实际仅\s+(\d+)\s+套/)
-  return { nodeDate: m1?.[1] || null, qty: m2?.[1] || null, prev: m3?.[1] || null }
-}
 // 每个错误 code 一条带 emoji 的短摘要
 const CODE_FRIENDLY = {
-  PREV_PROC_QUOTA_EXCEEDED: '🔴 数量校验未通过：请先完成前序工序的实际填报后再试',
   QTY_EXCEED_PLAN: '⚠️ 数量超计划：节点实际数量不能超过计划数',
   DONE_READONLY: '🔒 已完成分组不可编辑（仅管理员可调整）',
   BAD_REPORT_DATE: '📅 填报日期格式错误（应为 YYYY-MM-DD）',
@@ -524,17 +515,9 @@ const CODE_FRIENDLY = {
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
-// 把每组的失败压缩成一行（PREV 走量化模板，其它走去【】前缀的原 message）
+// 把每组的失败压缩成一行（去掉【】前缀，保留原始 message）
 function shortItem(group, detail) {
   const label = groupLabelMap[group] || group
-  if (detail?.code === 'PREV_PROC_QUOTA_EXCEEDED') {
-    const f = parseQuotaMsg(detail?.message || '')
-    const date = f.nodeDate ? `（${f.nodeDate}）` : ''
-    if (f.qty != null && f.prev != null) {
-      return `${label}${date}：拟报 ${f.qty} 套 / 前序仅 ${f.prev} 套`
-    }
-    return `${label}：前序累计不足`
-  }
   const clean = (detail?.message || '请求失败').replace(/^【.+?】/, '')
   return `${label}：${clean}`
 }
@@ -595,13 +578,13 @@ const labelOf = (node) => {
   const n = detail.value?.nodes?.find((x) => x.id === node.id)
   return n ? n.label : '—'
 }
-// 分组差异化上限：done=当前值只能减；overdue/future=计划数；today=前序联动（后端校验）；
+// 分组差异化上限：done=当前值只能减；today/overdue/future=计划数；
 // 独立工序不限上限（累计指标可自由填报，后端同样不设上限）
 const maxOf = (node) => {
   if (isIndependent.value) return undefined
   if (activeGroup.value === 'done') return node.actual_qty
   if (activeGroup.value === 'overdue' || activeGroup.value === 'future') return node.plan_qty
-  return node.plan_qty   // today：上限计划数，前端宽松，后端做前序联动校验
+  return node.plan_qty   // today：上限计划数（后端仅做数量超计划校验，不再做前序联动）
 }
 // 独立工序：本次输入后剩余套数（实时反映用户输入）—— 仅用于非独立（11 道排产）
 const pendingOf = (node) => {
@@ -711,7 +694,7 @@ async function save() {
           group: g,
           values,
           manager: props.manager || undefined,
-          month: props.month || undefined,   // v7.4：后端按同一月份口径校验（前序联动）
+          month: props.month || undefined,   // v7.4：后端按同一月份口径校验
         }),
       ),
     )
@@ -817,39 +800,16 @@ async function executeBatchReport() {
       report_date: usePlanDate ? n.plan_date : today,
     }))
     // 复用现有批量保存接口：单个分组一次性提交；partial_ok=部分成功模式
-    // （前序联动校验失败的节点由后端跳过并返回明细，不再整批 400）
+    // （后端校验仅剩分组归属 / 数量超计划等；前序联动已于 2026-10-16 停用）
     const res = await saveNodeProgress(props.pid, props.processName, {
       group: activeGroup.value,
       values,
       manager: props.manager || undefined,
-      month: props.month || undefined,   // v7.4：后端按同一月份口径校验（前序联动）
+      month: props.month || undefined,   // v7.4：后端按同一月份口径校验
       partial_ok: true,
     })
     const saved = res?.saved ?? values.length
-    const skipped = Array.isArray(res?.skipped) ? res.skipped : []
     const dateLabel = usePlanDate ? '按各节点原计划日期' : today
-
-    // 跳过明细：按「前序工序 · 原因」聚合 + 完整明细滚动列表
-    let detailHtml = ''
-    if (skipped.length) {
-      const buckets = {}
-      skipped.forEach((s) => {
-        const reason = /【前一工序未开始】/.test(s.message || '') ? '前序未开始' : '数量超限'
-        const m = (s.message || '').match(/(?:前置|前一)工序「(.+?)」/)
-        const prev = m ? m[1] : '前序'
-        const key = `${prev} · ${reason}`
-        buckets[key] = (buckets[key] || 0) + 1
-      })
-      const summary = Object.entries(buckets)
-        .map(([k, c]) => `${k} ×${c}`)
-        .join('；')
-      const rows = skipped
-        .map((s) => `<div>📅 ${esc(s.plan_date || '-')}：${esc(s.message || '')}</div>`)
-        .join('')
-      detailHtml = `
-        <div style="margin-top:8px; color:#b7791f; font-weight:600;">⏭ 跳过 ${skipped.length} 条：${esc(summary)}</div>
-        <div style="margin-top:4px; max-height:180px; overflow-y:auto; font-size:12px; color:#4a5568; line-height:1.7;">${rows}</div>`
-    }
 
     // 先关弹窗 + 刷新数据，最后才弹提示：保证提示层即使出异常也不影响 UI 与数据
     batchDialogVisible.value = false
@@ -859,7 +819,7 @@ async function executeBatchReport() {
       dangerouslyUseHTMLString: true,
       message: `<div style="line-height:1.6; max-width:540px;"><b>✅ 一键提报完成：成功提交 ${saved} 条（填报日期：${esc(dateLabel)}）</b>${
         batchSkippedCount.value > 0 ? `<div style="margin-top:2px; color:#718096; font-size:13px;">另跳过 ${batchSkippedCount.value} 条无计划日期节点</div>` : ''
-      }${detailHtml}</div>`,
+      }</div>`,
       duration: 8000,
       showClose: true,
     })
