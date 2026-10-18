@@ -34,13 +34,36 @@
           </template>
           <!-- 11 道排产工序：按节点逐行展示（分页展开，避免 60+ 行一次性渲染卡顿） -->
           <template v-else>
-            <div v-for="row in displayedDetailNodes" :key="row.id" class="row-card row-grid-detail">
+            <!-- 异常暂停汇总条（2026-10）：让用户一眼看出「本工序有哪几套存在未关闭异常」
+                 数据源 = 后端 enrich_rows 的 has_open_exception / exception_processes /
+                 exception_paused / set_date（所属套 = 同一「下料计划日」） -->
+            <div v-if="openExcSets.length" class="exc-banner">
+              <span class="exc-banner-title">⚠️ 本工序有 {{ openExcSets.length }} 套存在未关闭异常</span>
+              <span class="exc-banner-body">
+                <span v-for="s in openExcSets" :key="s.key" class="exc-banner-item">
+                  {{ s.label }}
+                </span>
+              </span>
+              <span class="exc-banner-hint">这些套的后续工序已暂停（⏸ 异常暂停），不计逾期；异常解决后按解决时间重算计划日。</span>
+            </div>
+            <div
+              v-for="row in displayedDetailNodes"
+              :key="row.id"
+              class="row-card row-grid-detail"
+              :class="{ 'row-has-exception': row.has_open_exception }"
+            >
               <div class="row-bar" :style="{ background: colorOf(row.status) }"></div>
               <div class="row-info">
                 <div class="row-dates">
                   <div class="date-block">
                     <span class="date-key">计划</span>
                     <span class="date-val">{{ row.plan_date }}</span>
+                    <!-- 已关闭异常把锚点后推 → 展示重算后的计划日，并标注原排产日 -->
+                    <span
+                      v-if="row.plan_date_plan && row.plan_date_plan !== row.plan_date"
+                      class="date-orig"
+                      :title="`原排产计划日 ${row.plan_date_plan}（已按异常解决时间重算为新计划日）`"
+                    >原 {{ row.plan_date_plan }}</span>
                   </div>
                   <div class="date-block">
                     <span class="date-key">实际</span>
@@ -54,6 +77,12 @@
                     <!-- 按段填报（v7.1 行级化）：有段记录的行追加橙色段进度提示 -->
                     <span v-if="row.segment_total != null" style="color:#b7791f;">&nbsp;已完成 {{ row.segment_done }}/{{ row.segment_total }} 段</span>
                   </span>
+                  <!-- 「哪一套」标识：该行所属套存在未关闭异常（红色小标签 + 异常工序名） -->
+                  <span
+                    v-if="row.has_open_exception"
+                    class="exc-chip"
+                    :title="`所属套（下料计划日 ${row.set_date || '—'}）存在未关闭异常：${(row.exception_processes || []).join('、') || '—'}`"
+                  >{{ excChipText(row.exception_processes, row.set_date) }}</span>
                 </div>
               </div>
               <span class="status-pill" :style="pillStyle(row.status)">{{ row.label }}</span>
@@ -213,13 +242,33 @@
             </div>
           </div>
           <!-- 11 道排产工序：原有 row-grid 行为（分页展开，避免大量 row-card 一次性渲染导致卡顿） -->
-          <div v-else v-for="node in displayedGroupNodes" :key="node.id" class="row-card row-grid">
+          <div
+            v-else
+            v-for="node in displayedGroupNodes"
+            :key="node.id"
+            class="row-card row-grid"
+            :class="{ 'row-has-exception': hasOpenExc(node) }"
+          >
             <div class="row-bar" :style="{ background: colorOf(statusOf(node)) }"></div>
             <div class="row-left-section">
-              <span v-if="!isIndependent" class="cell-plan-date">{{ node.plan_date }}</span>
+              <span v-if="!isIndependent" class="cell-plan-date">
+                {{ node.plan_date }}
+                <!-- 已关闭异常把锚点后推 → 生效计划日已重算，附原排产日对照（与节点详情一致） -->
+                <span
+                  v-if="origPlanOf(node) && origPlanOf(node) !== node.plan_date"
+                  class="date-orig"
+                  :title="`原排产计划日 ${origPlanOf(node)}（已按异常解决时间重算为新计划日）`"
+                >原 {{ origPlanOf(node) }}</span>
+              </span>
               <span class="cell-plan-qty">
                 <span class="qty-num">{{ node.plan_qty }}</span><span class="qty-unit">套</span>
               </span>
+              <!-- 「哪一套」标识（填报进度同样醒目提示，与节点详情一致） -->
+              <span
+                v-if="hasOpenExc(node)"
+                class="exc-chip"
+                :title="`所属套（下料计划日 ${excOf(node).set_date || '—'}）存在未关闭异常：${excProcesses(node) || '—'}`"
+              >{{ excChipText(excOf(node).exception_processes, excOf(node).set_date) }}</span>
             </div>
             <div class="row-center-section">
               <el-input-number
@@ -529,7 +578,8 @@ const selectedNodeId = ref(null)
 
 // 异常提报后触发预警列表刷新（复用节点保存事件总线）
 function onExceptionChanged() {
-  store.lastNodeSavedAt = Date.now()
+  store.lastNodeSavedAt = Date.now()          // 预警列表（AlertList）刷新
+  store.lastExceptionChangedAt = Date.now()   // 工序卡片刷新「存在异常」标签与预警态
 }
 
 // === 异常提报（v7.8 行级化：每套直达） ===
@@ -608,11 +658,13 @@ const isIndependent = computed(() => !!detail.value?.is_independent)
 const statusColors = {
   done: '#38a169', pending: '#718096', in_progress: '#3182ce', warning: '#3182ce', overdue: '#e53e3e',
   waiting_material: '#a0aec0',
+  exception_paused: '#a0aec0',   // ⏸ 异常暂停（灰，与待下料同视觉层级）
   matches_dispatch: '#38a169',
 }
 const statusBgs = {
   done: '#f0fff4', pending: '#f7fafc', in_progress: '#ebf8ff', warning: '#ebf8ff', overdue: '#fff5f5',
   waiting_material: '#f7fafc',
+  exception_paused: '#f7fafc',
   matches_dispatch: '#f0fff4',
 }
 const colorOf = (s) => statusColors[s] || '#718096'
@@ -625,6 +677,39 @@ const labelOf = (node) => {
   const n = detail.value?.nodes?.find((x) => x.id === node.id)
   return n ? n.label : '—'
 }
+// === 异常暂停（2026-10）：所属套标识 ===
+// 「同一套」= 后端的 set_date（该行所属套的「下料计划日」，非套号）；
+// has_open_exception / exception_processes / exception_paused 均由后端 enrich_rows 给出，
+// 前端不做任何推断，仅按字段渲染（保证与总览/排名同一口径）。
+const excOf = (node) => detail.value?.nodes?.find((x) => x.id === node.id) || {}
+// 原排产计划日（重算前的值）：后端 groups / nodes 行均带 plan_date_plan；
+// 未重算的行它与 plan_date 相等 → 不显示「原 X」删除线（避免误显示）。
+const origPlanOf = (node) => node?.plan_date_plan || ''
+const hasOpenExc = (node) => !!excOf(node).has_open_exception
+const excProcesses = (node) => (excOf(node).exception_processes || []).join('、')
+// 「哪一套」标签文案：有 set_date（可反推所属套）时带上该套下料计划日，
+// 反之（存量项目无时长数据，无法反推）只显示异常工序名，不显示误导性的「下料 —」。
+function excChipText(procs, setDate) {
+  const name = (procs || []).join('、') || '存在'
+  return setDate ? `⚠️ ${name}异常 · 下料 ${setDate}` : `⚠️ ${name}异常`
+}
+// 本工序「有未关闭异常」的套汇总（节点详情页顶部提示条用）：按 set_date 去重
+const openExcSets = computed(() => {
+  const map = new Map()
+  for (const r of detail.value?.nodes || []) {
+    if (!r.has_open_exception) continue
+    const key = r.set_date || `#${r.id}`
+    if (!map.has(key)) map.set(key, { key, set_date: r.set_date, processes: new Set() })
+    const item = map.get(key)
+    ;(r.exception_processes || []).forEach((p) => p && item.processes.add(p))
+  }
+  return [...map.values()].map((x) => ({
+    key: x.key,
+    label: x.set_date
+      ? `下料 ${x.set_date} 套${x.processes.size ? `（${[...x.processes].join('、')}）` : ''}`
+      : `该套（${[...x.processes].join('、') || '—'}）`,
+  }))
+})
 // 分组差异化上限：done=当前值只能减；today/overdue/future=计划数；
 // 独立工序不限上限（累计指标可自由填报，后端同样不设上限）
 const maxOf = (node) => {
@@ -1100,6 +1185,44 @@ async function saveSegments() {
 .date-key { color: #1a365d; font-size: 13px; font-weight: 700; }
 .date-val { color: #1a365d; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 14px; }
 .date-empty { color: #a0aec0; font-style: italic; font-weight: 400; }
+/* 异常解决后重算的计划日：附带「原 X」对照，弱化显示避免抢主日期 */
+.date-orig {
+  font-size: 11px; color: #a0aec0; font-weight: 400;
+  text-decoration: line-through; white-space: nowrap;
+}
+
+/* === 异常暂停（2026-10）：所属套标识 === */
+/* 行级醒目标识：红框 + 淡红底 + 柔和外发光（与「存在异常」工序卡片同视觉语言） */
+.row-card.row-has-exception {
+  border: 1px solid #fc8181;
+  background: #fffafa;
+  box-shadow: 0 0 0 3px rgba(229, 62, 62, 0.06);
+  border-radius: 8px;
+}
+/* 「哪一套」小标签：红底白字系，带异常工序名 + 该套下料计划日 */
+.exc-chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 1px 8px; border-radius: 10px;
+  background: #fff5f5; color: #c53030;
+  border: 1px solid #feb2b2;
+  font-size: 11px; font-weight: 600; line-height: 17px;
+  white-space: nowrap; flex-shrink: 0;
+}
+/* 节点详情顶部汇总条：本工序有哪几套存在未关闭异常 + 口径说明 */
+.exc-banner {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  padding: 8px 14px; margin-bottom: 10px;
+  background: #fffaf0; border: 1px solid #f6ad55; border-radius: 8px;
+  font-size: 12px; color: #7b341e;
+}
+.exc-banner-title { font-weight: 700; color: #c05621; }
+.exc-banner-body { display: flex; flex-wrap: wrap; gap: 6px; }
+.exc-banner-item {
+  background: #fff; border: 1px solid #fbd38d; border-radius: 10px;
+  padding: 1px 8px; font-weight: 600; color: #9c4221;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.exc-banner-hint { color: #975a16; flex-basis: 100%; }
 .cell-plan-date { font-size: 13px; color: #64748b; white-space: nowrap; }
 .cell-plan-qty { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
 .qty-num { font-weight: 600; font-variant-numeric: tabular-nums; font-size: 15px; }

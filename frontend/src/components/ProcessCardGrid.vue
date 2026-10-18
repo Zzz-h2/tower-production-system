@@ -1,11 +1,13 @@
 <template>
   <el-row :gutter="16" v-if="processes.length">
     <el-col :span="8" v-for="p in processes" :key="p.process_name" style="margin-bottom: 16px;">
-      <div class="process-card-box" style="height: 100%;">
+      <div class="process-card-box" :class="{ 'pc-has-exception': p.has_exception }" style="height: 100%;">
         <div class="pc-header">
           <span class="pc-dot" :style="{ color: colorOf(p.status) }">{{ emojiOf(p.status) }}</span>
           <span class="pc-title">{{ p.process_name }}</span>
           <span class="pc-pill pc-tag" :style="pillStyle(p.status)">{{ p.label }}</span>
+          <!-- 存在异常：该工序有未关闭的异常提报（后端 has_exception）→ 卡片进入预警态 -->
+          <span v-if="p.has_exception" class="pc-tag pc-tag-exc">⚠️ 存在异常</span>
           <span v-if="p.has_today_plan" class="pc-tag pc-tag-today">📌 今日有计划</span>
           <span v-for="t in (p.tags || [])" :key="t" class="pc-tag" :style="tagStyle(t)">{{ t }}</span>
         </div>
@@ -38,13 +40,15 @@ const statusColors = {
   done: '#38a169', pending: '#718096', in_progress: '#3182ce', warning: '#3182ce',
   overdue: '#e53e3e', done_early: '#0ea5e9', matches_dispatch: '#38a169',
   waiting_material: '#a0aec0',
+  exception_paused: '#a0aec0',   // ⏸ 异常暂停（该套前序工序有未关闭异常）
 }
 const statusBgs = {
   done: '#f0fff4', pending: '#f7fafc', in_progress: '#ebf8ff', warning: '#ebf8ff',
   overdue: '#fff5f5', done_early: '#e0f2fe', matches_dispatch: '#f0fff4',
   waiting_material: '#f7fafc',
+  exception_paused: '#f7fafc',
 }
-const emojis = { done: '🟢', pending: '⚪', in_progress: '🔵', warning: '🟡', overdue: '🔴', done_early: '✨', matches_dispatch: '✅', waiting_material: '⏸' }
+const emojis = { done: '🟢', pending: '⚪', in_progress: '🔵', warning: '🟡', overdue: '🔴', done_early: '✨', matches_dispatch: '✅', waiting_material: '⏸', exception_paused: '⏸' }
 const colorOf = (s) => statusColors[s] || '#718096'
 const pillStyle = (s) => ({ background: statusBgs[s] || '#f7fafc', color: statusColors[s] || '#718096' })
 const emojiOf = (s) => emojis[s] || '⚪'
@@ -87,6 +91,19 @@ const tagStyle = (t) => {
   background: #ebf8ff;
   color: #1a365d;
   border: 1px solid #bee3f8;
+}
+/* 存在异常：该工序有未关闭的异常提报 → 红色标签 + 卡片整体预警态（红框 + 淡红底 + 柔和外发光） */
+.pc-tag-exc {
+  background: #fff5f5;
+  color: #c53030;
+  border: 1px solid #feb2b2;
+  font-weight: 600;
+}
+.process-card-box.pc-has-exception {
+  border: 1px solid #fc8181;
+  background: #fffafa;
+  border-radius: 8px;
+  box-shadow: 0 0 0 3px rgba(229, 62, 62, 0.08);
 }
 /* 兜底：旧 banner 残留直接隐藏 */
 .pc-tag-today-banner { display: none; }

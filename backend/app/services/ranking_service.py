@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta
 from ..core import db
 from ..core.timeutil import business_today
 from ..services.business_logic import judge_node_status, build_time_rules
+from ..services.node_service import build_exception_anchors
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,14 @@ def get_production_ranking_detail(month: str, person: str, big_area_person: str 
     actuals = db.get_actuals_rich_by_node_ids(node_ids)           # 1 次查询（含日期，支持闸门锚点）
     pids = sorted({int(p["project_id"]) for p in plans})
     durations_map = db.get_project_process_durations_batch(pids, month)   # 1 次查询（按套时长/偏移）
+    # 异常暂停（2026-10）：排名明细的「逾期/提前」必须与页面同口径 ——
+    # 暂停中的后续工序不得出现在逾期明细里；已关闭异常按「解决时间」重算的新计划日判定。
+    # 批量取回（1 次查询）；失败降级为"无异常"，排名口径回到改动前行为。
+    try:
+        exc_map = db.get_node_exceptions_batch(pids)
+    except Exception as exc:                      # noqa: BLE001 — 增强判定，失败不阻塞排名
+        logger.warning("get_node_exceptions_batch 失败（按无异常处理）：%s", exc)
+        exc_map = {}
     today = business_today()
 
     # 按项目算「闸门 + effective 计划日期」（与页面口径一致，避免排名与页面打架）
@@ -116,14 +125,18 @@ def get_production_ranking_detail(month: str, person: str, big_area_person: str 
         by_pid.setdefault(int(p["project_id"]), []).append(p)
     rules_all: dict = {}
     for pid, plist in by_pid.items():
-        rules_all.update(build_time_rules(plist, actuals, durations_map.get(pid)))
+        _dur = durations_map.get(pid)
+        exc_anchors = build_exception_anchors(exc_map.get(pid) or [], _dur, plist)
+        rules_all.update(build_time_rules(plist, actuals, _dur, exc_anchors))
 
     result = []
     for p in plans:
         aq = int((actuals.get(int(p["id"])) or {}).get("actual_qty", 0) or 0)
         ru = rules_all.get(int(p["id"])) or {}
-        # 待下料（闸门关的制造链工序）与法兰到货（不作主指标）不进逾期/提前明细
-        if ru.get("waiting_material") or not ru.get("count_as_overdue", True):
+        # 待下料（闸门关的制造链工序）与法兰到货（不作主指标）不进逾期/提前明细；
+        # 异常暂停（⏸ 异常暂停）同样排除——暂停期间不追责（用户 2026-10 口径）
+        if ru.get("waiting_material") or ru.get("exception_paused") \
+                or not ru.get("count_as_overdue", True):
             continue
         eff = ru.get("eff_plan_date")
         plan_date = eff if eff else p["plan_date"]        # 闸门开 → 用重算后的计划日期

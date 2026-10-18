@@ -61,11 +61,13 @@ STATUS_COLORS = {
     "warning": "#d69e2e",
     "overdue": "#e53e3e",
     "waiting_material": "#a0aec0",   # ⏸ 待下料（闸门关：未实际下料，暂不判延期）
+    "exception_paused": "#a0aec0",   # ⏸ 异常暂停（该套前序工序有未关闭异常，后续工序暂停）
 }
 STATUS_EMOJI = {
     "done": "🟢", "pending": "⚪", "in_progress": "🔵",
     "warning": "🟡", "overdue": "🔴",
     "waiting_material": "⏸",
+    "exception_paused": "⏸",
 }
 
 # 原材料到货工序（不参与「下料闸门」）：钢板到货、法兰到货。

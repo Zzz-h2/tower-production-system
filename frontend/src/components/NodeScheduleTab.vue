@@ -197,6 +197,10 @@ watch(() => props.pid, () => {
 })
 // 全局月份切换（排产总览页 / 顶部月份选择器）→ 详情页同步切换排产归属月
 watch(currentMonth, () => { reload() })
+// 异常提报 / 关闭后刷新工序卡片：让「⚠️ 存在异常」标签与预警态实时生效。
+// ⚠️ 监听独立信号 lastExceptionChangedAt —— 不能监听 lastNodeSavedAt：
+//    后者由上面的 reload() 自己写入，会形成 reload → 改时间戳 → watch → reload 死循环。
+watch(() => store.lastExceptionChangedAt, () => { reload() })
 </script>
 
 <style scoped>

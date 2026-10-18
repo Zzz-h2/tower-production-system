@@ -42,7 +42,8 @@ def prev_process_total(process_name: str, plans_all: list[dict], actuals: dict,
     return total
 
 
-def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[dict] = None) -> dict:
+def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[dict] = None,
+                     exceptions: Optional[dict] = None) -> dict:
     """按「每一套（每个计划行）」计算闸门与 effective 计划日期（工序时间/延期判定规则升级核心）。
 
     闸门 = 该行所属套的「下料」是否已有实际填报（actual_qty>0）。
@@ -51,19 +52,30 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
     - 制造链（下料~具备验收）：
         · 闸门关 → waiting_material=True（⏸ 待下料，灰），不计入统计；
         · 闸门开 → eff_plan_date = 实际下料日 + 该行所属套的 offset_days，计入统计。
+        · 该套存在**未关闭**异常工序 → 其后序工序（offset 更大）exception_paused=True
+          （⏸ 异常暂停，灰），暂停**优先于**等待下料，不计入逾期/风险/排名。
+        · 该套存在**已关闭**异常 → 以「异常解决时间」为新锚点重算后续工序计划日：
+          eff_plan_date = max(下料实际日, max_i(closed_at_i − offset_i)) + 该行 offset。
 
     Args:
         plans_all: 项目全部节点计划行（含 id/process_name/plan_date）
         actuals: {node_plan_id: {actual_qty, report_date}}
         durations: {(process_name, 'YYYY-MM-DD'): {"offset_days": int}}；为 None/缺该键 → 回退现规则
                    （该行不做闸门抑制、不重算日期，行为与升级前一致）
+        exceptions: 可选，{该套下料计划日 d0 ('YYYY-MM-DD'): [
+                        {"process_name": str, "offset_days": int,
+                         "status": 'pending'|'processing'|'closed', "closed_at": 'YYYY-MM-DD'|None},
+                        ...]}；为 None/缺该 d0 → 与升级前完全一致（向后兼容红线）。
 
     Returns:
-        {node_id: {"waiting_material": bool, "eff_plan_date": str|None, "count_as_overdue": bool}}
+        {node_id: {"waiting_material": bool, "eff_plan_date": str|None, "count_as_overdue": bool,
+                   "exception_paused": bool, "set_date": str|None}}
+        ⚠️ 后两个键为本次新增（默认 False / None），既有调用方按 key 取值，不感知新增字段。
     """
     mfg = set(MANUFACTURE_PROCESS_NAMES)
     cutting_name = MANUFACTURE_PROCESS_NAMES[0] if MANUFACTURE_PROCESS_NAMES else "下料"
     steel_name = MATERIAL_PROCESS_NAMES[0] if MATERIAL_PROCESS_NAMES else "钢板到货"
+    exc_map = exceptions or {}
 
     # 下料行：plan_date -> 该套最早实际下料日（闸门锚点）
     cutting_anchor: dict[str, str] = {}
@@ -79,6 +91,12 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
             if cur is None or rd < cur:
                 cutting_anchor[pd] = rd
 
+    def _rule(waiting: bool, eff: Optional[str], count: bool,
+              paused: bool = False, set_date: Optional[str] = None) -> dict:
+        """统一规则结构（新增字段集中在唯一出口，避免各分支漏字段）。"""
+        return {"waiting_material": waiting, "eff_plan_date": eff, "count_as_overdue": count,
+                "exception_paused": paused, "set_date": set_date}
+
     rules: dict = {}
     for p in plans_all:
         nid = p.get("id")
@@ -86,31 +104,63 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
         pd = str(p.get("plan_date") or "")[:10]
         if pn not in mfg:
             # 到货类（及其它非制造链）：钢板计入主指标，法兰不计入
-            rules[nid] = {"waiting_material": False, "eff_plan_date": None,
-                          "count_as_overdue": (pn == steel_name)}
+            rules[nid] = _rule(False, None, pn == steel_name)
             continue
         info = (durations or {}).get((pn, pd))
         if not info:
-            # 无时长数据（存量项目/未重新导入）→ 回退现规则
-            rules[nid] = {"waiting_material": False, "eff_plan_date": None, "count_as_overdue": True}
+            # 无时长数据（存量项目/未重新导入）→ 回退现规则（异常也无从定位所属套）
+            rules[nid] = _rule(False, None, True)
             continue
         offset = int(info.get("offset_days") or 0)
         base = parse_date(p.get("plan_date"))
         d0 = (base - timedelta(days=offset)).strftime("%Y-%m-%d") if base else None
         anchor = cutting_anchor.get(d0) if d0 else None
-        if not anchor:
-            rules[nid] = {"waiting_material": True, "eff_plan_date": None, "count_as_overdue": False}
+        exc_list = (exc_map.get(d0) or []) if d0 else []
+
+        # ---- A) 未关闭异常：该套「后续工序」暂停（暂停优先于待下料）----
+        # 「后续工序」判定：本行 offset > 异常工序 offset；异常工序自身不暂停（它确实逾期了）
+        paused = any(
+            str(e.get("status") or "pending") != "closed"
+            and int(e.get("offset_days") or 0) < offset
+            for e in exc_list
+        )
+
+        # ---- B) 已关闭异常：解决时间回推锚点，重算后续工序计划日 ----
+        # 候选锚点 = closed_at − 异常工序 offset；仅对本行 offset > 异常 offset 的行生效
+        # （否则把「更早工序」的计划日也往后推，会掩盖真实逾期；异常工序自身保持原计划判定）
+        new_anchor = parse_date(anchor) if anchor else None
+        for e in exc_list:
+            if str(e.get("status") or "") != "closed":
+                continue
+            exc_offset = int(e.get("offset_days") or 0)
+            closed_at = str(e.get("closed_at") or "")[:10]
+            if not closed_at or exc_offset >= offset:
+                continue
+            cand = parse_date(closed_at)
+            if cand is None:
+                continue
+            cand = cand - timedelta(days=exc_offset)
+            if new_anchor is None or cand > new_anchor:
+                new_anchor = cand
+
+        if paused:
+            # 灰态「⏸ 异常暂停」：不判逾期、不计入逾期统计/风险等级/排名；
+            # 仍保留可填报性（计划日回退原计划日由 enrich_rows 处理）
+            rules[nid] = _rule(False, None, False, paused=True, set_date=d0)
+        elif new_anchor is None:
+            # 闸门关（该套尚未实际下料，且无已关闭异常可作锚点）
+            rules[nid] = _rule(True, None, False, set_date=d0)
         else:
-            eff = (parse_date(anchor) + timedelta(days=offset)).strftime("%Y-%m-%d")
-            rules[nid] = {"waiting_material": False, "eff_plan_date": eff, "count_as_overdue": True}
+            eff = (new_anchor + timedelta(days=offset)).strftime("%Y-%m-%d")
+            rules[nid] = _rule(False, eff, True, set_date=d0)
     return rules
 
 
 def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=None, *,
                       eff_plan_date=None, waiting_material=False, count_as_overdue=True,
-                      segment_active=False):
+                      segment_active=False, exception_paused=False):
     """
-    判定单个工序节点计划状态（五态 + 完成日期偏差 + 待下料态）。
+    判定单个工序节点计划状态（五态 + 完成日期偏差 + 待下料态 + 异常暂停态）。
 
     新增（工序时间/延期判定规则升级）：
     - waiting_material=True：闸门关（该套尚未实际下料）的制造链工序 → 返回 ⏸ 待下料（灰），
@@ -123,6 +173,11 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
       → 视为「已开工但未整套完成」，返回 🔵 进行中（未来计划日为 🔵 提前进行中），
       **不再判 🔴 逾期未完成**（用户 2026-10-09 口径：按段提报后状态应为进行中）。
       注意：按段填报不写 actual_qty，故不能靠 actual_qty>0 分支兜住，必须单独判。
+    - exception_paused（异常暂停，2026-10）：该行所属套存在**未关闭**异常且本行是其后序工序
+      → 返回 ⏸ 异常暂停（灰），level=0、不计入逾期统计/风险/排名、偏差显示 '-'。
+      优先级高于 waiting_material（暂停期间连"待下料"提示都不再显示）。
+      ⚠️ 已完成的行（actual_qty >= plan_qty）**不**回退为暂停态——暂停是「计划口径」，
+         已经发生的完成事实不应被抹掉，否则 KPI「达标节点」会凭空减少。
 
     规则（按此顺序）：
     - done:        actual_qty >= plan_qty              → 🟢 已完成
@@ -143,12 +198,22 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
     Returns:
         dict: {"status", "label", "level", "lag_qty",
                "completion_date", "deviation_days", "deviation_label", "deviation_color"}
-            - status: done | pending | in_progress | warning | overdue
+            - status: done | pending | in_progress | warning | overdue | waiting_material | exception_paused
             - level:  overdue=4 > warning=3 > in_progress=2 > pending=0 = done=0
             - lag_qty: 部分完成=plan-actual；逾期=plan；其余 0
             - deviation_label: 提前X天 / 准时 / 延期X天 / 还有X天 / 进行中 / 逾期X天
             - deviation_color: 提前/准时/进行中 #38a169；未到 #718096；warning #d69e2e；overdue #e53e3e
     """
+    # 已完成的行不回退状态：暂停只作用于「尚未完成」的后续工序
+    if exception_paused and int(actual_qty or 0) < int(plan_qty or 0):
+        # 异常暂停态（该套存在未关闭异常，本行为其后序工序）：灰态、不判延期、不计入统计
+        return {
+            "status": "exception_paused", "label": "⏸ 异常暂停", "level": 0, "lag_qty": 0,
+            "completion_date": None,
+            "deviation_days": 0, "deviation_label": "-", "deviation_color": "#a0aec0",
+            "count_as_overdue": False,
+        }
+
     # 待下料态（闸门关的制造链工序）：灰态、不判延期、不计入逾期/风险/排名
     if waiting_material:
         return {
@@ -265,6 +330,8 @@ def judge_process_card_status(proc_nodes: list[dict], actuals: dict, today=None,
     """工序卡片状态：主状态(总进度) + 附加标签(时间维度偏差)。
 
     主状态（总进度）：
+    - waiting_material 待下料: 整道工序所有行都是「闸门关」（该套尚未实际下料）
+    - exception_paused 异常暂停: 整道工序所有行都是「待下料 / 异常暂停」且至少一行异常暂停
     - done_early 提前完成: 总实际 ≥ 总计划 且 所有 plan_date > today
     - done        已完成:   总实际 ≥ 总计划
     - matches_dispatch 符合调度令进度: 存在历史逾期但总实际 >= 调度令本月计划（monthly_plan>0）
@@ -290,6 +357,14 @@ def judge_process_card_status(proc_nodes: list[dict], actuals: dict, today=None,
     # 闸门关（整道工序均为待下料）→ 卡片显示 ⏸ 待下料，不判延期
     if all(n.get("status") == "waiting_material" for n in proc_nodes):
         return {"status": "waiting_material", "label": "⏸ 待下料", "tags": []}
+
+    # 异常暂停（2026-10）：整道工序的行全部处于「待下料 / 异常暂停」且至少有行是异常暂停
+    # → 卡片显示 ⏸ 异常暂停（与节点级同视觉层级，灰态、不判延期）。
+    # 只要还有任何一行可判定（已完成 / 进行中 / 逾期），就仍走下面的常规判定，
+    # 避免个别套暂停就把整道工序的真实逾期藏起来。
+    if any(n.get("status") == "exception_paused" for n in proc_nodes) and all(
+            n.get("status") in ("exception_paused", "waiting_material") for n in proc_nodes):
+        return {"status": "exception_paused", "label": "⏸ 异常暂停", "tags": []}
 
     # 严格历史逾期：plan_date < today 且未完成（不含今天）；仅计入 count_as_overdue 的节点
     # （法兰到货、待下料不参与逾期/风险/排名）

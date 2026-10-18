@@ -31,6 +31,11 @@ export const useProjectStore = defineStore('project', {
 
     lastNodeSavedAt: 0,   // 节点填报保存时间戳，供 AlertList 监听实时刷新
 
+    // 异常提报/关闭变更时间戳：供工序卡片（NodeScheduleTab）刷新「存在异常」标签与预警态。
+    // ⚠️ 必须与 lastNodeSavedAt 分开：后者由 NodeScheduleTab.reload() 自身写入，
+    //    卡片若监听它会形成 reload → 改时间戳 → watch → reload 的死循环。
+    lastExceptionChangedAt: 0,
+
     // 看板指标（KPI 卡，字段与 /api/dashboard/stats 一致）
     dashboard: {
       total_projects: 0,

@@ -512,7 +512,7 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         rows = [p for p in rows if str(p.get("big_area_person", "")) == bname]
 
     # 风险等级 + 整体进度：基于 node_plans + node_actuals 实时计算（弃用 processes 表）
-    from ..services.node_service import enrich_rows
+    from ..services.node_service import enrich_rows, build_exception_anchors
     from ..services.business_logic import compute_real_overdue
     today_s = str(business_today())
 
@@ -531,6 +531,17 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         import logging
         logging.getLogger(__name__).warning("get_node_segments_batch 失败：%s", e)
         seg_map_by_pid = {}
+
+    # 异常暂停（2026-10）：批量取回全部项目的异常（含已关闭），避免逐项目 N+1。
+    # 与详情页同口径：未关闭异常 → 该套后续工序暂停（不计逾期/风险）；
+    # 已关闭异常 → 以解决时间重算后续工序计划日（按新计划日判逾期）。
+    # 缺表/查询失败 → 降级为「无异常」，风险口径回到改动前行为（不阻塞列表）。
+    try:
+        exc_map_by_pid = get_node_exceptions_batch(all_pids)   # 1 次查询
+    except Exception as e:  # noqa: BLE001 — 异常暂停为增强判定，失败回退原规则
+        import logging
+        logging.getLogger(__name__).warning("get_node_exceptions_batch 失败：%s", e)
+        exc_map_by_pid = {}
 
     # ---- 排产上传状态（v7.2：台账 + 归属月双口径，替代原「有非独立工序行」的臆测）----
     # ① 口径修正：判定「有排产计划」必须用排产工序白名单（process_order 1..11）。
@@ -609,8 +620,11 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
 
         plans = plans_map.get(pid, [])
         actuals = actuals_map.get(pid, {})
-        nodes = enrich_rows(plans, actuals, durations=durations_map.get(pid),
-                            seg_map=seg_map_by_pid.get(pid) or {})
+        _dur = durations_map.get(pid)
+        nodes = enrich_rows(plans, actuals, durations=_dur,
+                            seg_map=seg_map_by_pid.get(pid) or {},
+                            exceptions=build_exception_anchors(
+                                exc_map_by_pid.get(pid) or [], _dur, plans))
 
         # 风险等级：历史逾期 > 今日未完成 > 正常
         # （未来日期的 in_progress「提前进行中」不算预警；今日 in_progress 须 actual < plan 才算）
@@ -712,6 +726,66 @@ def get_node_exceptions_by_project(project_id: int) -> list[dict]:
             return [row for row in cur.fetchall()]
     finally:
         conn.close()
+
+
+def get_open_exception_processes(project_id: int) -> dict[str, int]:
+    """查询项目下**未关闭**异常按工序聚合的数量：{process_name: 数量}。
+
+    用于工序卡片显示「存在异常」标签并把该工序置为预警态。
+    - 未关闭 = status 不为 'closed'（pending / processing 都算；NULL 视为未关闭，防御历史脏数据）
+    - 直接用 node_exceptions.process_name（该列 NOT NULL，提报时写入），
+      **不 JOIN process_node_plans**：排产重导会删旧节点，JOIN 会让历史异常查不到
+    - 独立工序（累计完成/发运）若有异常也会返回，由调用方决定是否展示
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT process_name, COUNT(*) AS cnt
+                FROM node_exceptions
+                WHERE project_id = %s
+                  AND (status IS NULL OR status <> 'closed')
+                GROUP BY process_name
+                """,
+                (project_id,),
+            )
+            return {row["process_name"]: int(row["cnt"]) for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_node_exceptions_batch(project_ids: list[int]) -> dict[int, list[dict]]:
+    """批量查询多项目的异常记录（**含已关闭**）→ {project_id: [异常行, ...]}。
+
+    用途：项目列表的「风险等级 / 逾期」需要按异常的暂停与重算口径计算，逐项目查询会
+    造成 N+1；此处按 900 分片一次取回。
+
+    ⚠️ 与 ``get_open_exception_processes`` 同口径：**不 JOIN process_node_plans**
+    （排产重导会删旧节点，JOIN 会让历史异常查不到），只按 project_id 过滤。
+    缺表/查询失败时抛异常，由调用方决定是否降级（列表页降级为"无异常"）。
+    """
+    if not project_ids:
+        return {}
+    by_pid: dict[int, list[dict]] = {}
+    ids = [int(pid) for pid in project_ids]
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            for i in range(0, len(ids), 900):
+                chunk = ids[i:i + 900]
+                fmt = ",".join(["%s"] * len(chunk))
+                cur.execute(
+                    f"SELECT id, project_id, node_id, process_name, plan_date, status, "
+                    f"created_at, updated_at, closed_at FROM node_exceptions "
+                    f"WHERE project_id IN ({fmt})",
+                    tuple(chunk),
+                )
+                for row in cur.fetchall():
+                    by_pid.setdefault(int(row["project_id"]), []).append(dict(row))
+    finally:
+        conn.close()
+    return by_pid
 
 
 def get_node_exception_by_id(exc_id: int) -> dict | None:
