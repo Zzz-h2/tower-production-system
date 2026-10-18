@@ -277,6 +277,18 @@
                 :disabled="!auth.canFill"
                 @click="openSegmentDialog(node)"
               >🧩 按段填报</el-button>
+              <!-- 异常提报（v7.8 行级化）：每套（计划行）直达该行的异常表单，
+                   复用「⚠️ 异常提报」页签内的同一个 ExceptionReportTab，不重写任何提报逻辑。
+                   该按钮位于 v-if="!isIndependent" 的 .cell-report-date 内 → 独立工序天然不渲染。
+                   权限口径与既有页签入口一致（页签本身无限制，仅组件内「提交异常」受 auth.canFill 控制），
+                   故此处不加 :disabled，避免无填报权限账号连历史异常都看不到。 -->
+              <el-button
+                size="small"
+                type="warning"
+                plain
+                class="exc-btn"
+                @click="openExceptionForNode(node)"
+              >⚠️ 异常提报</el-button>
             </div>
             <div class="row-status-section">
               <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
@@ -518,6 +530,22 @@ const selectedNodeId = ref(null)
 // 异常提报后触发预警列表刷新（复用节点保存事件总线）
 function onExceptionChanged() {
   store.lastNodeSavedAt = Date.now()
+}
+
+// === 异常提报（v7.8 行级化：每套直达） ===
+// 复用「⚠️ 异常提报」页签里的同一个 <ExceptionReportTab>：本函数只做两件事 ——
+//   1) 把 selectedNodeId 指向被点击的这一套（计划行）；与已选不同则直接覆盖（下拉随之更新）
+//   2) 切到异常提报页签，让用户立刻看到该套的表单 + 历史异常
+// ExceptionReportTab 内部 `watch(() => props.nodeId, load)` 会在 nodeId 变化时重新拉取该节点异常，
+// 因此不需要 :key 强制重建组件（保留组件实例还能避免重复挂载带来的多余请求）。
+// 权限口径：与既有入口完全一致 —— 页签本身无限制，写操作由组件内「提交异常」按钮的 auth.canFill 把关，
+// 所以行内入口同样不加 :disabled。
+function openExceptionForNode(node) {
+  if (!node || node.id == null) return
+  // 独立工序（累计完成/累计发运）本就没有异常提报页签，行内按钮也不会渲染；此处再兜底一次
+  if (isIndependent.value) return
+  selectedNodeId.value = node.id
+  innerMode.value = 'exception'
 }
 
 // ---- 失败信息紧凑渲染工具（纯函数，放最前，不依赖响应式状态） ----
@@ -1158,6 +1186,8 @@ async function saveSegments() {
 /* 按段填报弹窗（v7.1 行级化） */
 /* 行内「按段填报」小按钮：与行内其他按钮（更改填报日期）同高 */
 .seg-btn { padding: 4px 10px; font-size: 12px; }
+/* 行内「异常提报」小按钮：与按段填报同高，橙色描边（warning plain）与主操作「按段填报」区分 */
+.exc-btn { padding: 4px 10px; font-size: 12px; }
 .seg-body { padding: 4px 0; }
 /* 蓝色说明条 */
 .seg-tip {

@@ -152,12 +152,8 @@
                 <div class="cell-box" :class="cellClass(row, d.date)" @click="onCellClick(row, d.date)">
                   <span v-if="row.byDate[d.date] && row.byDate[d.date].missed" class="miss-mark">×</span>
                   <span v-else class="blank-cell"></span>
-                  <!-- 人工覆盖标识（非编辑态）：右上角小圆点 -->
-                  <i
-                    v-if="!editing && row.byDate[d.date] && row.byDate[d.date].override"
-                    class="ovr-dot"
-                    :class="row.byDate[d.date].override === 'missed' ? 'ovr-missed' : 'ovr-ontime'"
-                  ></i>
+                  <!-- 人工调整不显示任何视觉标识：按用户要求「手动改完留白即可，与其他未填项一样」。
+                       需要确认某格是否人工调整过时，悬停 tooltip 仍会显示「人工调整为…（操作人 时间）」。 -->
                   <!-- 未保存改动标识：右上角橙色角标 -->
                   <i v-if="row.byDate[d.date] && row.byDate[d.date].dirty" class="dirty-dot"></i>
                 </div>
@@ -315,10 +311,8 @@ function cellClass(row, date) {
   }
   if (c.dirty) {
     cls.push('cell-dirty')
-  } else if (!editing.value && c.override) {
-    cls.push('cell-override')
-    if (c.override === 'on_time') cls.push('cell-ontime')
   }
+  // 非编辑态不为「已保存的人工调整」加底纹/角标：按用户要求保持留白，与普通空格一致
   return cls
 }
 
@@ -548,21 +542,9 @@ onMounted(load)
   outline: 1px dashed #dd6b20;
   outline-offset: -1px;
 }
-/* 非编辑态：已保存的人工覆盖 —— 浅底纹提示「这是人工结果」 */
-.cell-box.cell-override { background: #fff5f5; }
-.cell-box.cell-override.cell-ontime { background: #ebf8ff; }
-
-/* 右上角小圆点：人工覆盖标识 */
-.ovr-dot {
-  position: absolute;
-  top: 3px;
-  right: 3px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-}
-.ovr-dot.ovr-missed { background: #e53e3e; }
-.ovr-dot.ovr-ontime { background: #3182ce; }
+/* 人工调整标识已整体移除（用户要求「手动改完留白即可，与其他未填项一样」）：
+   原 .cell-override / .cell-ontime 底纹与 .ovr-dot 右上角圆点一并删除。
+   需要确认某格是否人工调整过时，悬停 tooltip 仍会显示「人工调整为…（操作人 时间）」。 */
 /* 右上角橙色角标：未保存改动 */
 .dirty-dot {
   position: absolute;

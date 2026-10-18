@@ -19,18 +19,8 @@
       <span class="mm-hint" v-else>展示所有负责人导入工序的总和</span>
     </div>
 
-    <!-- 导入排产计划入口（对齐原版：节点计划 Tab 最上方）。
-         多负责人 v6.0：把「负责人视图」当前选中的负责人透传给导入，使其归属到该负责人名下；
-         未选（汇总视图）且项目为多负责人时，后端会返回 400 提示先选负责人。 -->
-    <ScheduleImport :pid="pid" :manager="selectedManager" :disabled="!auth.canEdit" @imported="onImported" />
-    <el-alert
-      v-if="selectedManager && managerOptions.length > 1"
-      type="info"
-      :closable="false"
-      show-icon
-      style="margin-top:10px;"
-      :title="`当前导入将归属到负责人「${selectedManager}」名下（仅覆盖该负责人排产工序）`"
-    />
+    <!-- 导入排产计划入口已从项目详情页移除（用户要求）：
+         后续统一走「排产计划总览」分页导入（SchedulePlanOverview → MultiManagerDialog → ScheduleImport）。 -->
 
     <!-- 排产按月隔离（v7.4）月份口径提示：本月未导入 / 上方为历史结转数据 -->
     <el-alert
@@ -86,7 +76,7 @@
         <div class="empty-icon">📂</div>
         <div class="empty-title">暂无节点计划数据</div>
         <div class="empty-desc">
-          请使用上方「导入排产计划」上传 Excel 后，即可查看工序时间轴与节点明细。<br/>
+          排产计划统一在「排产计划总览」分页导入；导入后回到本页即可查看工序时间轴与节点明细。<br/>
           排产计划按月独立：{{ monthLabel }}导入只替换本月的排产数据，其他月份与已填报进度不受影响。
         </div>
       </div>
@@ -110,15 +100,12 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useProjectStore } from '../store/project'
-import { useAuthStore } from '../store/auth'
-import ScheduleImport from './ScheduleImport.vue'
 import NodeTimelineChart from './NodeTimelineChart.vue'
 import ProcessCardGrid from './ProcessCardGrid.vue'
 import ProcessDetailDialog from './ProcessDetailDialog.vue'
 
 const props = defineProps({ pid: { type: String, required: true } })
 const store = useProjectStore()
-const auth = useAuthStore()   // 普通账号禁用导入排产（仅管理员可导入）
 const route = useRoute()
 const overview = computed(() => store.overview)
 
@@ -197,9 +184,6 @@ function reload() {
 const onSaved = () => {
   dialogVisible.value = false
   reload()
-}
-const onImported = () => {
-  reload()   // Excel 导入成功后刷新节点计划总览（含负责人筛选）
 }
 
 onMounted(() => {

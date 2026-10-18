@@ -75,6 +75,29 @@ async function load() {
   exceptionList.value = res.items || []
 }
 
+/**
+ * 构造提交载荷。
+ *
+ * 「计划关闭」是可选日期（后端 schema 为 Optional[date]），但 el-date-picker 未选值时
+ * form.planned_close_date 是空串 ''，直接提交会被后端按 date 解析而报
+ * 422（date_from_datetime_parsing: input is too short）。
+ * 故在此处把空串归一为 null（口径与 AlertList「编辑异常」一致：
+ * `planned_close_date: editForm.planned_close_date || null`）。
+ * 刻意**不改 form 的初始值**：date-picker 的双向绑定依赖字符串/Date，
+ * 改初始值为 null 可能影响清空与回显行为。
+ *
+ * @returns {{responsibility_category: string, reason_detail: string, handler: string,
+ *            planned_close_date: string|null, measures: string}} 提交载荷
+ */
+function buildPayload() {
+  return {
+    ...form.value,
+    // 本表单唯一的日期字段；其它字段（责任分类/异常原因/处理人/处理措施）均为文本，
+    // 无空串→日期解析问题，保持原值直传（空串即视为未填，业务口径不变）。
+    planned_close_date: form.value.planned_close_date || null,
+  }
+}
+
 async function onSubmit() {
   if (!props.nodeId) {
     ElMessage.warning('请先选择节点')
@@ -84,7 +107,7 @@ async function onSubmit() {
     ElMessage.warning('请填写责任分类和异常原因')
     return
   }
-  await createException(props.pid, props.nodeId, form.value)
+  await createException(props.pid, props.nodeId, buildPayload())
   ElMessage.success('异常提报成功')
   form.value = { responsibility_category: '', reason_detail: '', handler: '', planned_close_date: '', measures: '' }
   load()
