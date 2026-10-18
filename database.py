@@ -9,13 +9,14 @@ Updated: 2026-08-XX (SQLite → MySQL 迁移)
 
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, Any
 
 import pymysql
 import pymysql.cursors
 
 from backend.app.core.config import MYSQL_CONFIG, INDEPENDENT_PROCESS_NAMES, SCHEDULE_PROCESS_NAMES
+from backend.app.core.timeutil import business_now
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ def insert_project(data: dict) -> int:
     """插入新项目，返回项目ID"""
     conn = get_connection()
     try:
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = business_now().strftime('%Y-%m-%d %H:%M:%S')
         with conn.cursor() as cursor:
             cursor.execute("""
                 INSERT INTO projects 
@@ -181,7 +182,7 @@ def upsert_project(data: dict, mapped_fields: Optional[set] = None) -> tuple[int
     """
     conn = get_connection()
     try:
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = business_now().strftime('%Y-%m-%d %H:%M:%S')
         machine_type = data.get('machine_type', '') or ''
         with conn.cursor() as cursor:
             cursor.execute("""
@@ -367,7 +368,7 @@ def update_project(project_id: int, data: dict) -> None:
     """更新项目信息"""
     conn = get_connection()
     try:
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        now = business_now().strftime('%Y-%m-%d %H:%M:%S')
         fields = []
         values = []
         for key in ['project_name', 'factory_name', 'last_month_output', 'monthly_plan',
@@ -2149,6 +2150,314 @@ def get_user_by_id(uid: int) -> Optional[dict]:
             cursor.execute("SELECT * FROM users WHERE id = %s", (uid,))
             row = cursor.fetchone()
             return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+# ============================================================
+# 提报情况总览（v7.6）：当月日期 × 负责人 矩阵的聚合事实
+# ============================================================
+def get_submission_board_aggregates(month_start: str, month_end: str,
+                                   big_area_person: Optional[str] = None) -> dict:
+    """「提报情况总览」矩阵所需的 3 组聚合事实（按负责人 × 日期 GROUP BY）。
+
+    只读，不写任何表。**固定 3 条 SQL**（与人数/天数无关，无 N+1）：
+      ① plans      —— 该自然月内每个 (负责人, 计划日) 的节点数 + 工序名
+      ② reports    —— 该自然月内每个 (负责人, 填报日) 的填报记录数
+      ③ exceptions —— 该自然月内每个 (负责人, 异常创建日) 的异常条数
+
+    口径（用户 2026-10 确认）：
+      - 计划：``process_node_plans``，``plan_date`` 落在 [month_start, month_end)，
+        ``plan_qty > 0`` 才计为「当天有计划」。
+      - 计划行白名单：``process_order BETWEEN 1 AND 11``（排产工序），这是排除非排产行的
+        **唯一依据**——两类非排产行都必须靠它排除，不能靠「plan_date IS NULL」：
+          · 独立工序（累计完成总数 90 / 累计发运总数 91）：``sync_independent_plans`` 建的
+            占位行 plan_date 为 NULL，**但**每日填报走的 ``save_independent_fill`` 会插入
+            plan_date = 填报日期、plan_qty > 0 的 90/91 行（见 database.py save_independent_fill），
+            日期区间挡不住这类行；
+          · 「手动完成」占位行（process_order=99）：plan_date 是完成日期，同样有日期与数量。
+      - 填报：``node_actual_progress.report_date`` 落在该自然月；负责人取
+        ``nap.manager``，为空时回退经 ``node_plan_id`` 关联的 ``process_node_plans.manager``。
+      - 异常：``node_exceptions.created_at`` 的日期部分落在该自然月
+        （**不是 plan_date**：异常可能针对未来计划日提报）；``node_exceptions`` 无
+        manager 字段，必须 join ``process_node_plans`` 取 manager。
+      - 大区隔离：``projects.big_area_person = %s``（admin 传 None 看全量）。
+
+    ⚠️ 月份维度刻意**不叠加** ``_month_scope``（plan_month 过滤）：本页是「按自然月看日历」，
+    以 ``plan_date`` 落在该自然月为准，从而让跨月边界行（例如上月导入、plan_date 落在本月
+    1~2 日的计划）归入其真实的**日历日**。
+    ⚠️ 但**不要**误以为「叠加 plan_month 就能让历史月有数据」：排产导入是整体覆盖式，且
+    ``insert_node_plans`` 的删除条件不含月份（见其 del_cond 注释：刻意不加月份作用域），
+    被重导项目的历史计划已归档进 ``process_node_plans_history``，故两种口径下历史月主表都为空；
+    若再叠加 ``plan_month = 查询月``，反而会让上述边界行在相邻两个月的页面上都消失。
+    同一 (项目, 工序) 的重复行用 ``COUNT(DISTINCT project_id|process_name)`` 去重，不会虚增节点数。
+
+    Args:
+        month_start: 'YYYY-MM-01'（含）
+        month_end:   下月 1 日 'YYYY-MM-01'（不含）
+        big_area_person: 大区负责人；None = 全量（admin / 全区哨兵）
+
+    Returns:
+        dict: {
+          'plans': [{'manager','d'(date),'plan_count','processes'(str),'plan_rows'}],
+          'reports': [{'manager','d'(date),'cnt'}],
+          'exceptions': [{'manager','d'(date),'cnt'}],
+        }
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            ba_sql = " AND p.big_area_person = %s" if big_area_person else ""
+
+            # ① 计划事实：节点数 + 工序名（plan_qty <= 0 的行只用于「该负责人本月有排产行」）
+            plan_args: list = [month_start, month_end, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
+            if big_area_person:
+                plan_args.append(big_area_person)
+            cur.execute(f"""
+                SELECT n.manager AS manager,
+                       n.plan_date AS d,
+                       COUNT(DISTINCT CASE WHEN n.plan_qty > 0
+                             THEN CONCAT(n.project_id, '|', n.process_name) END) AS plan_count,
+                       GROUP_CONCAT(DISTINCT CASE WHEN n.plan_qty > 0
+                                    THEN n.process_name END SEPARATOR '、') AS processes,
+                       COUNT(*) AS plan_rows
+                FROM process_node_plans n
+                JOIN projects p ON p.id = n.project_id
+                WHERE n.plan_date >= %s AND n.plan_date < %s
+                  AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
+                  AND n.process_order BETWEEN %s AND %s
+                  {ba_sql}
+                GROUP BY n.manager, n.plan_date
+                ORDER BY CONVERT(n.manager USING gbk), n.plan_date
+            """, tuple(plan_args))
+            plans = [dict(r) for r in cur.fetchall()]
+
+            # ② 填报事实（report_date = 当天；manager 优先取填报行自身归属）
+            rep_args: list = [month_start, month_end]
+            if big_area_person:
+                rep_args.append(big_area_person)
+            cur.execute(f"""
+                SELECT COALESCE(NULLIF(TRIM(nap.manager), ''), n.manager) AS manager,
+                       nap.report_date AS d,
+                       COUNT(*) AS cnt
+                FROM node_actual_progress nap
+                JOIN projects p ON p.id = nap.project_id
+                LEFT JOIN process_node_plans n ON n.id = nap.node_plan_id
+                WHERE nap.report_date >= %s AND nap.report_date < %s
+                  {ba_sql}
+                GROUP BY COALESCE(NULLIF(TRIM(nap.manager), ''), n.manager), nap.report_date
+            """, tuple(rep_args))
+            reports = [dict(r) for r in cur.fetchall()]
+
+            # ③ 异常事实（created_at 的日期 = 当天；node_exceptions 无 manager，必须 join 计划表）
+            exc_args: list = [f"{month_start} 00:00:00", f"{month_end} 00:00:00"]
+            if big_area_person:
+                exc_args.append(big_area_person)
+            cur.execute(f"""
+                SELECT n.manager AS manager,
+                       DATE(e.created_at) AS d,
+                       COUNT(*) AS cnt
+                FROM node_exceptions e
+                JOIN projects p ON p.id = e.project_id
+                LEFT JOIN process_node_plans n ON n.id = e.node_id
+                WHERE e.created_at >= %s AND e.created_at < %s
+                  AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
+                  {ba_sql}
+                GROUP BY n.manager, DATE(e.created_at)
+            """, tuple(exc_args))
+            exceptions = [dict(r) for r in cur.fetchall()]
+
+            return {"plans": plans, "reports": reports, "exceptions": exceptions}
+    finally:
+        conn.close()
+
+
+# ============================================================
+# 提报情况总览 · 人工覆盖（v7.7 新增，submission_board_overrides）
+# ============================================================
+# 语义：**覆盖记录，不是翻转**（用户 2026-10 确认）。
+#   - 无记录              → 走自动判定（当天有计划且未填报/未提报异常 → ×）
+#   - override_type='missed'  → 强制 ×（即使当天有填报/异常也判为未按时）
+#   - override_type='on_time' → 强制留空（即使自动判定为漏报也清除 ×）
+#   同一格再次操作到「无记录」= DELETE 该行，恢复自动判定（必须可逆）。
+#
+# 可编辑范围（业务侧校验，见 app/services/ranking_service.py）：
+#   仅 ``has_plan = true``（当天有计划）且 ``judged = true``（日期 ≤ 昨天）的格子，
+#   因为「无计划」谈不上未按时、「今天/未来」尚未判定。
+SUBMISSION_OVERRIDE_MISSED = 'missed'
+SUBMISSION_OVERRIDE_ON_TIME = 'on_time'
+SUBMISSION_OVERRIDE_AUTO = 'auto'
+SUBMISSION_OVERRIDE_TYPES = (SUBMISSION_OVERRIDE_MISSED, SUBMISSION_OVERRIDE_ON_TIME)
+SUBMISSION_OVERRIDE_ACTIONS = SUBMISSION_OVERRIDE_TYPES + (SUBMISSION_OVERRIDE_AUTO,)
+
+
+def _stat_date_str(value) -> str:
+    """把 date / datetime / 'YYYY-MM-DD HH:MM:SS' 统一成 'YYYY-MM-DD'（空值返回 ''）。"""
+    if value is None:
+        return ''
+    if isinstance(value, datetime):
+        return value.strftime('%Y-%m-%d')
+    if isinstance(value, date):
+        return value.strftime('%Y-%m-%d')
+    return str(value).strip()[:10]
+
+
+def get_submission_overrides(month_start: str, month_end: str) -> dict[tuple[str, str], str]:
+    """取某自然月内「提报情况总览」的人工覆盖记录 → ``{(manager, 'YYYY-MM-DD'): override_type}``。
+
+    只读。区间口径与 ``get_submission_board_aggregates`` 完全一致：
+    ``stat_date >= month_start AND stat_date < month_end``（左闭右开）。
+    同一 (manager, stat_date) 由唯一键 ``uk_mgr_date`` 保证只有一行。
+
+    Args:
+        month_start: 'YYYY-MM-01'（含）
+        month_end:   下月 1 日 'YYYY-MM-01'（不含）
+
+    Returns:
+        dict: {(manager, 'YYYY-MM-DD'): 'missed' | 'on_time'}；无记录时返回空 dict。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT manager, stat_date, override_type FROM submission_board_overrides "
+                "WHERE stat_date >= %s AND stat_date < %s",
+                (month_start, month_end),
+            )
+            out: dict[tuple[str, str], str] = {}
+            for r in cursor.fetchall():
+                mgr = str(r.get('manager') or '').strip()
+                ds = _stat_date_str(r.get('stat_date'))
+                ov = str(r.get('override_type') or '').strip()
+                if mgr and ds and ov in SUBMISSION_OVERRIDE_TYPES:
+                    out[(mgr, ds)] = ov
+            return out
+    finally:
+        conn.close()
+
+
+def get_submission_override_records(month_start: str, month_end: str) -> list[dict]:
+    """取某自然月内的人工覆盖**明细行**（含操作人与操作时间，供前端 tooltip 展示）。
+
+    与 ``get_submission_overrides`` 是同一张表的两种视图：本函数多带
+    ``updated_by`` / ``updated_at``，用于「人工调整为…（操作人 时间）」提示；
+    上者是纯映射，供矩阵合并时 O(1) 查表。二者口径（区间/过滤条件）必须保持一致。
+
+    Returns:
+        list[dict]: [{'manager','date','override_type','updated_by','updated_at'}]
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT manager, stat_date, override_type, updated_by, updated_at "
+                "FROM submission_board_overrides "
+                "WHERE stat_date >= %s AND stat_date < %s "
+                "ORDER BY stat_date, manager",
+                (month_start, month_end),
+            )
+            rows: list[dict] = []
+            for r in cursor.fetchall():
+                mgr = str(r.get('manager') or '').strip()
+                ds = _stat_date_str(r.get('stat_date'))
+                ov = str(r.get('override_type') or '').strip()
+                if not mgr or not ds or ov not in SUBMISSION_OVERRIDE_TYPES:
+                    continue
+                updated_at = r.get('updated_at')
+                if isinstance(updated_at, datetime):
+                    updated_at = updated_at.strftime('%Y-%m-%d %H:%M')
+                elif updated_at:
+                    updated_at = str(updated_at)[:16]
+                else:
+                    updated_at = ''
+                rows.append({
+                    'manager': mgr,
+                    'date': ds,
+                    'override_type': ov,
+                    'updated_by': str(r.get('updated_by') or '').strip(),
+                    'updated_at': updated_at,
+                })
+            return rows
+    finally:
+        conn.close()
+
+
+def save_submission_overrides(items: list[dict], updated_by: str = '') -> dict:
+    """批量保存「提报情况总览」人工覆盖（单事务，整批成功或整批回滚）。
+
+    语义（覆盖记录，不是翻转）：
+      - ``action='missed'``  → UPSERT override_type='missed'（本格强制 × 且无法再次改期）
+      - ``action='on_time'`` → UPSERT override_type='on_time'（本格强制留空、清除 ×）
+      - ``action='auto'``    → DELETE 该 (manager, stat_date) 行，恢复自动判定
+    唯一键 ``uk_mgr_date (manager, stat_date)`` 保证重复提交幂等，不会产生重复行。
+
+    Args:
+        items: [{'manager': str, 'date': 'YYYY-MM-DD', 'action': 'missed'|'on_time'|'auto'}]
+               非法条目（manager 空 / 日期空 / action 未知）静默跳过——
+               严格校验在服务层（``ranking_service.save_submission_board_overrides``）完成，
+               本层只负责落库，避免把 HTTP 语义渗进数据访问层。
+        updated_by: 操作人用户名（写入 updated_by 列，可空）
+
+    Returns:
+        dict: {'upserted': int, 'deleted': int}（按**入参条数**计，不含被跳过的非法条目）
+    """
+    upserts: list[tuple[str, str, str, Optional[str]]] = []
+    deletes: list[tuple[str, str]] = []
+    operator = str(updated_by or '').strip() or None
+
+    for it in items or []:
+        row = it or {}
+        mgr = str(row.get('manager') or '').strip()
+        ds = _stat_date_str(row.get('date') or row.get('stat_date'))
+        action = str(row.get('action') or '').strip()
+        if not mgr or not ds or action not in SUBMISSION_OVERRIDE_ACTIONS:
+            continue
+        if action == SUBMISSION_OVERRIDE_AUTO:
+            deletes.append((mgr, ds))
+        else:
+            upserts.append((mgr, ds, action, operator))
+
+    if not upserts and not deletes:
+        return {'upserted': 0, 'deleted': 0}
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # ① 恢复自动判定：先删，避免同一批里「先删后插」顺序造成的语义歧义
+            for chunk in _chunked(deletes, size=500):
+                placeholders = ','.join(['(%s, %s)'] * len(chunk))
+                flat: list = [v for pair in chunk for v in pair]
+                cursor.execute(
+                    "DELETE FROM submission_board_overrides "
+                    f"WHERE (manager, stat_date) IN ({placeholders})",
+                    tuple(flat),
+                )
+            # ② 强制标记：单条多值 UPSERT（重复提交同一格只更新、不新增行）
+            for chunk in _chunked(upserts, size=500):
+                cursor.executemany(
+                    "INSERT INTO submission_board_overrides "
+                    "(manager, stat_date, override_type, updated_by) "
+                    "VALUES (%s, %s, %s, %s) "
+                    "ON DUPLICATE KEY UPDATE override_type = VALUES(override_type), "
+                    "updated_by = VALUES(updated_by), updated_at = NOW()",
+                    chunk,
+                )
+            conn.commit()
+            return {'upserted': len(upserts), 'deleted': len(deletes)}
+    except pymysql.err.ProgrammingError as exc:
+        # 1146 Table doesn't exist：目标库未执行 v7.7 DDL。
+        # 写操作**不降级**（否则会静默丢数据），转成可读的运行时错误由路由层转 503。
+        conn.rollback()
+        if getattr(exc, 'args', [None])[0] == 1146:
+            raise RuntimeError(
+                "表 submission_board_overrides 不存在：请先执行 "
+                "backend/scripts/migrate_v77_submission_board_overrides.py"
+                f"（原始错误：{exc}）"
+            ) from exc
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

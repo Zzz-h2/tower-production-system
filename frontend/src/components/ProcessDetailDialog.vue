@@ -99,12 +99,12 @@
         <div style="font-size:12px; color:#718096; margin-bottom:10px;">
           {{ auth.isAdmin
             ? '管理员可为每行指定历史日期补录（含"已完成"组可编辑）；已保存过的节点，日期会沿用上次保存值，无变更提交不会重置为今天。未开始/未填写的节点日期默认当天（不显示历史值）。'
-            : '大区账号仅可填报本大区节点；未填写节点默认当天，填报日期已锁定（仅可填报今日，且仅限本大区数据）' }}
+            : `大区账号仅可填报本大区节点；未填写节点默认当天，填报日期可回填最近 ${BACKFILL_DAYS} 天内的日期（含今天）；已保存过的节点沿用上次保存值（仅限本大区数据）` }}
         </div>
         <el-segmented v-model="activeGroup" :options="groupOptions" block style="margin-bottom:14px;" />
         <div v-if="groupNodes.length === 0" class="empty-hint">当前分组「{{ groupLabel }}」没有可保存的节点。</div>
         <template v-else>
-          <!-- 独立工序（累计完成/累计发运）· 今日待填报：单卡增量输入（管理员可改填报日期，大区账号置灰） -->
+          <!-- 独立工序（累计完成/累计发运）· 今日待填报：单卡增量输入（管理员不限日期，大区账号可回填近 7 天） -->
           <div v-if="isIndependent && activeGroup === 'today'" class="fill-card">
             <div class="fill-card-left">
               <span class="fill-card-label">本次填报</span>
@@ -121,7 +121,7 @@
               </span>
             </div>
             <div class="fill-card-right">
-              <!-- 与 11 道排产工序的「更改填报日期」机制一致：修改本次填报的 report_date（管理员可改，大区账号置灰） -->
+              <!-- 与 11 道排产工序的「更改填报日期」机制一致：修改本次填报的 report_date（管理员不限，大区账号限近 7 天） -->
               <div class="cell-report-date">
                 <span class="rd-tag" :class="{ 'rd-today': (reportDates[groupNodes[0].id] || fmtToday()) === fmtToday() }">
                   📅 {{ reportDates[groupNodes[0].id] || fmtToday() }}
@@ -135,7 +135,7 @@
                   <template #reference>
                     <el-button
                       size="small"
-                      :disabled="!auth.isAdmin"
+                      :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin && !isIndependent)"
                       class="rd-btn"
                     >更改填报日期</el-button>
                   </template>
@@ -150,6 +150,7 @@
                       format="YYYY-MM-DD"
                       :clearable="false"
                       :teleported="false"
+                      :disabled-date="isDateDisabled"
                       style="width: 100%;"
                       @change="onDatePicked(groupNodes[0].id, $event)"
                     />
@@ -200,6 +201,7 @@
                         format="YYYY-MM-DD"
                         :clearable="false"
                         :teleported="false"
+                        :disabled-date="isDateDisabled"
                         style="width: 100%;"
                         @change="onDatePicked(node.id, $event)"
                       />
@@ -245,7 +247,7 @@
                 <template #reference>
                   <el-button
                     size="small"
-                    :disabled="!auth.isAdmin"
+                    :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin && !isIndependent)"
                     class="rd-btn"
                   >更改填报日期</el-button>
                 </template>
@@ -260,6 +262,7 @@
                     format="YYYY-MM-DD"
                     :clearable="false"
                     :teleported="false"
+                    :disabled-date="isDateDisabled"
                     style="width: 100%;"
                     @change="onDatePicked(node.id, $event)"
                   />
@@ -481,7 +484,22 @@ function onDatePicked(nodeId, newVal) {
   reportDates.value[nodeId] = newVal
   datePickerOpen.value[nodeId] = false
 }
-// 每行独立填报日期（按 node.id 存储）；管理员可改历史日期，大区账号锁定今天（仅本大区）
+// 大区账号可回填的窗口天数：与后端 backend/app/routers/nodes.py 的 BACKFILL_DAYS 必须同值
+// （前后端各写一份常量、无法共享，任何改动必须两侧同步）。可选区间 = [今天 − BACKFILL_DAYS, 今天]（含今天）。
+const BACKFILL_DAYS = 7
+// el-date-picker 的 disabled-date：管理员不限；非 admin（大区账号）仅允许 [今天 − BACKFILL_DAYS, 今天]，
+// 区间外（含未来日期）置灰不可选 —— 与后端 REPORT_DATE_OUT_OF_RANGE 校验口径一致。
+function isDateDisabled(d) {
+  if (auth.isAdmin) return false
+  const day = new Date(d)
+  day.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const earliest = new Date(today)
+  earliest.setDate(earliest.getDate() - BACKFILL_DAYS)
+  return day < earliest || day > today
+}
+// 每行独立填报日期（按 node.id 存储）；管理员可改任意历史日期，大区账号可回填近 BACKFILL_DAYS 天（仅本大区）
 const reportDates = ref({})
 // 原始已保存填报日期（供 popover「上次保存」提示）
 const savedDates = ref({})
@@ -508,6 +526,7 @@ const CODE_FRIENDLY = {
   QTY_EXCEED_PLAN: '⚠️ 数量超计划：节点实际数量不能超过计划数',
   DONE_READONLY: '🔒 已完成分组不可编辑（仅管理员可调整）',
   BAD_REPORT_DATE: '📅 填报日期格式错误（应为 YYYY-MM-DD）',
+  REPORT_DATE_OUT_OF_RANGE: '📅 填报日期超出允许范围：仅可回填最近 7 天内的日期（含今天）',
   NODE_NOT_IN_GROUP: '⚠️ 节点与所选分组不匹配',
   UNKNOWN_GROUP: '⚠️ 未知分组',
 }

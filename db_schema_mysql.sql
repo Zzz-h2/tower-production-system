@@ -365,6 +365,40 @@ CREATE TABLE IF NOT EXISTS process_node_plans_history (
 
 
 -- ============================================================
+-- 表12：submission_board_overrides（提报情况总览人工覆盖表，v7.7 新增）
+-- ============================================================
+-- 背景：「提报情况总览」的 × 由 node_actual_progress / node_exceptions 自动判定，
+--   但填报是**覆盖式保存**（同一节点只有一条 report_date），节点事后改期会让先前
+--   真实提报过的那天被反标为 ×。用户 2026-10 要求管理员可对个别日期手工纠正。
+--
+-- 语义（🔴 覆盖记录，不是翻转）：
+--   - 无记录                    → 走自动判定（当天有计划且未填报/未提报异常 → ×）
+--   - override_type = 'missed'  → 强制 ×（即使当天有填报/异常也记为未按时）
+--   - override_type = 'on_time' → 强制留空（即使自动判定漏报也清除 ×）
+--   - 同一格再次操作回「无记录」= 删除该行，恢复自动判定（必须可逆）
+--
+-- 可编辑范围（业务层校验，见 app/services/ranking_service.py）：
+--   仅「当天有计划（process_node_plans 排产工序行 plan_qty > 0）」且
+--   「该日 ≤ 昨天（judged）」的格子；无计划谈不上未按时，今天/未来尚未判定。
+--
+-- 唯一键 uk_mgr_date(manager, stat_date)：同一负责人同一天只允许一条覆盖记录，
+--   重复提交（含并发重复点击）只 UPDATE 不新增行，天然幂等。
+-- manager 与 process_node_plans.manager 同口径（VARCHAR(64)），不带 projects 外键：
+--   覆盖记录按「负责人 × 日期」表达，不依赖具体项目行（排产重导后仍应保留人工判断）。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS submission_board_overrides (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    manager       VARCHAR(64) NOT NULL COMMENT '负责人（与 process_node_plans.manager 同口径）',
+    stat_date     DATE NOT NULL COMMENT '被覆盖的日期',
+    override_type VARCHAR(16) NOT NULL COMMENT 'missed=强制未按时 / on_time=强制准时',
+    updated_by    VARCHAR(64) NULL COMMENT '操作人',
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_mgr_date (manager, stat_date),
+    KEY idx_stat_date (stat_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- ============================================================
 -- 表关联关系说明
 -- ============================================================
 --

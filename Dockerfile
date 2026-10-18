@@ -6,7 +6,11 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # 编译依赖（pandas/openpyxl 等多为预编译 wheel，gcc 仅作兜底）
-RUN apt-get update && apt-get install -y --no-install-recommends gcc \
+# tzdata：提供 IANA 时区数据（/usr/share/zoneinfo），使下面的 ENV TZ 生效，
+#         并让 Python 的 zoneinfo.ZoneInfo("Asia/Shanghai") 可用（python:3.11-slim
+#         默认不含 tzdata）。DEBIAN_FRONTEND=noninteractive 避免装 tzdata 时交互询问。
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends gcc tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # 先装 Python 依赖（利用镜像层缓存）
@@ -24,6 +28,9 @@ COPY backend/ /app/backend/
 # 注意：根目录 test_bugs.py / test_business_format.py 仍 import 旧 utils.*，
 #       仅测试用，勿复制进镜像（本 Dockerfile 只 COPY database.py + backend/，已避开）。
 
+# 业务时区固定东八区：容器系统时间/日志/原生 date.today() 均为北京时间；
+# 与 backend/app/core/timeutil.py 的 BUSINESS_TZ（"Asia/Shanghai"）保持同一基准。
+ENV TZ=Asia/Shanghai
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 

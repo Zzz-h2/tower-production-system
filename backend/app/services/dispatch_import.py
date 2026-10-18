@@ -16,6 +16,7 @@ from typing import Optional
 import pandas as pd
 
 from ..core import db
+from ..core.timeutil import business_today
 
 # 预览时每列展示的样例值条数
 SAMPLE_ROWS = 5
@@ -56,9 +57,9 @@ def resolve_plan_month(explicit: Optional[str], file_name: str = "") -> str:
     # 文件名只有「10月份」这类（无年份）→ 取当前年份
     m = re.search(r"([0-9]{1,2})\s*月", name)
     if m and 1 <= int(m.group(1)) <= 12:
-        return f"{dt.date.today().year}-{int(m.group(1)):02d}"
+        return f"{business_today().year}-{int(m.group(1)):02d}"
 
-    return dt.date.today().strftime("%Y-%m")
+    return business_today().strftime("%Y-%m")
 
 
 def preview_dispatch(tmp_path: str, file_name: str = "") -> dict:

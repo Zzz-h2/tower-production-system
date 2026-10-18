@@ -16,6 +16,10 @@
             <el-icon><Trophy /></el-icon>
             <span>出品排名总览</span>
           </el-menu-item>
+          <el-menu-item index="submission">
+            <el-icon><Calendar /></el-icon>
+            <span>提报情况总览</span>
+          </el-menu-item>
         </el-menu>
       </div>
 
@@ -215,6 +219,9 @@
 
         <!-- ========== 出品排名总览（副页面） ========== -->
         <ProductionRankingOverview v-else-if="activeView === 'ranking'" />
+
+        <!-- ========== 提报情况总览（副页面） ========== -->
+        <SubmissionOverview v-else-if="activeView === 'submission'" />
       </div>
     </div>
   </div>
@@ -223,7 +230,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy, Download } from '@element-plus/icons-vue'
+import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy, Calendar, Download } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as XLSX from 'xlsx'
 import { saveAs } from 'file-saver'
@@ -235,6 +242,7 @@ import AddProjectDialog from '../components/AddProjectDialog.vue'
 import EditProjectDialog from '../components/EditProjectDialog.vue'
 import SchedulePlanOverview from '../components/SchedulePlanOverview.vue'
 import ProductionRankingOverview from '../components/ProductionRankingOverview.vue'
+import SubmissionOverview from '../components/SubmissionOverview.vue'
 
 const store = useProjectStore()
 const router = useRouter()

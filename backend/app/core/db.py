@@ -4,9 +4,8 @@
 沿用现有表结构（process_node_plans / node_actual_progress / node_exceptions 等），不重新设计。
 风险等级与整体进度均由 node_plans + node_actuals 实时计算，弃用 processes 表。
 """
-from datetime import date
-
 from .config import MYSQL_CONFIG, SCHEDULE_PROCESS_NAMES
+from .timeutil import business_today
 
 # v7.2 排产工序白名单区间（与根 database.py 同源，顺序由 SCHEDULE_PROCESS_NAMES 保证）：
 # 排产导入写出的行满足 process_order = index+1，即 1..len(SCHEDULE_PROCESS_NAMES)。
@@ -515,7 +514,7 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     # 风险等级 + 整体进度：基于 node_plans + node_actuals 实时计算（弃用 processes 表）
     from ..services.node_service import enrich_rows
     from ..services.business_logic import compute_real_overdue
-    today_s = str(date.today())
+    today_s = str(business_today())
 
     # 一次性批量查询（消除 N+1：原逻辑每项目 2 次 DB 往返 → 现在全程仅 3 次）
     # v7.4：三处批量查询统一带上当前列表月份 —— 「整体进度 / 风险等级」必须与列表的
@@ -800,3 +799,41 @@ def get_closed_exceptions_by_project(project_id: int) -> list[dict]:
             return [row for row in cur.fetchall()]
     finally:
         conn.close()
+
+
+# ---------- 提报情况总览（v7.6） ----------
+
+def get_submission_board_aggregates(month_start: str, month_end: str,
+                                    big_area_person: str | None = None) -> dict:
+    """「提报情况总览」矩阵的 3 组聚合事实（计划 / 填报 / 异常，按 负责人×日期）。
+
+    实现与口径见根 ``database.py`` 同名函数（仅 3 条 GROUP BY 查询，无 N+1）。
+    """
+    from database import get_submission_board_aggregates as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, big_area_person)
+
+
+# ---------- 提报情况总览 · 人工覆盖（v7.7） ----------
+# ⚠️ 根 database.py 新增函数必须在此同步 re-export，否则 `db.xxx`
+#    抛 AttributeError → FastAPI 默认 500（本项目最高频的坑）。
+
+def get_submission_overrides(month_start: str, month_end: str) -> dict:
+    """某自然月的人工覆盖映射 → {(manager, 'YYYY-MM-DD'): 'missed' | 'on_time'}。"""
+    from database import get_submission_overrides as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end)
+
+
+def get_submission_override_records(month_start: str, month_end: str) -> list[dict]:
+    """某自然月的人工覆盖明细行（含 updated_by/updated_at，供前端 tooltip）。"""
+    from database import get_submission_override_records as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end)
+
+
+def save_submission_overrides(items: list[dict], updated_by: str = "") -> dict:
+    """批量保存人工覆盖（'missed'/'on_time' → UPSERT，'auto' → DELETE），单事务。
+
+    Returns:
+        dict: {'upserted': int, 'deleted': int}
+    """
+    from database import save_submission_overrides as _fn
+    return getattr(_fn, "__wrapped__", _fn)(items, updated_by)

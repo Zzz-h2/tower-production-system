@@ -11,12 +11,13 @@ FastAPI 运行路径实际在用的函数（保留）：
 已清理的历史遗留死代码：Streamlit 版 正向/倒排计划（12 道制造工序）、
 工序进度计算、预警判定、预计交付、里程碑对比、日计划拆解等不再被引用的函数。
 """
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Optional
 
 from .workday_calendar import parse_date
 from ..core.config import (SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES,
                            MATERIAL_PROCESS_NAMES, MANUFACTURE_PROCESS_NAMES)
+from ..core.timeutil import business_today
 
 
 def prev_process_total(process_name: str, plans_all: list[dict], actuals: dict,
@@ -165,7 +166,7 @@ def judge_node_status(plan_date, plan_qty, actual_qty, today, completion_date=No
         parsed_plan = base_plan
 
     if today is None:
-        today = date.today()
+        today = business_today()
     parsed_today = parse_date(today) or today
 
     plan_qty = int(plan_qty or 0)
@@ -276,7 +277,7 @@ def judge_process_card_status(proc_nodes: list[dict], actuals: dict, today=None,
     - 已提前:   存在 plan_date > today 且 actual ≥ plan，且该工序无历史逾期
     - 当主状态为「已逾期」或 tags 含「部分完成」时，不再显示「已提前」
     """
-    today = today or date.today()
+    today = today or business_today()
     today_s = str(today)[:10]
     if not proc_nodes:
         return {"status": "pending", "label": "⚪ 未开始", "tags": []}
@@ -383,7 +384,7 @@ def _group_nodes(proc_nodes: list[dict], actuals: dict, today) -> dict:
 
 def split_node_groups(proc_nodes: list[dict], actuals: dict, today=None) -> dict:
     """对外：按四组切分节点（前端填报弹窗四分组手风琴数据源）。"""
-    today = today or date.today()
+    today = today or business_today()
     return _group_nodes(proc_nodes, actuals, today)
 
 

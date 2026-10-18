@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import pandas as pd  # noqa: E402
 
 from ..core.config import SCHEDULE_PROCESS_NAMES  # noqa: E402
+from ..core.timeutil import business_now  # noqa: E402
 
 
 # ============================================================
@@ -369,7 +370,7 @@ def parse_schedule_excel_full(file_path: str) -> tuple[list[dict], list[str], li
     # 「已完成」单元格本身没有日期，plan_date 取**导入当天**（本地时区）：
     # 语义是「这几套在导入时点已经做完了」，因此完成量落在导入当天，
     # 既不会凭空造出一个未来/过去的计划日期，也能让当月/当日出品统计立刻看到这部分产出。
-    completion_date = datetime.now().strftime('%Y-%m-%d')
+    completion_date = business_now().strftime('%Y-%m-%d')
     plan_index = {(p["process_name"], p["plan_date"]): p for p in plans}
     for pn in SCHEDULE_PROCESS_NAMES:
         qty = int(completed_counts.get(pn, 0))

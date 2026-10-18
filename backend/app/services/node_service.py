@@ -7,6 +7,7 @@ from .business_logic import (judge_node_status, judge_process_card_status, split
                              compute_real_overdue, build_time_rules)
 from .workday_calendar import parse_date
 from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
+from ..core.timeutil import business_today
 
 
 def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optional[dict] = None,
@@ -27,7 +28,7 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
         「已完成 5/5 段」同样属于已开工，否则会出现「已完成 5/5 段 + 逾期未完成」的矛盾；
         段记录 done=0（只填了总段数）不算开工，仍按原规则判逾期。
     """
-    today = today or date.today()
+    today = today or business_today()
     if rules is None:
         rules = build_time_rules(plans, actuals, durations)
     seg_map = seg_map or {}
@@ -172,7 +173,7 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
     """
     # ⚠️ today 统一归一化为 date：下游 _segment_delay_tags 做 date 比较，
     # 调用方传 'YYYY-MM-DD' 字符串时原会 TypeError（防御性收口）
-    today = parse_date(today) or date.today()
+    today = parse_date(today) or business_today()
     # 按段填报（v7.1 行级化）：{node_plan_id: (segment_total, segment_done)}
     # ⚠️ 必须在 enrich_rows 之前加载——状态判定需要它（按段提报的行 → 进行中，不判逾期）
     seg_map = _load_node_segments(project_id)
@@ -286,7 +287,7 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
       segment_total/segment_done（该套的分段进度；无记录为 None），供填报 tab 回显 +
       节点详情 tab 展示；旧调用（不传参）行为不变。
     """
-    today = parse_date(today) or date.today()
+    today = parse_date(today) or business_today()
     # ⚠️ 闸门锚点必须基于【全项目】计划行（找「下料」行），不能只用本工序的行
     rules = build_time_rules(plans, actuals, durations)
     proc_nodes = sorted(

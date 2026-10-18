@@ -13,10 +13,15 @@
   - 提前：plan_date > today 且 actual_qty >= plan_qty
   - 注意：明细按 plan_date 落在当月筛选，与上面的「调度令月份」是两个不同维度（页面口径如此）
 """
-from datetime import date
+import calendar
+import logging
+from datetime import date, datetime, timedelta
 
 from ..core import db
+from ..core.timeutil import business_today
 from ..services.business_logic import judge_node_status, build_time_rules
+
+logger = logging.getLogger(__name__)
 
 
 def _month_range(month: str) -> tuple[str, str]:
@@ -103,7 +108,7 @@ def get_production_ranking_detail(month: str, person: str, big_area_person: str 
     actuals = db.get_actuals_rich_by_node_ids(node_ids)           # 1 次查询（含日期，支持闸门锚点）
     pids = sorted({int(p["project_id"]) for p in plans})
     durations_map = db.get_project_process_durations_batch(pids, month)   # 1 次查询（按套时长/偏移）
-    today = date.today()
+    today = business_today()
 
     # 按项目算「闸门 + effective 计划日期」（与页面口径一致，避免排名与页面打架）
     by_pid: dict[int, list] = {}
@@ -146,3 +151,325 @@ def get_production_ranking_detail(month: str, person: str, big_area_person: str 
             "exception_type": exception_type,
         })
     return result
+
+
+# ============================================================
+# 提报情况总览（v7.6）：当月日期 × 负责人 矩阵
+# ============================================================
+# 数据模型固有限制（必须对用户如实说明，前后端文案一致）：
+# ① 填报：node_actual_progress 唯一键为 (project_id, node_plan_id)，每个计划节点**只有一条**
+#    填报记录，report_date 是「最后一次填报日期」（覆盖式 upsert）。同一节点事后被改到另一日期时，
+#    先前那天的「已提报」痕迹即消失 → 历史上个别已真实提报的日子可能被反标为 ×。
+# ② 排产：排产导入是**整体覆盖式**（database.py insert_node_plans 的 del_cond 不含月份），
+#    被重导项目的历史计划行已归档进 process_node_plans_history，主表只保留最新一份。
+#    故历史月份矩阵可能整月空白——那是「计划已归档」，**不等于**「当月全部按时提报」。
+SUBMISSION_BOARD_CAVEAT = (
+    "数据说明：填报记录按节点覆盖式保存（node_actual_progress 唯一键 "
+    "(project_id, node_plan_id)，report_date 为最后一次填报日期），"
+    "同一节点事后改期会覆盖先前记录，历史个别已真实提报的日期可能被反标为 ×。"
+    "另：排产计划为整体覆盖式导入，重新导入后历史月份的计划可能已被归档，"
+    "该月矩阵可能出现空白（≠ 全部按时提报）。"
+)
+
+
+def _date_str(value) -> str:
+    """把 date / datetime / 'YYYY-MM-DD HH:MM:SS' 统一成 'YYYY-MM-DD'。"""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
+# ============================================================
+# 提报情况总览 · 人工覆盖（v7.7 管理员编辑模式）
+# ============================================================
+# 语义：**覆盖记录，不是翻转**（用户 2026-10 确认）。
+#   无记录                    → 自动判定
+#   'missed'                  → 强制 ×（即使当天有填报/异常）
+#   'on_time'                 → 强制留空（即使自动判定漏报）
+#   同一格再操作回「无记录」  → action='auto' 删除覆盖行，恢复自动判定（可逆）
+OVERRIDE_MISSED = "missed"
+OVERRIDE_ON_TIME = "on_time"
+OVERRIDE_AUTO = "auto"
+OVERRIDE_ACTIONS = (OVERRIDE_MISSED, OVERRIDE_ON_TIME, OVERRIDE_AUTO)
+# 单次批量提交上限（一个月最多 31 天 × 数十位负责人，2000 已远超真实需要）
+OVERRIDE_MAX_ITEMS = 2000
+
+
+def _load_submission_overrides(ns: str, ne: str) -> tuple[dict, dict]:
+    """读取某自然月的人工覆盖 → ``(映射, 元信息)``。
+
+    - 映射：``{(manager, 'YYYY-MM-DD'): 'missed'|'on_time'}``（合并矩阵时 O(1) 查表）
+    - 元信息：``{(manager, 'YYYY-MM-DD'): {'updated_by','updated_at'}}``（tooltip 用）
+
+    ⚠️ 容错：若目标库尚未执行 v7.7 DDL（表不存在），**只读接口不得因此 500**——
+    这里降级为「无任何人工覆盖」，页面行为与改动前完全一致，仅缺少人工调整能力。
+    写接口（保存）不做降级，缺表必须显式报错（提示先执行迁移脚本）。
+    """
+    try:
+        records = db.get_submission_override_records(ns, ne)
+    except Exception as exc:                      # noqa: BLE001 — 缺表/权限问题降级为无覆盖
+        logger.warning("读取 submission_board_overrides 失败（按无覆盖处理）：%s", exc)
+        return {}, {}
+
+    mapping: dict[tuple[str, str], str] = {}
+    meta: dict[tuple[str, str], dict] = {}
+    for r in records or []:
+        mgr = str(r.get("manager") or "").strip()
+        ds = str(r.get("date") or "")[:10]
+        ov = str(r.get("override_type") or "").strip()
+        if not mgr or not ds or ov not in (OVERRIDE_MISSED, OVERRIDE_ON_TIME):
+            continue
+        key = (mgr, ds)
+        mapping[key] = ov
+        meta[key] = {
+            "updated_by": str(r.get("updated_by") or "").strip(),
+            "updated_at": str(r.get("updated_at") or "").strip(),
+        }
+    return mapping, meta
+
+
+def _parse_iso_date(value) -> date | None:
+    """'YYYY-MM-DD' → date；格式非法 / 非日期返回 None。"""
+    text = str(value or "").strip()
+    if len(text) != 10:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def save_submission_board_overrides(month: str, items: list[dict],
+                                     updated_by: str = "") -> dict:
+    """保存「提报情况总览」人工覆盖（批量、单事务、可逆）。
+
+    逐条校验（任一不合法 → 抛 ``ValueError``，整批不落库）：
+      1. ``manager`` 去空格后非空；
+      2. ``date`` 为合法 ``YYYY-MM-DD`` 且落在 ``month`` 所在自然月；
+      3. ``action`` ∈ {'missed','on_time','auto'}；
+      4. **可编辑范围**：``action`` 为 'missed'/'on_time' 时，该 (负责人, 日期) 必须
+         「当天有计划且已过判定截止日（judged）」——与只读矩阵同一口径
+         （直接复用 ``get_submission_board`` 的 cell，避免两处口径漂移）。
+         ``action='auto'``（恢复自动判定）**不做可编辑校验**：它只是删除一条覆盖记录，
+         不改变矩阵语义，且便于清理历史遗留的无效覆盖。
+      5. 同一批内重复的 (manager, date) 以**最后一条**为准（去重，避免重复计数）。
+
+    Args:
+        month: 'YYYY-MM'（调用方已规范化；本函数仍做一次解析兜底）
+        items: [{'manager': str, 'date': 'YYYY-MM-DD', 'action': 'missed'|'on_time'|'auto'}]
+        updated_by: 操作人用户名（写入 updated_by）
+
+    Returns:
+        dict: {'upserted': int, 'deleted': int, 'saved': int}；saved = upserted + deleted
+
+    Raises:
+        ValueError: 参数非法 / 超出可编辑范围（路由层转 400）
+    """
+    try:
+        y, m = map(int, str(month).split("-"))
+        if not (2000 <= y <= 2100 and 1 <= m <= 12):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError("month 格式应为 YYYY-MM")
+
+    if not isinstance(items, list) or not items:
+        raise ValueError("items 不能为空")
+    if len(items) > OVERRIDE_MAX_ITEMS:
+        raise ValueError(f"单次最多提交 {OVERRIDE_MAX_ITEMS} 条")
+
+    ns, ne = _month_range(f"{y:04d}-{m:02d}")
+    cleaned: dict[tuple[str, str], str] = {}   # (manager, date) → action（后写覆盖前写）
+    for idx, raw in enumerate(items, 1):
+        row = raw or {}
+        mgr = str(row.get("manager") or "").strip()
+        if not mgr:
+            raise ValueError(f"第 {idx} 条：manager 不能为空")
+        ds = str(row.get("date") or "").strip()
+        parsed = _parse_iso_date(ds)
+        if not parsed:
+            raise ValueError(f"第 {idx} 条：date 格式应为 YYYY-MM-DD（收到 {ds!r}）")
+        if not (ns <= parsed.strftime("%Y-%m-%d") < ne):
+            raise ValueError(f"第 {idx} 条：date {ds} 不在 {y:04d}-{m:02d} 内")
+        action = str(row.get("action") or "").strip()
+        if action not in OVERRIDE_ACTIONS:
+            raise ValueError(
+                f"第 {idx} 条：action 只能为 missed / on_time / auto（收到 {action!r}）")
+        cleaned[(mgr, parsed.strftime("%Y-%m-%d"))] = action
+
+    # ---- 可编辑范围校验（与只读矩阵同一口径）----
+    # 只有「强制标记」需要校验：无计划谈不上未按时，今天/未来尚未判定。
+    forced = {k: a for k, a in cleaned.items() if a != OVERRIDE_AUTO}
+    if forced:
+        board = get_submission_board(f"{y:04d}-{m:02d}", big_area_person=None)
+        cells: dict[tuple[str, str], dict] = {}
+        for r in board.get("rows") or []:
+            mgr = str(r.get("manager") or "").strip()
+            for c in r.get("cells") or []:
+                cells[(mgr, str(c.get("date") or "")[:10])] = c
+        for (mgr, ds), _action in forced.items():
+            cell = cells.get((mgr, ds))
+            if cell is None:
+                raise ValueError(f"{mgr} · {ds}：该负责人当日无排产计划，不可编辑")
+            if not cell.get("has_plan"):
+                raise ValueError(f"{mgr} · {ds}：当天无计划，不可编辑")
+            if not cell.get("judged"):
+                raise ValueError(f"{mgr} · {ds}：今天/未来日期尚未判定，不可编辑")
+
+    payload = [{"manager": mgr, "date": ds, "action": action}
+               for (mgr, ds), action in cleaned.items()]
+    res = db.save_submission_overrides(payload, updated_by)
+    result = {
+        "upserted": int(res.get("upserted") or 0),
+        "deleted": int(res.get("deleted") or 0),
+    }
+    result["saved"] = result["upserted"] + result["deleted"]
+    return result
+
+
+def get_submission_board(month: str, big_area_person: str | None = None) -> dict:
+    """「提报情况总览」矩阵：当月自然日 × 负责人，标记「当天有计划但完全未提报」。
+
+    判定口径（用户 2026-10 确认，不得自由发挥）：
+      - 日期范围：筛选月份的自然月 1 日～月末（按真实天数，含闰年）
+      - 负责人范围：该月存在排产计划行（``process_order`` 1..11）的负责人，
+        由 SQL ``ORDER BY CONVERT(manager USING gbk)`` 给出拼音升序
+      - 「当天有计划」：该负责人该日存在 ``process_node_plans`` 行，
+        ``plan_date = 当天`` 且 ``plan_qty > 0``，且属排产工序白名单
+        （``process_order`` 1..11）；独立工序（90/91，含每日填报产生的
+        plan_date=填报日 的行）与手动完成占位行（99）一律不参与判定
+      - 「未做任何操作」：当天既无填报（``node_actual_progress.report_date = 当天``）
+        也无异常（``node_exceptions.created_at`` 的日期 = 当天，**不是** plan_date）
+      - 标记 ×：有计划 且 无任何操作 且 该日 ≤ 昨天
+      - 今天与未来：一律留空（判定截止到最后一天已结束的日期）
+      - 月份归属：按 ``plan_date`` 落在哪个自然月（日历口径）。这与「排产计划总览」
+        「出品排名总览」的 ``plan_month``（排产归属月）口径**不同**：月初/月末可能出现
+        「排产总览显示该月无计划，但本页有 ×」的差异（跨月边界行按真实日历日归属）。
+
+    v7.7 人工覆盖（管理员编辑模式）：
+      ``submission_board_overrides`` 记录「负责人 × 日期」的人工判断，**覆盖**自动判定
+      （不是翻转）：``'missed'`` → 强制 ×；``'on_time'`` → 强制留空。
+      故每个 cell 同时暴露：
+        - ``auto_missed``：原始自动判定值（保留，便于前端说明「自动判定 vs 人工调整」）
+        - ``override``   ：``None | 'missed' | 'on_time'``（本格生效的人工覆盖）
+        - ``missed``     ：**最终值**（人工覆盖优先，否则 = auto_missed）
+        - ``editable``   ：``has_plan and judged``（前端编辑态据此置灰）
+        - ``override_by`` / ``override_at``：操作人 / 操作时间（tooltip 用，未覆盖为 None）
+      ``summary.missed_total`` 与 ``rows[].missed_total`` 均按**最终值**重算。
+
+    Args:
+        month: 'YYYY-MM'
+        big_area_person: 大区负责人（行级隔离）；None = 全量
+
+    Returns:
+        dict: month / today / cutoff / dates / rows[{manager, cells[], missed_total}] /
+              summary{manager_count, missed_total, day_count, override_count} / caveat
+    """
+    y, m = map(int, month.split("-"))
+    days_in_month = calendar.monthrange(y, m)[1]          # 2 月自动 28/29
+    month_dates = [date(y, m, d) for d in range(1, days_in_month + 1)]
+    date_strs = [d.strftime("%Y-%m-%d") for d in month_dates]
+    ns, ne = _month_range(month)
+
+    today = business_today()
+    cutoff = today - timedelta(days=1)
+
+    agg = db.get_submission_board_aggregates(ns, ne, big_area_person)
+    override_map, override_meta = _load_submission_overrides(ns, ne)
+
+    # ---- 计划事实（负责人顺序即 SQL 的 gbk 拼音序，去重保序）----
+    managers: list[str] = []
+    seen_managers: set[str] = set()
+    plan_count: dict[tuple[str, str], int] = {}
+    plan_procs: dict[tuple[str, str], list[str]] = {}
+    for r in agg.get("plans", []):
+        mgr = str(r.get("manager") or "").strip()
+        if not mgr:
+            continue
+        if mgr not in seen_managers:
+            seen_managers.add(mgr)
+            managers.append(mgr)
+        ds = _date_str(r.get("d"))
+        key = (mgr, ds)
+        plan_count[key] = int(r.get("plan_count") or 0)
+        # GROUP_CONCAT('、') → 去重排序（同一工序在多个项目出现只列一次）
+        names = [p.strip() for p in str(r.get("processes") or "").split("、") if p.strip()]
+        plan_procs[key] = sorted(set(names))
+
+    # ---- 填报 / 异常事实（集合查找 O(1)）----
+    reported: set[tuple[str, str]] = set()
+    for r in agg.get("reports", []):
+        mgr = str(r.get("manager") or "").strip()
+        if mgr:
+            reported.add((mgr, _date_str(r.get("d"))))
+
+    exceptioned: set[tuple[str, str]] = set()
+    for r in agg.get("exceptions", []):
+        mgr = str(r.get("manager") or "").strip()
+        if mgr:
+            exceptioned.add((mgr, _date_str(r.get("d"))))
+
+    # ---- 组装矩阵 ----
+    rows: list[dict] = []
+    missed_total = 0
+    override_count = 0
+    for mgr in managers:
+        cells: list[dict] = []
+        row_missed = 0
+        for d, ds in zip(month_dates, date_strs):
+            key = (mgr, ds)
+            cnt = plan_count.get(key, 0)
+            has_plan = cnt > 0
+            has_report = key in reported
+            has_exc = key in exceptioned
+            # 仅判定「已经完整结束的日期」：今天与未来一律留空
+            judged = d <= cutoff
+            editable = bool(has_plan and judged)
+            auto_missed = bool(has_plan and judged and not has_report and not has_exc)
+            # 人工覆盖只在「可编辑格」上生效（防御层）：即便库中存在陈旧记录
+            # （排产重导后该日已无计划 / 该日已变为未来），也不得改变矩阵显示。
+            override = override_map.get(key) if editable else None
+            if override == OVERRIDE_MISSED:
+                missed = True
+            elif override == OVERRIDE_ON_TIME:
+                missed = False
+            else:
+                missed = auto_missed
+            meta = override_meta.get(key) or {}
+            if override:
+                override_count += 1
+            if missed:
+                row_missed += 1
+            cells.append({
+                "date": ds,
+                "has_plan": has_plan,
+                "plan_count": cnt,
+                "processes": plan_procs.get(key, []),
+                "reported": has_report,
+                "exception": has_exc,
+                "judged": judged,
+                "editable": editable,
+                "auto_missed": auto_missed,
+                "override": override,
+                "override_by": meta.get("updated_by") if override else None,
+                "override_at": meta.get("updated_at") if override else None,
+                "missed": missed,
+            })
+        missed_total += row_missed
+        rows.append({"manager": mgr, "cells": cells, "missed_total": row_missed})
+
+    return {
+        "month": month,
+        "today": today.strftime("%Y-%m-%d"),
+        "cutoff": cutoff.strftime("%Y-%m-%d"),
+        "dates": date_strs,
+        "rows": rows,
+        "summary": {
+            "manager_count": len(rows),
+            "missed_total": missed_total,
+            "day_count": days_in_month,
+            "override_count": override_count,
+        },
+        "caveat": SUBMISSION_BOARD_CAVEAT,
+    }

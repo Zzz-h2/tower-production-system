@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """节点实际进度保存 API：按分组独立保存（互不覆盖）。"""
 from fastapi import APIRouter, Depends, HTTPException
-from datetime import date, datetime
+from datetime import datetime, timedelta
 
 from ..core import db
 from ..core.deps import get_current_user, require_project_access
+from ..core.timeutil import business_today
 from ..schemas import SaveNodeProgressRequest, SaveSegmentRequest
 from ..services.business_logic import (
     validate_today_quota, validate_today_quota_nodes, split_node_groups, build_time_rules,
@@ -12,6 +13,12 @@ from ..services.business_logic import (
 from ..core.config import GROUP_LABELS, INDEPENDENT_PROCESS_NAMES
 
 router = APIRouter(prefix="/api/projects", tags=["nodes"])
+
+# 大区账号（big_area）可回填的日期窗口天数。
+# ⚠️ 与前端 frontend/src/components/ProcessDetailDialog.vue 的 BACKFILL_DAYS 必须同值
+#   （前后端各写一份常量、无法共享，任何改动必须两侧同步）。
+# 允许区间 = [今天 − BACKFILL_DAYS, 今天]（闭区间，含今天）；未来日期一律越界。
+BACKFILL_DAYS = 7
 
 
 @router.post("/{pid}/nodes/{process_name}/save")
@@ -23,7 +30,9 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
     - 只写当前分组节点（其他分组数据不被触碰）；
     - group=today/overdue/future：前序工序数量联动校验（累计 ≤ 前序累计实际，防越序），各节点 ≤ 计划数；
     - group=done：已完成分组为「无法编辑」只读模式，后端直接拒绝写操作（不接受减少/修改）；
-    - 填报日期：大区账号强制锁定为今日（防历史回填），管理员可按节点指定历史日期。
+    - 填报日期：大区账号（big_area）可回填最近 BACKFILL_DAYS 天内的日期（含今天），
+      越界（早于今天 − BACKFILL_DAYS 或晚于今天）返回 400 REPORT_DATE_OUT_OF_RANGE；
+      「只改数量、日期沿用库中原值」放行（不因旧日期越界被误拦）；管理员不受窗口限制。
     - 业务校验一律返回 400 + {code,message} 结构，前端可读友好文案。
     - v6.0 多负责人：req.manager 非空时，只加载/校验/写入该负责人名下的节点，
       各负责人提报相互独立、互不影响；实际写入的 manager 以节点计划行自身的值为准（防跨负责人误写）。
@@ -68,7 +77,9 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
 
     is_independent = process_name in INDEPENDENT_PROCESS_NAMES  # 独立工序：不设日期、不限 qty 上限
 
-    today = date.today()
+    # 「今天」用业务时区（Asia/Shanghai）单一来源，不依赖运行环境时区，
+    # 避免容器 UTC 与用户东八区在 00:00–08:00 出现跨天窗口错位。
+    today = business_today()
     groups = split_node_groups(proc_nodes, actuals, today)
     target_ids = {p["id"] for p in groups[req.group]}
     if not target_ids:
@@ -120,10 +131,42 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                     detail={"code": "PREV_PROC_QUOTA_EXCEEDED", "message": err},
                 )
 
-    # 写入（只写当前分组，每行独立填报日期；大区账号锁定今日；独立工序按日期 find-or-create）
+    # 写入（只写当前分组，每行独立填报日期；大区账号可回填近 BACKFILL_DAYS 天；独立工序按日期 find-or-create）
     # partial_ok 模式下只写通过前序联动校验的节点
-    saved = 0
     lock_date = user.get("role") == "big_area"
+
+    # big_area 窗口校验「前移」到写入循环之前（原子性）：先对全部待写行整体校验，
+    # 任一行日期非法/越界即整批 400，且一行都不落库 —— 与 NODE_NOT_IN_GROUP /
+    # QTY_EXCEED_PLAN 的「先校验后写入」风格一致。旧实现把校验放循环内，越界行在
+    # 后面时前面的行已先落库，存在顺序相关的部分写入。
+    # 仅对 big_area 的「非独立工序」生效；admin 不受窗口限制，独立工序按自身分支处理。
+    if lock_date and not is_independent:
+        _earliest = today - timedelta(days=BACKFILL_DAYS)
+        for v in values_to_write:
+            rd = v.report_date or today.strftime("%Y-%m-%d")
+            try:
+                rd_date = datetime.strptime(rd, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "BAD_REPORT_DATE", "message": "report_date 格式必须为 YYYY-MM-DD"},
+                )
+            # 「只改数量、未改日期」放行：库中原 report_date 可能远早于窗口（如 1 个月前），
+            # rd 等于该节点现有值即视为未修改日期。actuals 里可能是 date 或 str，统一截断到 10 位。
+            existing_rd = str(actuals.get(v.node_id, {}).get("report_date") or "")[:10]
+            if rd != existing_rd and (rd_date < _earliest or rd_date > today):  # 晚于今天（未来）同样越界
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "REPORT_DATE_OUT_OF_RANGE",
+                        "message": (
+                            f"填报日期 {rd} 超出允许范围（仅可回填最近 {BACKFILL_DAYS} 天，"
+                            f"即 {_earliest.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')}）"
+                        ),
+                    },
+                )
+
+    saved = 0
     for v in values_to_write:
         if is_independent:
             rd = v.report_date or today.strftime("%Y-%m-%d")
@@ -155,7 +198,11 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                                          plan_manager_by_id.get(v.node_id))
             saved += 1
         elif lock_date:
-            rd = today.strftime("%Y-%m-%d")
+            # 大区账号（big_area）：日期已在写入前「整体校验」通过（见上方 pre-validation），
+            # 此处直接落库。不再硬编码为今天 —— 可回填 [today − BACKFILL_DAYS, today]，
+            # 与 frontend ProcessDetailDialog.vue 的 isDateDisabled 同口径。
+            # ⚠️ BACKFILL_DAYS 与前端 ProcessDetailDialog.vue 的同名常量必须同值。
+            rd = v.report_date or today.strftime("%Y-%m-%d")
             db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd,
                                   plan_manager_by_id.get(v.node_id))
             saved += 1

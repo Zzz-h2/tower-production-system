@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from ..core import db
 from ..core.config import SCHEDULE_PROCESS_DAYS
+from ..core.timeutil import business_today
 from ..services.node_service import build_overview
 
 # 11 道排产工序及其标准自然日工期：单一来源 = config.SCHEDULE_PROCESS_DAYS
@@ -53,7 +54,7 @@ def generate_backward_plan(deadline: date, custom_durations: dict | None = None)
 def estimate_delivery_date(status_list: list[str], custom_durations: dict | None = None) -> date:
     """从第一个未完成工序起顺排（自定义/默认工期），推算预计交付日。"""
     eff = _effective_durations(custom_durations)
-    today = date.today()
+    today = business_today()
     idx = next((i for i, s in enumerate(status_list)
                if s not in ("done", "done_early")), None)
     if idx is None:
@@ -70,7 +71,7 @@ def build_milestone_backward(pid: int, deadline: date, custom_durations: dict | 
     if not (2000 <= deadline.year <= 2100):
         raise HTTPException(status_code=400, detail="交付截止日应在 2000~2100 年之间")
     backward = generate_backward_plan(deadline, custom_durations)
-    today = date.today()
+    today = business_today()
 
     # 当前工序状态（来自 node_plans + node_actuals 实时计算）
     try:

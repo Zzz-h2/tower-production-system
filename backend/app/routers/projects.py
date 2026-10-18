@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ..core import db
 from ..core.deps import get_current_user, get_scope_big_area, require_admin, require_project_access
+from ..core.timeutil import business_today
 from ..schemas import ManualCompleteRequest, ProjectUpdateRequest
 from ..services.node_service import build_overview, build_process_detail, enrich_rows
 from ..services.business_logic import compute_real_overdue
@@ -178,7 +179,7 @@ def get_project(pid: int, month: Optional[str] = None,
     from ..services.node_service import load_node_segments
     rows = enrich_rows(plans, actuals, durations=durations, seg_map=load_node_segments(pid))
 
-    today_s = str(date.today())
+    today_s = str(business_today())
 
     # 1) 历史逾期（只统计「真逾期」：工序累计完成 < 调度令本月计划）
     has_overdue = bool(compute_real_overdue(rows, int(project.get("monthly_plan") or 0)))

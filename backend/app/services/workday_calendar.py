@@ -10,6 +10,8 @@ Date: 2026-08-03 / 2026-08-06 (v3.0)
 from datetime import datetime, date, timedelta
 from typing import Optional
 
+from ..core.timeutil import business_today
+
 
 # 全局节假日缓存（保留接口，默认不参与计算）
 _CUSTOM_HOLIDAYS: list[date] = []
@@ -141,7 +143,7 @@ def calculate_lag_days(plan_end_date_str: str,
     if not plan_end:
         return 0
 
-    today = current_date or date.today()
+    today = current_date or business_today()
 
     if today <= plan_end:
         return 0
