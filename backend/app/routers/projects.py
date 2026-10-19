@@ -519,7 +519,9 @@ def get_process_nodes(pid: int, process_name: str, manager: Optional[str] = None
     return build_process_detail(process_name, plans, actuals,
                                 contract_count=project.get("contract_count"),
                                 durations=db.get_project_process_durations(pid, mgr, mth),
-                                project_id=pid)
+                                project_id=pid,
+                                # 「第 N 套」套明细（2026-10）与计划行同口径：同负责人、同归属月
+                                manager=mgr, month=mth)
 
 
 @router.get("/{pid}/alerts")

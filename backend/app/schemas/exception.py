@@ -13,6 +13,11 @@ class NodeExceptionCreate(BaseModel):
     handler: Optional[str] = Field(None, description="处理人")
     planned_close_date: Optional[date] = Field(None, description="计划关闭日期")
     measures: Optional[str] = Field(None, description="处理措施")
+    # 「异常精确到套」（2026-10，均可空）：不传 = 整套/不指定，判定层走历史中位数反推
+    set_seq: Optional[int] = Field(
+        None, description="异常指向的套号（project_process_durations.set_seq）；None=不指定")
+    set_d0: Optional[date] = Field(
+        None, description="该套下料计划日快照（plan_date − 该套 offset）；None=不指定")
 
 
 class NodeExceptionUpdate(BaseModel):
@@ -36,6 +41,9 @@ class NodeExceptionOut(BaseModel):
     planned_close_date: Optional[date]
     measures: Optional[str]
     status: str
+    # 「异常精确到套」（2026-10）：历史记录为 NULL（= 整套/不指定）
+    set_seq: Optional[int] = None
+    set_d0: Optional[date] = None
     created_at: datetime
     updated_at: datetime
     closed_at: Optional[datetime]

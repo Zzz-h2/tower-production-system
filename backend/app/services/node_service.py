@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from .business_logic import (judge_node_status, judge_process_card_status, split_node_groups,
-                             compute_real_overdue, build_time_rules)
+                             compute_real_overdue, build_time_rules, cutting_anchor_map)
 from .workday_calendar import parse_date
 from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
 from ..core.timeutil import business_today
@@ -195,7 +195,8 @@ def _load_open_exceptions(project_id: int) -> dict[str, int]:
 
 
 def build_exception_anchors(exc_rows: Optional[list[dict]], durations: Optional[dict] = None,
-                            plans: Optional[list[dict]] = None) -> dict[str, list[dict]]:
+                            plans: Optional[list[dict]] = None,
+                            set_index: Optional[dict] = None) -> dict[str, list[dict]]:
     """把异常记录**反推**到「所属套」并聚合（纯函数，无 IO，便于单测/回归）。
 
     「同一套」的关联键 = 该行的 **下料计划日 d0**（= 该行 plan_date − 该行 offset_days），
@@ -210,13 +211,33 @@ def build_exception_anchors(exc_rows: Optional[list[dict]], durations: Optional[
          查不到（非制造链工序 / 该月未导入 / 存量项目无时长数据）→ **跳过**该异常
          （无法定位所属套，保守起见不参与排产重算，行为等同改动前）。
       3. d0 = plan_date − offset_days，按 d0 聚合成
-         ``{d0: [{"process_name", "offset_days", "status", "closed_at", "exception_id"}]}``。
+         ``{d0: [{"process_name", "offset_days", "status", "closed_at", "exception_id",
+                  "set_seq", "set_d0", "bucket_d0"}]}``。
+
+    ===== 套号元数据（2026-10，「异常精确到套」）=====
+    本函数**签名向后兼容**（新增的 ``set_index`` 为可选关键字参数，既有 3 参调用不变），
+    内部按三档补充「这条异常指向第几套」的**元数据**（``set_seq`` / ``set_d0``），
+    供展示层把 ⚠️ 异常标到具体的「第 N 套」子行上：
+      ① 异常自带 ``set_seq``，且该 (工序, 计划日) 的套成员里存在同 seq 的成员 → 记录该成员套号
+         与该成员自己的 d0（``每套各自算``，绝不跨套合并）；
+      ② 无 set_seq 但自带 ``set_d0``，且成员里存在同 d0 的成员 → 记录该成员套号与该 d0；
+      ③ 两者都没有（**历史 NULL 异常全部走这一档**）→ 不记录套号元数据，
+         反推结果（d0 / offset_days / status / closed_at）与改造前**逐条逐字段一致**。
+
+    🔴 判定口径零改动的关键约束：``d0`` 与条目里的 ``offset_days`` **仍取 durations 的
+       中位数代表值**（与 ``build_time_rules`` 同源），**不因套号而改用某个成员的 offset**。
+       原因：排产计划行按 (工序, 计划日) 聚合（1 行 = N 套），判定层只能按「中位代表值算出的
+       d0」匹配行；若改成某套自己的 offset，聚合行的 d0 将对不上任何行 → 该套异常会
+       **静默地不再暂停任何工序**，违反「暂停保持整行」的用户口径（第 3 套异常 → 整行后续
+       工序全暂停），也让逾期数/KPI 发生漂移。逐套的精确日期只用在展示层
+       （``judge_set_display_status``）里按**该套自己的 offset** 重算，不影响判定。
 
     Args:
         exc_rows: node_exceptions 原始行（含 project_id/node_id/process_name/plan_date/
-                  status/closed_at/id）；None/空 → 返回 {}
+                  status/closed_at/id，可选 set_seq/set_d0）；None/空 → 返回 {}
         durations: {(process_name, 'YYYY-MM-DD'): {"offset_days": int}}
         plans: 项目当前计划行（可选，用于把 node_id 映射到最新 plan_date）
+        set_index: 可选，``build_set_index`` 的产物（套成员明细）；None → 只走第 ③ 档
 
     Returns:
         dict[str, list[dict]]: 按「下料计划日」聚合的异常列表
@@ -261,14 +282,54 @@ def build_exception_anchors(exc_rows: Optional[list[dict]], durations: Optional[
         d0 = (base - timedelta(days=offset)).strftime("%Y-%m-%d")
         status = str(e.get("status") or "pending").strip() or "pending"
         closed_at = str(e.get("closed_at") or "")[:10] or None
+        # 套号元数据（三档；仅展示用，不改变上面的 d0 / offset）
+        set_seq, set_d0 = _resolve_exception_set(e, pn, pd, set_index)
         anchors.setdefault(d0, []).append({
             "process_name": pn,
             "offset_days": offset,
             "status": status,
             "closed_at": closed_at,
             "exception_id": e.get("id"),
+            "set_seq": set_seq,
+            "set_d0": set_d0,
+            "bucket_d0": d0,
         })
     return anchors
+
+
+def _resolve_exception_set(exc: dict, process_name: str, plan_date: str,
+                           set_index: Optional[dict]) -> tuple[Optional[int], Optional[str]]:
+    """把一条异常解析到「具体第几套」→ ``(set_seq, set_d0)``；无法解析 → ``(None, None)``。
+
+    三档（详见 ``build_exception_anchors`` 文档）：
+      ① 异常自带 ``set_seq`` 且 (工序, 计划日) 的套成员里有同 seq → (seq, 该成员 d0)
+      ② 异常自带 ``set_d0`` 且成员里有同 d0 → (该成员 seq, d0)
+      ③ 否则 → (None, None)（历史 NULL 异常；行为等同改造前）
+
+    纯函数，无 IO。set_index 为 None / 该键无成员（存量项目、非制造链工序）→ 第 ③ 档。
+    """
+    members = (set_index or {}).get((process_name, plan_date)) or []
+    if not members:
+        return None, None
+    # ---- 档①：按套号精确匹配 ----
+    raw_seq = exc.get("set_seq")
+    if raw_seq is not None:
+        try:
+            want_seq = int(raw_seq)
+        except (TypeError, ValueError):
+            want_seq = None
+        if want_seq is not None:
+            for m in members:
+                if int(m.get("set_seq") or 0) == want_seq:
+                    return want_seq, (m.get("d0") or None)
+    # ---- 档②：按该套下料计划日快照匹配 ----
+    want_d0 = _date10(exc.get("set_d0"))
+    if want_d0:
+        for m in members:
+            if (m.get("d0") or "") == want_d0:
+                return int(m.get("set_seq") or 0) or None, want_d0
+    # ---- 档③：无套号信息 → 保持改造前行为（不指定套）----
+    return None, None
 
 
 def build_node_exception_index(exc_rows: Optional[list[dict]]) -> dict[int, list[dict]]:
@@ -298,12 +359,21 @@ def build_node_exception_index(exc_rows: Optional[list[dict]]) -> dict[int, list
 
 
 def _load_exception_context(project_id: int, durations: Optional[dict] = None,
-                            plans: Optional[list[dict]] = None) -> tuple[dict, dict]:
+                            plans: Optional[list[dict]] = None,
+                            set_index: Optional[dict] = None) -> tuple[dict, dict]:
     """一次查询同时返回「按套聚合的异常锚点」与「按节点建索引的异常」（避免两次 IO）。
+
+    Args:
+        project_id: 项目 ID；None → ({}, {})
+        durations: durations 中位数归并表（None/空 → 无法反推所属套 → anchors 为 {}）
+        plans: 项目当前计划行（用于 node_id → plan_date 覆盖）
+        set_index: 可选，``build_set_index`` 产物；传入时异常锚点会附带「指向第几套」的
+            元数据（set_seq/set_d0），供展示层把异常标到具体套上。不传 → 与改造前一致。
 
     Returns:
         (anchors, node_index)：
-          - anchors: {该套下料计划日 d0: [{process_name, offset_days, status, closed_at}]}
+          - anchors: {该套下料计划日 d0: [{process_name, offset_days, status, closed_at,
+            set_seq, set_d0, bucket_d0}]}
           - node_index: {node_plan_id: [{process_name, status, closed_at}]}
         查询失败 / 缺表 → ({}, {})，绝不阻塞总览（与 _load_node_segments 同口径）。
     """
@@ -318,25 +388,354 @@ def _load_exception_context(project_id: int, durations: Optional[dict] = None,
                                             project_id, e)
         return {}, {}
     node_index = build_node_exception_index(rows)
-    anchors = build_exception_anchors(rows, durations, plans) if durations else {}
+    anchors = (build_exception_anchors(rows, durations, plans, set_index) if durations else {})
     return anchors, node_index
 
 
 def _load_exception_anchors(project_id: int, durations: Optional[dict] = None,
-                            plans: Optional[list[dict]] = None) -> dict[str, list[dict]]:
+                            plans: Optional[list[dict]] = None,
+                            set_index: Optional[dict] = None) -> dict[str, list[dict]]:
     """读取项目全部异常（含已关闭）并反推为「按套聚合」结构，供 build_time_rules 使用。
 
-    返回 ``{该套下料计划日 d0: [{process_name, offset_days, status, closed_at}, ...]}``。
+    返回 ``{该套下料计划日 d0: [{process_name, offset_days, status, closed_at, ...}, ...]}``。
 
     ⚠️ 容错口径与 ``_load_node_segments`` 完全一致：**查询失败返回 {}**，绝不阻塞总览；
        无 durations（存量项目未导入时长）时同样返回 {}——无法反推「哪一套」，保守不动排产。
     """
-    return _load_exception_context(project_id, durations, plans)[0]
+    return _load_exception_context(project_id, durations, plans, set_index)[0]
 
 
 # 对外公开别名：路由层（项目详情风险 / 预警列表）复用同一带兜底的读取逻辑
 load_exception_anchors = _load_exception_anchors
 load_exception_context = _load_exception_context
+
+
+# ============================================================
+# 「第 N 套」展示层（2026-10）：只读，绝不参与任何判定
+# ------------------------------------------------------------
+# 数据源 = project_process_durations 的**逐套原始行**（含 set_seq，每套每工序一行）；
+# 判定层仍用「按 (工序, 计划日) 中位数归并」的 durations，两条线互不影响：
+#   · 本层只产出 sets[]/has_set_detail/set_count/set_detail_state 等**新增只读字段**；
+#   · 不改 status/label/level/count_as_overdue/deviation_*/plan_date 任一既有字段。
+# ============================================================
+def build_set_index(duration_rows: Optional[list[dict]]) -> dict[tuple[str, str], list[dict]]:
+    """把 durations 原始行聚成「套明细索引」→ ``{(工序, 计划日): [成员, ...]}``（按 set_seq 升序）。
+
+    纯函数（无 IO）。键用 ``(process_name, 'YYYY-MM-DD')``，与 durations 中位数表的键同构——
+    这样才能用**同一把钥匙**把「聚合计划行」和「该行包含的 N 套」对上。
+
+    每个成员字段：
+      - ``set_seq``: 套序号（1-based，来自 durations 原始行，**不是**本函数重排的序号）
+      - ``offset_days`` / ``duration_days``: 该套该工序的偏移/时长（可为 None）
+      - ``plan_date``: 该套该工序的计划日（'YYYY-MM-DD'）
+      - ``d0``: 该套的下料计划日 = ``plan_date − offset_days``（**每套各自算，绝不跨套合并**）；
+        offset 缺失时为 ``''``
+      - ``source``: ``'import'`` = 有 plan_month（本月/历史正式导入）；``'backfill'`` = 无 plan_month
+        （补录/历史未标注月行 → 套号属推定，UI 标「（推定套号）」）
+
+    ⚠️ 同一 ``(工序, 计划日, set_seq)`` 出现多行（多负责人/跨月重复导入）时**保留首行**，
+       保证 ``len(成员) == 该行 plan_qty`` 的门禁不被重复行撑破。
+
+    Args:
+        duration_rows: ``db.list_project_process_durations`` 的原始行；None/空 → ``{}``
+
+    Returns:
+        dict[(process_name, 'YYYY-MM-DD'), list[dict]]: 套成员明细，成员按 set_seq 升序
+    """
+    index: dict[tuple[str, str], list[dict]] = {}
+    for row in duration_rows or []:
+        process_name = str(row.get("process_name") or "").strip()
+        if not process_name:
+            continue
+        plan_date = _date10(row.get("plan_date"))
+        if not plan_date:
+            continue
+        try:
+            set_seq = int(row.get("set_seq"))
+        except (TypeError, ValueError):
+            continue
+        offset_days = _int_or_none(row.get("offset_days"))
+        base = parse_date(plan_date)
+        d0 = ""
+        if base is not None and offset_days is not None:
+            d0 = (base - timedelta(days=offset_days)).strftime("%Y-%m-%d")
+        members = index.setdefault((process_name, plan_date), [])
+        if any(m.get("set_seq") == set_seq for m in members):
+            continue        # 重复行（多负责人/跨月重复导入）只保留首行
+        members.append({
+            "set_seq": set_seq,
+            "offset_days": offset_days,
+            "duration_days": _int_or_none(row.get("duration_days")),
+            "plan_date": plan_date,
+            "d0": d0,
+            "source": "import" if row.get("plan_month") else "backfill",
+        })
+    for members in index.values():
+        members.sort(key=lambda m: int(m.get("set_seq") or 0))
+    return index
+
+
+def _int_or_none(value) -> Optional[int]:
+    """把任意值安全转成 int；None / 空串 / 非法值 → None（纯工具，无副作用）。"""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_set_index(project_id: Optional[int], manager: Optional[str] = None,
+                    month: Optional[str] = None) -> dict[tuple[str, str], list[dict]]:
+    """读取项目「套明细索引」（容错；失败返回 ``{}``，绝不阻塞详情页）。
+
+    与 ``_load_node_segments`` 同口径：查询异常（缺表/权限）只记 warning 并降级为「无套明细」，
+    前端据此回退到今天完全一致的整行渲染（``has_set_detail=false``）。
+    """
+    if project_id is None:
+        return {}
+    from ..core import db
+    try:
+        rows = db.list_project_process_durations(int(project_id), manager, month) or []
+    except Exception as e:  # noqa: BLE001 — 套明细为增强展示，失败回退原渲染
+        import logging
+        logging.getLogger(__name__).warning(
+            "list_project_process_durations(%s) 失败：%s", project_id, e)
+        return {}
+    return build_set_index(rows)
+
+
+def _flatten_exception_entries(exc_entries: Optional[dict]) -> list[dict]:
+    """把「按 d0 聚合」的异常锚点摊平成一维列表，并为每条补上 ``bucket_d0``（所属套桶）。
+
+    展示层按「套」匹配异常时需要逐条扫描（一条异常可能命中某个成员的 set_seq 或 d0），
+    因此先摊平。``bucket_d0`` 保留判定层使用的聚合桶（中位代表值算出来的 d0），
+    用于「无套号元数据的历史异常」按桶兜底匹配。
+    """
+    flat: list[dict] = []
+    for bucket_d0, entries in (exc_entries or {}).items():
+        for entry in entries or []:
+            item = dict(entry)
+            item.setdefault("bucket_d0", str(bucket_d0 or "")[:10])
+            flat.append(item)
+    return flat
+
+
+def _match_set_exceptions(member: dict, exc_flat: Optional[list[dict]]) -> list[dict]:
+    """挑出属于某个套成员的异常条目（纯函数）。
+
+    匹配优先级（任一命中即算该套的异常）：
+      1. 条目带 ``set_seq`` 且与本成员 ``set_seq`` 相同 → 命中（套号是跨工序稳定的，
+         ``project_process_durations.set_seq`` = 导入时的数据行序，同一套在各工序同号）；
+      2. 条目带 ``set_d0``（该套下料计划日快照）且与本成员 ``d0`` 相同 → 命中；
+      3. 条目无任何套号元数据（历史 NULL 异常）→ 用 ``bucket_d0`` 与本成员 ``d0`` 比对，
+         命中说明「这条历史异常正好落在该套的桶」，与判定层的暂停口径一致。
+    """
+    if not exc_flat:
+        return []
+    member_seq = _int_or_none(member.get("set_seq"))
+    member_d0 = str(member.get("d0") or "")[:10]
+    hits: list[dict] = []
+    for entry in exc_flat:
+        seq = _int_or_none(entry.get("set_seq"))
+        if seq is not None and member_seq is not None and seq == member_seq:
+            hits.append(entry)
+            continue
+        entry_d0 = _date10(entry.get("set_d0"))
+        if entry_d0 and member_d0 and entry_d0 == member_d0:
+            hits.append(entry)
+            continue
+        if seq is None and not entry_d0:
+            bucket = _date10(entry.get("bucket_d0"))
+            if bucket and member_d0 and bucket == member_d0:
+                hits.append(entry)
+    return hits
+
+
+def judge_set_display_status(member: dict, *, position: int, plan_qty: int, actual_qty: int,
+                             today=None, cutting_anchor: Optional[dict] = None,
+                             exc_entries: Optional[list[dict]] = None) -> dict:
+    """判定**单个套**的展示态（纯展示，绝不写回判定层字段）。
+
+    逐套信息只来自 durations 原始行（该套自己的 offset），因此「计划日期」按该套自己的
+    offset 重算：``生效日 = 该套实际下料日 + 该套 offset``；若该套有已关闭异常，再按
+    ``max(实际下料日, 已关闭异常 closed_at − 异常工序 offset) + 该套 offset`` 后推，
+    与 ``build_time_rules`` 的算法**同构**——但只用于「第 N 套」子行展示，
+    整行 status/逾期/KPI 仍由 ``build_time_rules`` 的聚合口径决定（一个数字都不变）。
+
+    实际完成推定（用户 2026-10 确认口径 D）：填报仍是「计划 3 套 / 实际 2 套」合并填写，
+    故按 ``set_seq 升序`` 推定前 ``actual_qty`` 套已完成（前 N 套完成），UI 标「（推定）」。
+
+    Args:
+        member: ``build_set_index`` 的单个成员（含 set_seq/offset_days/plan_date/d0/source）
+        position: 该成员在成员列表中的 0-based 位次（升序 → 前 actual_qty 个视为已完成）
+        plan_qty: 该计划行的计划套数
+        actual_qty: 该计划行的实际完成套数（合并填报值）
+        today: 判定基准日（None → 业务时区当天）
+        cutting_anchor: ``cutting_anchor_map`` 产物 {下料计划日: 实际下料日}
+        exc_entries: 摊平后的异常条目（``_flatten_exception_entries`` 产物）
+
+    Returns:
+        dict: ``set_seq/plan_date/plan_date_plan/d0/offset_days/duration_days/actual_qty_est/
+        status_display/label_display/derived/source/exception_paused/has_open_exception/
+        exception_processes``
+    """
+    today_date = parse_date(today) or business_today()
+    plan_date = _date10(member.get("plan_date"))
+    offset_days = _int_or_none(member.get("offset_days"))
+    set_d0 = str(member.get("d0") or "")[:10]
+    done_est = int(position) < int(actual_qty or 0)
+
+    related = _match_set_exceptions(member, exc_entries)
+    open_excs = [e for e in related if str(e.get("status") or "pending") != "closed"]
+    # 暂停：该套存在未关闭异常，且本工序 offset > 异常工序 offset（异常工序自身不暂停）
+    paused = any(
+        _int_or_none(e.get("offset_days")) is not None
+        and offset_days is not None
+        and int(e.get("offset_days")) < int(offset_days)
+        for e in open_excs
+    )
+
+    # ---- 生效计划日（展示口径，每套各自算）----
+    anchor_raw = (cutting_anchor or {}).get(set_d0) if set_d0 else None
+    anchor = parse_date(anchor_raw) if anchor_raw else None
+    for e in related:
+        if str(e.get("status") or "") != "closed":
+            continue
+        exc_offset = _int_or_none(e.get("offset_days"))
+        closed_at = _date10(e.get("closed_at"))
+        if exc_offset is None or not closed_at or offset_days is None:
+            continue
+        if exc_offset >= offset_days:
+            continue          # 只后推「异常工序之后」的工序
+        cand = parse_date(closed_at)
+        if cand is None:
+            continue
+        cand = cand - timedelta(days=exc_offset)
+        if anchor is None or cand > anchor:
+            anchor = cand
+    display_date = plan_date
+    if anchor is not None and offset_days is not None:
+        display_date = (anchor + timedelta(days=offset_days)).strftime("%Y-%m-%d")
+
+    # ---- 逐套状态（仅展示；不做任何统计汇总）----
+    if done_est:
+        status_display, label_display = "done", "🟢 已完成"
+    elif paused:
+        status_display, label_display = "exception_paused", "⏸ 异常暂停"
+    elif anchor is None:
+        status_display, label_display = "waiting_material", "⏸ 待下料"
+    else:
+        parsed = parse_date(display_date)
+        if parsed is None:
+            status_display, label_display = "pending", "⚪ 未开始"
+        elif today_date < parsed:
+            status_display, label_display = "pending", "⚪ 未开始"
+        elif today_date == parsed:
+            status_display, label_display = "in_progress", "🔵 进行中"
+        else:
+            status_display, label_display = "overdue", "🔴 逾期未完成"
+
+    return {
+        "set_seq": _int_or_none(member.get("set_seq")),
+        # 该套的生效计划日（闸门开 → 按该套 offset 重算）与原始计划日（前端据此显示「原 X」）
+        "plan_date": display_date,
+        "plan_date_plan": plan_date,
+        "d0": set_d0,
+        "offset_days": offset_days,
+        "duration_days": _int_or_none(member.get("duration_days")),
+        "actual_qty_est": 1 if done_est else 0,
+        "status_display": status_display,
+        "label_display": label_display,
+        # 逐套完成必然是按 set_seq 升序「推定」的（合并填报，无逐套实际值）
+        "derived": True,
+        "source": str(member.get("source") or "backfill"),
+        "exception_paused": bool(paused),
+        "has_open_exception": bool(open_excs),
+        "exception_processes": sorted({
+            str(e.get("process_name") or "") for e in open_excs if e.get("process_name")
+        }),
+    }
+
+
+def attach_set_details(rows: list[dict], set_index: Optional[dict],
+                       exc_entries: Optional[dict], *, plans: Optional[list[dict]] = None,
+                       actuals: Optional[dict] = None, today=None) -> list[dict]:
+    """给富化后的节点行挂「第 N 套」明细（原地写新增字段，**不动任何既有字段**）。
+
+    🔴 展开三条件门禁（缺一即回退到今天完全一致的整行渲染）：
+      ① ``plan_qty >= 2``（1 套的行没有「第 1 套」的意义）；
+      ② ``set_index[(process_name, 原始排产计划日)]`` 非空；
+      ③ ``len(该行套成员) == plan_qty``（套数与计划套数必须严格对齐，宁可不对也不错）
+      —— 满足三条 → ``has_set_detail=True`` 并输出 ``sets[]``；否则
+         ``sets=[] / set_count=0 / set_detail_state='none'``。
+
+    🔴 匹配必须用**覆盖前的原始排产计划日**：``build_process_detail`` 在 ``enrich_rows``
+    之前就把 ``plan_date`` 覆盖成 ``eff_plan_date``（重算后的日期）。富化行的
+    ``plan_date_plan`` 正是覆盖前的原值（未重算行两者相等），故以它为准；
+    若误用 ``plan_date``，凡「闸门已开、日期被重算」的行都会静默匹配失败、不再展开。
+
+    独立工序（90/91）与无计划日的占位行天然不展开（前者显式跳过，后者无原始日期）。
+
+    Args:
+        rows: ``enrich_rows`` 产出的节点行（原地修改）
+        set_index: ``build_set_index`` 产物
+        exc_entries: 异常锚点 dict（``{d0: [entry, ...]}``，可含 set_seq/set_d0 元数据）
+        plans: 项目全部计划行（用于算下料闸门锚点；None → 不重算日期，直接按原计划日展示）
+        actuals: {node_plan_id: {actual_qty, report_date}}
+        today: 判定基准日
+
+    Returns:
+        list[dict]: 传入的 rows（原地补字段后原样返回，便于链式调用）
+    """
+    index = set_index or {}
+    exc_flat = _flatten_exception_entries(exc_entries)
+    anchor_map = cutting_anchor_map(plans or [], actuals or {})
+    today_date = parse_date(today) or business_today()
+
+    for row in rows:
+        # 新增字段默认值：任何提前 return 的分支都保证字段齐备（前端无需判空）
+        row["sets"] = []
+        row["has_set_detail"] = False
+        row["set_count"] = 0
+        row["set_detail_state"] = "none"
+
+        process_name = str(row.get("process_name") or "").strip()
+        if not process_name or process_name in INDEPENDENT_PROCESS_NAMES:
+            continue
+        # 覆盖前的原始排产计划日（plan_date 可能已是 eff_plan_date）
+        orig_plan_date = _date10(row.get("plan_date_plan")) or _date10(row.get("plan_date"))
+        if not orig_plan_date:
+            continue
+        plan_qty = _int_or_none(row.get("plan_qty")) or 0
+        if plan_qty < 2:                      # 门禁①
+            continue
+        members = index.get((process_name, orig_plan_date)) or []
+        if not members:                       # 门禁②
+            continue
+        if len(members) != plan_qty:           # 门禁③
+            continue
+        sets = [
+            judge_set_display_status(
+                member,
+                position=position,
+                plan_qty=plan_qty,
+                actual_qty=_int_or_none(row.get("actual_qty")) or 0,
+                today=today_date,
+                cutting_anchor=anchor_map,
+                exc_entries=exc_flat,
+            )
+            for position, member in enumerate(members)
+        ]
+        row["sets"] = sets
+        row["has_set_detail"] = True
+        row["set_count"] = len(sets)
+        # 'ok'     = 全部成员来自正式导入（套号可信）
+        # 'partial'= 存在 'backfill' 成员（套号属推定，UI 标「（推定套号）」）
+        row["set_detail_state"] = (
+            "ok" if all(s.get("source") == "import" for s in sets) else "partial"
+        )
+    return rows
 
 
 def _segment_delay_tags(tags: list, grp: list[dict],
@@ -518,7 +917,9 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
 
 def build_process_detail(process_name: str, plans: list[dict], actuals: dict, today=None,
                          contract_count=None, durations: Optional[dict] = None,
-                         project_id: int | None = None) -> dict:
+                         project_id: int | None = None, manager: Optional[str] = None,
+                         month: Optional[str] = None,
+                         set_index: Optional[dict] = None) -> dict:
     """某工序节点列表：按 今日/逾期/未来/已完成 四组返回（填报弹窗数据源）。
 
     独立工序特殊处理：
@@ -533,12 +934,36 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
       使弹窗内状态与总览同口径——未关闭异常 → 后续工序 ⏸ 异常暂停（不计逾期）；
       已关闭异常 → 后续工序按「解决时间」重算后的新计划日判定。
       project_id 为 None（旧调用/单测）→ 不加载异常，行为与改动前一致。
+    「第 N 套」展示（2026-10）：结尾调用 ``attach_set_details`` 给每个节点行挂
+      ``sets[] / has_set_detail / set_count / set_detail_state``（**只新增、不改旧字段**）。
+      套成员来自 ``project_process_durations`` 的逐套原始行（project_id 非空时才读，
+      读取失败降级为「无套明细」→ 前端回退到与今天完全一致的整行渲染）。
+      ``manager``/``month`` 只用于让套明细与计划行**同口径**（同负责人、同归属月），
+      不传时按跨月/汇总口径读取（与 plans 的取数口径一致由调用方保证）。
+
+    Args:
+        process_name: 工序名
+        plans: 项目全部计划行（⚠️ 必须是全量，闸门/异常锚点要全项目的「下料」行）
+        actuals: {node_plan_id: {actual_qty, report_date}}
+        today: 判定基准日
+        contract_count: 项目合同总数（独立工序卡片数据源）
+        durations: 中位数归并的 durations（判定层口径，不变）
+        project_id: 项目 ID（None → 不加载异常/段/套明细，行为同改动前）
+        manager: 负责人过滤（仅用于读取套明细，与读计划行同口径）
+        month: 排产归属月（仅用于读取套明细）
+        set_index: 可选的已构建套明细索引（调用方已加载时传入，避免重复查询）
+
+    Returns:
+        dict: {process_name, is_independent, contract_count, nodes[], groups{}}
     """
     today = parse_date(today) or business_today()
+    # 「第 N 套」套明细索引：只读，先于异常锚点加载——异常锚点需要它来补「指向第几套」的元数据
+    if set_index is None:
+        set_index = _load_set_index(project_id, manager, month)
     # 异常暂停 / 解决后重算（2026-10）：按「该套下料计划日」聚合的异常锚点 + 按节点兜底索引
     # ⚠️ 闸门锚点与异常锚点都必须基于【全项目】计划行（找「下料」行），不能只用本工序的行
     if project_id is not None:
-        exc_anchors, exc_by_node = _load_exception_context(project_id, durations, plans)
+        exc_anchors, exc_by_node = _load_exception_context(project_id, durations, plans, set_index)
     else:
         exc_anchors, exc_by_node = {}, {}
     rules = build_time_rules(plans, actuals, durations, exc_anchors)
@@ -573,6 +998,19 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
             reverse=True,
         )
 
+    # 「第 N 套」展示层收尾（只新增字段）：sets[] 挂在 nodes 上；
+    # groups 只挂轻量标记（has_set_detail/set_count/set_detail_state），**不带 sets**
+    # —— 填报表单只需知道「有没有套明细」，明细通过 id 回查 nodes，避免表单体积翻倍。
+    attach_set_details(rows, set_index, exc_anchors, plans=plans, actuals=actuals, today=today)
+    set_flags = {
+        r["id"]: {
+            "has_set_detail": bool(r.get("has_set_detail")),
+            "set_count": int(r.get("set_count") or 0),
+            "set_detail_state": r.get("set_detail_state") or "none",
+        }
+        for r in rows
+    }
+
     return {
         "process_name": process_name,
         "is_independent": process_name in INDEPENDENT_PROCESS_NAMES,
@@ -588,7 +1026,11 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
                  "actual_qty": actuals.get(p["id"], {}).get("actual_qty", 0),
                  # 按段填报回显（v7.1 行级化；无记录为 None）
                  "segment_total": seg_map.get(int(p["id"]), (None, None))[0],
-                 "segment_done": seg_map.get(int(p["id"]), (None, None))[1]}
+                 "segment_done": seg_map.get(int(p["id"]), (None, None))[1],
+                 # 「第 N 套」轻量标记（2026-10）：明细 sets[] 在 nodes 上，按 id 回查
+                 "has_set_detail": set_flags.get(p["id"], {}).get("has_set_detail", False),
+                 "set_count": set_flags.get(p["id"], {}).get("set_count", 0),
+                 "set_detail_state": set_flags.get(p["id"], {}).get("set_detail_state", "none")}
                 for p in nodes]
             for g, nodes in groups.items()
         },

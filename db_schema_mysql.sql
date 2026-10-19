@@ -184,6 +184,10 @@ CREATE TABLE IF NOT EXISTS node_actual_progress (
 
 -- ============================================================
 -- 节点异常提报表
+-- v8.0（2026-10）「异常精确到套」：新增 set_seq / set_d0（均为 NULL 可空）
+--   set_seq = 异常指向的套号（project_process_durations.set_seq）
+--   set_d0  = 该套下料计划日快照（plan_date − 该套 offset_days）
+--   历史行保持 NULL → 判定层仍按中位数代表值反推，行为与改造前逐条一致。
 -- ============================================================
 CREATE TABLE IF NOT EXISTS node_exceptions (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -197,12 +201,15 @@ CREATE TABLE IF NOT EXISTS node_exceptions (
   planned_close_date DATE DEFAULT NULL COMMENT '计划关闭日期',
   measures TEXT DEFAULT NULL COMMENT '处理措施',
   status VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT '状态：pending/处理中processing/已关闭closed',
+  set_seq INT DEFAULT NULL COMMENT '异常指向的套（project_process_durations.set_seq；NULL=整套/未指定）',
+  set_d0 DATE DEFAULT NULL COMMENT '该套下料计划日快照（NULL=历史行，走中位数反推）',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   closed_at DATETIME DEFAULT NULL,
   INDEX idx_project_id (project_id),
   INDEX idx_node_id (node_id),
   INDEX idx_status (status),
+  INDEX idx_nex_proj_set (project_id, set_seq),
   CONSTRAINT fk_nex_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

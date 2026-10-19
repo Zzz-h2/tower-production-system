@@ -15,6 +15,8 @@ def create_exception(project_id: int, node_id: int, req: NodeExceptionCreate,
     """节点异常提报（校验节点归属项目后写入）。
 
     行级隔离：big_area 用户仅可提报本大区项目（非本区返回 404 防探测）；admin 全量。
+    「异常精确到套」（2026-10）：body 可选带 ``set_seq``（指向第几套）/``set_d0``
+    （该套下料计划日快照）。不传 → 两个字段写 NULL，判定层走历史的中位数反推（行为不变）。
     """
     project = db.get_project_by_id(project_id)
     require_project_access(project, user)
@@ -32,6 +34,9 @@ def create_exception(project_id: int, node_id: int, req: NodeExceptionCreate,
         "planned_close_date": req.planned_close_date,
         "measures": req.measures,
         "status": "pending",
+        # 可选：异常指向的具体套（不指定 = None → 老口径）
+        "set_seq": req.set_seq,
+        "set_d0": req.set_d0,
     })
     return {"id": exc_id, "message": "✅ 异常提报成功"}
 

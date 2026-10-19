@@ -46,9 +46,8 @@
               </span>
               <span class="exc-banner-hint">这些套的后续工序已暂停（⏸ 异常暂停），不计逾期；异常解决后按解决时间重算计划日。</span>
             </div>
+            <template v-for="row in displayedDetailNodes" :key="row.id">
             <div
-              v-for="row in displayedDetailNodes"
-              :key="row.id"
               class="row-card row-grid-detail"
               :class="{ 'row-has-exception': row.has_open_exception }"
             >
@@ -77,6 +76,14 @@
                     <!-- 按段填报（v7.1 行级化）：有段记录的行追加橙色段进度提示 -->
                     <span v-if="row.segment_total != null" style="color:#b7791f;">&nbsp;已完成 {{ row.segment_done }}/{{ row.segment_total }} 段</span>
                   </span>
+                  <!-- 「第 N 套」明细开关（2026-10）：仅 has_set_detail=true 的行出现；
+                       点开后在本行下方折叠出逐套子行，父行本身保持原样 -->
+                  <span
+                    v-if="row.has_set_detail"
+                    class="set-badge"
+                    :title="`展开/收起本行 ${row.set_count} 套的逐套计划日与推定完成情况（只读）`"
+                    @click="toggleSetRows(row.id)"
+                  >共 {{ row.set_count }} 套（第1-{{ row.set_count }}套）{{ expandedSetRows[row.id] ? ' ▴' : ' ▾' }}</span>
                   <!-- 「哪一套」标识：该行所属套存在未关闭异常（红色小标签 + 异常工序名） -->
                   <span
                     v-if="row.has_open_exception"
@@ -88,6 +95,46 @@
               <span class="status-pill" :style="pillStyle(row.status)">{{ row.label }}</span>
               <div class="deviation-label">{{ row.deviation_label }}</div>
             </div>
+            <!-- 逐套子行（只读，2026-10）：第 N 套 · 计划日 · 推定完成 · 暂停/异常标识。
+                 has_set_detail=false 的行不会走这个分支 → 渲染与改造前像素级一致。 -->
+            <div
+              v-if="row.has_set_detail && expandedSetRows[row.id]"
+              class="set-child-list"
+            >
+              <div
+                v-for="s in (row.sets || [])"
+                :key="`${row.id}-${s.set_seq}`"
+                class="set-child"
+                :class="{ 'set-child-paused': s.exception_paused }"
+              >
+                <span class="set-name">第 {{ s.set_seq }} 套</span>
+                <span class="set-date">计划 {{ s.plan_date }}</span>
+                <span
+                  v-if="s.plan_date_plan && s.plan_date_plan !== s.plan_date"
+                  class="date-orig"
+                  :title="`该套原排产计划日 ${s.plan_date_plan}（按该套自己的下料锚点重算）`"
+                >原 {{ s.plan_date_plan }}</span>
+                <span class="set-actual">
+                  实际 {{ s.actual_qty_est }} 套<span
+                    v-if="s.actual_qty_est && s.derived"
+                    class="set-derived"
+                    title="合并填报，无逐套实际值：按套号升序推定（前 N 套视为完成）"
+                  >（推定）</span>
+                </span>
+                <span v-if="s.source === 'backfill'" class="set-src" title="该套号来自历史/补录行（无排产归属月），套号属推定">（推定套号）</span>
+                <span class="status-pill" :style="pillStyle(s.status_display)">{{ s.label_display }}</span>
+                <span
+                  v-if="s.has_open_exception"
+                  class="exc-chip"
+                  :title="`第 ${s.set_seq} 套存在未关闭异常：${(s.exception_processes || []).join('、') || '—'}`"
+                >⚠️ {{ (s.exception_processes || []).join('、') || '存在' }}异常</span>
+              </div>
+              <div class="set-child-hint">
+                逐套明细只读展示：计划日按各套自己的下料锚点重算；实际完成按套号升序推定（填报仍为合并填写）。
+                整行的逾期/暂停判定仍按行口径，不受逐套明细影响。
+              </div>
+            </div>
+            </template>
             <!-- 展开更多按钮 -->
             <div v-if="detail.nodes.length > PAGE_SIZE && !showAllDetail" class="expand-more">
               <el-button link type="primary" @click="showAllDetail = true">
@@ -114,10 +161,26 @@
               />
             </el-select>
           </div>
+          <!-- 套级二级选择（2026-10）：仅当选中的节点有套明细时出现；
+               首项「整套/不指定」= 老口径（不写 set_seq），其余项精确到某一套 -->
+          <div v-if="selectedNode && selectedNode.has_set_detail" class="exc-node-select">
+            <div class="exc-node-label">套：</div>
+            <el-select v-model="selectedSetSeq" placeholder="整套 / 不指定" style="width: 100%;">
+              <el-option :value="null" label="整套 / 不指定（默认，按行口径）" />
+              <el-option
+                v-for="s in (selectedNode.sets || [])"
+                :key="s.set_seq"
+                :value="s.set_seq"
+                :label="setOptionLabel(s)"
+              />
+            </el-select>
+          </div>
           <ExceptionReportTab
             v-if="selectedNodeId"
             :pid="pid"
             :node-id="selectedNodeId"
+            :set-seq="selectedSetSeq"
+            :set-d0="selectedSetD0"
             @changed="onExceptionChanged"
           />
         </el-tab-pane>
@@ -263,6 +326,48 @@
               <span class="cell-plan-qty">
                 <span class="qty-num">{{ node.plan_qty }}</span><span class="qty-unit">套</span>
               </span>
+              <!-- 「第 N 套」只读角标（2026-10）：不加逐套输入框（填报仍是合并填），
+                   仅在「N 套」右侧给一个浅色角标，点开气泡查看逐套明细 -->
+              <el-popover
+                v-if="node.has_set_detail"
+                placement="bottom-start"
+                :width="380"
+                trigger="click"
+              >
+                <template #reference>
+                  <span class="set-badge set-badge-lite" :title="`只读：本行共 ${node.set_count} 套（填报仍按「计划 N 套 / 实际 M 套」合并填写）`">
+                    共 {{ node.set_count }} 套（第1-{{ node.set_count }}套）
+                  </span>
+                </template>
+                <div class="set-bubble">
+                  <div class="set-bubble-title">本行共 {{ node.set_count }} 套 · 逐套明细（只读）</div>
+                  <div v-for="s in setsOf(node)" :key="s.set_seq" class="set-bubble-row">
+                    <span class="set-name">第 {{ s.set_seq }} 套</span>
+                    <span class="set-bubble-date">计划 {{ s.plan_date }}</span>
+                    <span v-if="s.actual_qty_est > 0" class="set-bubble-done">
+                      已完成<span v-if="s.derived" class="set-derived">（推定）</span>
+                    </span>
+                    <span v-else class="set-bubble-todo">未完成</span>
+                    <span v-if="s.source === 'backfill'" class="set-src">（推定套号）</span>
+                    <span
+                      v-if="s.has_open_exception"
+                      class="exc-chip"
+                      :title="`第 ${s.set_seq} 套存在未关闭异常：${(s.exception_processes || []).join('、') || '—'}`"
+                    >⚠️ 第{{ s.set_seq }}套</span>
+                  </div>
+                  <div class="set-bubble-hint">
+                    填报仍为「计划 N 套 / 实际 M 套」合并填写；实际完成按套号升序推定（前 M 套视为完成），
+                    故标「（推定）」。本气泡仅作明细查看，不参与任何判定。
+                  </div>
+                </div>
+              </el-popover>
+              <!-- 有异常的套：直接在本行给 ⚠️ 第N套 chip（复用 exc-chip 样式） -->
+              <span
+                v-for="s in excSetsOf(node)"
+                :key="`exc-${node.id}-${s.set_seq}`"
+                class="exc-chip"
+                :title="`第 ${s.set_seq} 套存在未关闭异常：${(s.exception_processes || []).join('、') || '—'}`"
+              >⚠️ 第{{ s.set_seq }}套</span>
               <!-- 「哪一套」标识（填报进度同样醒目提示，与节点详情一致） -->
               <span
                 v-if="hasOpenExc(node)"
@@ -595,6 +700,8 @@ function openExceptionForNode(node) {
   // 独立工序（累计完成/累计发运）本就没有异常提报页签，行内按钮也不会渲染；此处再兜底一次
   if (isIndependent.value) return
   selectedNodeId.value = node.id
+  // 从行内入口进入时一律按「整套/不指定」起步（用户可在二级下拉里再选具体某一套）
+  selectedSetSeq.value = null
   innerMode.value = 'exception'
 }
 
@@ -710,6 +817,54 @@ const openExcSets = computed(() => {
       : `该套（${[...x.processes].join('、') || '—'}）`,
   }))
 })
+
+// === 「第 N 套」展示（2026-10，只读） ===
+// 后端在 nodes 行上挂 sets[]/has_set_detail/set_count/set_detail_state；groups 行只带
+// 轻量标记（不带 sets）→ 填报表单按 id 回查 nodes 取明细，避免表单体积翻倍。
+// 判定相关字段（status/label/逾期/KPI）完全不受本层影响，前端也不做任何推断。
+const expandedSetRows = ref({})          // { [nodeId]: true } 节点详情里的逐套子行展开态
+function toggleSetRows(nodeId) {
+  if (nodeId == null) return
+  expandedSetRows.value = {
+    ...expandedSetRows.value,
+    [nodeId]: !expandedSetRows.value[nodeId],
+  }
+}
+// 按 id 回查 nodes 行（groups 行与 nodes 行同一节点）
+function nodeRowOf(node) {
+  if (!node) return null
+  return (detail.value?.nodes || []).find((x) => x.id === node.id) || null
+}
+// 该行的逐套明细（无套明细 → 空数组，模板里的 v-for 自然不渲染任何东西）
+function setsOf(node) {
+  return nodeRowOf(node)?.sets || []
+}
+// 该行「有未关闭异常」的套（填报 tab 的 ⚠️ 第N套 chip 数据源）
+function excSetsOf(node) {
+  return setsOf(node).filter((s) => s.has_open_exception)
+}
+// 异常提报 tab 的「套」选项文案：套号 + 该套生效计划日 + 暂停态提示
+function setOptionLabel(s) {
+  const base = `第 ${s.set_seq} 套 · 计划 ${s.plan_date}`
+  if (s.exception_paused) return `${base} · ⏸ 异常暂停`
+  if (s.actual_qty_est > 0) return `${base} · 已完成${s.derived ? '（推定）' : ''}`
+  return base
+}
+// 异常提报 tab：当前选中的节点行（含 sets[]，用于二级「套」下拉）
+const selectedNode = computed(() => {
+  if (selectedNodeId.value == null) return null
+  return (detail.value?.nodes || []).find((x) => x.id === selectedNodeId.value) || null
+})
+// 选中套的套号（null = 整套/不指定 → 老口径，后端写 NULL）
+const selectedSetSeq = ref(null)
+// 选中套的下料计划日快照（提交时随 set_seq 一起写入，供判定层/展示层反推）
+const selectedSetD0 = computed(() => {
+  if (selectedSetSeq.value == null) return null
+  const hit = (selectedNode.value?.sets || []).find((s) => s.set_seq === selectedSetSeq.value)
+  return hit?.d0 || null
+})
+// 切换节点后重置「套」选择（避免把上一节点的套号带过去）
+watch(selectedNodeId, () => { selectedSetSeq.value = null })
 // 分组差异化上限：done=当前值只能减；today/overdue/future=计划数；
 // 独立工序不限上限（累计指标可自由填报，后端同样不设上限）
 const maxOf = (node) => {
@@ -880,6 +1035,8 @@ watch(
       innerMode.value = props.mode || 'detail'
       activeGroup.value = 'today'
       selectedNodeId.value = null
+      selectedSetSeq.value = null      // 「套」二级选择随节点一起重置
+      expandedSetRows.value = {}       // 逐套子行默认折叠
       // 不在此重置 reportDates：load() 内部已有 重置+按节点回填 逻辑，避免双重处理
       originalValues.value = {} // 脏值基线同样由 load() 重新初始化
       load()
@@ -1223,6 +1380,65 @@ async function saveSegments() {
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .exc-banner-hint { color: #975a16; flex-basis: 100%; }
+
+/* === 「第 N 套」展示（2026-10，只读） === */
+/* 浅色可点角标：紧贴「N 套」右侧，弱化视觉层级（不抢计划/实际套数） */
+.set-badge {
+  display: inline-flex; align-items: center;
+  padding: 0 8px; border-radius: 9px;
+  background: #f0f4f9; color: #4a5568;
+  border: 1px dashed #cbd5e0;
+  font-size: 11px; font-weight: 600; line-height: 17px;
+  white-space: nowrap; flex-shrink: 0;
+  cursor: pointer; user-select: none;
+  transition: background-color .12s, border-color .12s, color .12s;
+}
+.set-badge:hover { background: #e6effa; border-color: #90b4d8; color: #1a365d; }
+/* 填报 tab 里的角标再弱一级（纯只读查看，与详情页开关区分） */
+.set-badge-lite { background: #f7fafc; border-style: solid; border-color: #e2e8f0; color: #718096; }
+
+/* 逐套子行列表：缩进对齐父行内容区，左侧竖线表示「属于上一行」 */
+.set-child-list {
+  margin: -4px 0 8px 24px;
+  padding: 6px 0 2px 14px;
+  border-left: 2px solid #e2e8f0;
+}
+.set-child {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px;
+  padding: 5px 10px; margin-bottom: 4px;
+  background: #fcfdfe; border: 1px solid #edf2f7; border-radius: 6px;
+  font-size: 12px; color: #4a5568;
+}
+/* 该套被异常暂停：与整行「异常暂停」同视觉语言（灰+淡黄提醒边） */
+.set-child.set-child-paused {
+  background: #fffaf0; border-color: #fbd38d;
+}
+.set-child .set-name {
+  font-weight: 700; color: #1a365d;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.set-child .set-date {
+  color: #1a365d; font-weight: 600;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.set-child .set-actual { color: #4a5568; white-space: nowrap; }
+.set-child .status-pill { font-size: 11px; line-height: 17px; padding: 0 8px; }
+.set-derived { font-size: 11px; color: #b7791f; font-weight: 400; }
+.set-src { font-size: 11px; color: #a0aec0; }
+.set-child-hint { font-size: 11px; color: #94a3b8; padding: 2px 4px 0; line-height: 1.6; }
+
+/* 填报 tab 的只读气泡 */
+.set-bubble { font-size: 12px; color: #4a5568; }
+.set-bubble-title { font-weight: 700; color: #1a365d; margin-bottom: 8px; }
+.set-bubble-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px;
+  padding: 3px 0; border-bottom: 1px dashed #edf2f7;
+}
+.set-bubble-row:last-of-type { border-bottom: none; }
+.set-bubble-date { color: #1a365d; font-variant-numeric: tabular-nums; }
+.set-bubble-done { color: #2f855a; }
+.set-bubble-todo { color: #a0aec0; }
+.set-bubble-hint { margin-top: 8px; font-size: 11px; color: #94a3b8; line-height: 1.65; }
 .cell-plan-date { font-size: 13px; color: #64748b; white-space: nowrap; }
 .cell-plan-qty { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
 .qty-num { font-weight: 600; font-variant-numeric: tabular-nums; font-size: 15px; }

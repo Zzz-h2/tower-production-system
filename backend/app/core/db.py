@@ -229,6 +229,17 @@ def get_project_process_durations(project_id: int, manager: str | None = None,
     return getattr(_fn, "__wrapped__", _fn)(project_id, manager, month)
 
 
+def list_project_process_durations(project_id: int, manager: str | None = None,
+                                  month: str | None = None) -> list[dict]:
+    """读取项目「按套工序时长/偏移」的**原始行**（含 set_seq，不归并）。
+
+    「第 N 套」展示层的唯一数据源：逐套明细，供 node_service.build_set_index 聚合。
+    ⚠️ 判定层仍用 ``get_project_process_durations``（中位数归并），两者互不影响。
+    """
+    from database import list_project_process_durations as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, manager, month)
+
+
 def get_project_process_durations_batch(project_ids: list[int],
                                         month: str | None = None) -> dict[int, dict]:
     """批量读取多项目「按套工序时长/偏移」并归并（消除列表页 N+1）。"""
@@ -778,7 +789,16 @@ def get_node_plan_by_id(node_id: int) -> dict | None:
 
 @_invalidates_dashboard
 def create_node_exception(exc: dict) -> int:
-    """新增异常记录，返回 id。"""
+    """新增异常记录，返回 id。
+
+    「异常精确到套」（2026-10）：可选写入 ``set_seq`` / ``set_d0``（该异常指向第几套 +
+    该套下料计划日快照），均为 **NULL 可空**——老调用方不传即写 NULL，历史行为不变
+    （判定层对 set_seq IS NULL 的异常仍走中位数反推，逐条结果与改造前一致）。
+    """
+    params = dict(exc)
+    # 老调用方（不传套号）→ 显式补 None，保证命名参数齐全、INSERT 不 KeyError
+    params.setdefault("set_seq", None)
+    params.setdefault("set_d0", None)
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -786,13 +806,15 @@ def create_node_exception(exc: dict) -> int:
                 """
                 INSERT INTO node_exceptions
                   (project_id, node_id, process_name, plan_date, responsibility_category,
-                   reason_detail, handler, planned_close_date, measures, status)
+                   reason_detail, handler, planned_close_date, measures, status,
+                   set_seq, set_d0)
                 VALUES
                   (%(project_id)s, %(node_id)s, %(process_name)s, %(plan_date)s,
                    %(responsibility_category)s, %(reason_detail)s, %(handler)s,
-                   %(planned_close_date)s, %(measures)s, %(status)s)
+                   %(planned_close_date)s, %(measures)s, %(status)s,
+                   %(set_seq)s, %(set_d0)s)
                 """,
-                exc,
+                params,
             )
             return cur.lastrowid
     finally:

@@ -42,6 +42,40 @@ def prev_process_total(process_name: str, plans_all: list[dict], actuals: dict,
     return total
 
 
+def cutting_anchor_map(plans_all: list[dict], actuals: dict) -> dict[str, str]:
+    """下料闸门锚点表 → ``{下料计划日 'YYYY-MM-DD': 该套最早实际下料日 'YYYY-MM-DD'}``。
+
+    纯函数（无 IO），从 ``build_time_rules`` 内部**等价提出**，供展示层（「第 N 套」的
+    逐套生效计划日）复用**同一个**闸门锚点，保证展示与判定同源、不出现两套口径。
+
+    口径（与改造前 build_time_rules 内部逻辑逐字一致）：
+      - 只统计「下料」工序的行（``MANUFACTURE_PROCESS_NAMES[0]``）；
+      - 该行 plan_date 非空、actual_qty > 0 且 report_date 非空才构成锚点；
+      - 同一 plan_date 有多条实际填报时取**最早**的 report_date。
+
+    Args:
+        plans_all: 项目全部节点计划行（含 id/process_name/plan_date）
+        actuals: {node_plan_id: {actual_qty, report_date}}
+
+    Returns:
+        dict[str, str]: 下料计划日 → 最早实际下料日（无下料实际填报时为空 dict）
+    """
+    cutting_name = MANUFACTURE_PROCESS_NAMES[0] if MANUFACTURE_PROCESS_NAMES else "下料"
+    anchor: dict[str, str] = {}
+    for p in plans_all or []:
+        if p.get("process_name") != cutting_name:
+            continue
+        pd = str(p.get("plan_date") or "")[:10]
+        act = (actuals or {}).get(p.get("id"), {}) or {}
+        aq = int(act.get("actual_qty", 0) or 0)
+        rd = str(act.get("report_date") or "")[:10]
+        if pd and aq > 0 and rd:
+            cur = anchor.get(pd)
+            if cur is None or rd < cur:
+                anchor[pd] = rd
+    return anchor
+
+
 def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[dict] = None,
                      exceptions: Optional[dict] = None) -> dict:
     """按「每一套（每个计划行）」计算闸门与 effective 计划日期（工序时间/延期判定规则升级核心）。
@@ -73,23 +107,13 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
         ⚠️ 后两个键为本次新增（默认 False / None），既有调用方按 key 取值，不感知新增字段。
     """
     mfg = set(MANUFACTURE_PROCESS_NAMES)
-    cutting_name = MANUFACTURE_PROCESS_NAMES[0] if MANUFACTURE_PROCESS_NAMES else "下料"
     steel_name = MATERIAL_PROCESS_NAMES[0] if MATERIAL_PROCESS_NAMES else "钢板到货"
     exc_map = exceptions or {}
 
     # 下料行：plan_date -> 该套最早实际下料日（闸门锚点）
-    cutting_anchor: dict[str, str] = {}
-    for p in plans_all:
-        if p.get("process_name") != cutting_name:
-            continue
-        pd = str(p.get("plan_date") or "")[:10]
-        act = actuals.get(p.get("id"), {}) or {}
-        aq = int(act.get("actual_qty", 0) or 0)
-        rd = str(act.get("report_date") or "")[:10]
-        if pd and aq > 0 and rd:
-            cur = cutting_anchor.get(pd)
-            if cur is None or rd < cur:
-                cutting_anchor[pd] = rd
+    # ⚠️ 等价重构（2026-10）：原内联循环已提取为模块级纯函数 cutting_anchor_map，
+    #    供展示层复用同一锚点；此处调用结果与改造前逐项一致（顺序/取最小值口径不变）。
+    cutting_anchor: dict[str, str] = cutting_anchor_map(plans_all, actuals)
 
     def _rule(waiting: bool, eff: Optional[str], count: bool,
               paused: bool = False, set_date: Optional[str] = None) -> dict:

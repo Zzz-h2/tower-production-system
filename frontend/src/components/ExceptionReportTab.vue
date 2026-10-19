@@ -52,7 +52,14 @@ import { ElMessage } from 'element-plus'
 import { createException, listExceptionsByNode, updateException } from '../api/exception'
 import { useAuthStore } from '../store/auth'
 
-const props = defineProps({ pid: { type: String, default: '' }, nodeId: { type: Number, default: null } })
+const props = defineProps({
+  pid: { type: String, default: '' },
+  nodeId: { type: Number, default: null },
+  // v8.0 异常精确到套：父组件（ProcessDetailDialog）二级「套」下拉的选中值。
+  // null = 整套/不指定（老口径，后端走中位数代表值反推）；数字 = 精确到某一套。
+  setSeq: { type: Number, default: null },
+  setD0: { type: String, default: '' },
+})
 const emit = defineEmits(['changed'])
 const auth = useAuthStore() // 提报权限：admin 或大区账号（大区仅本大区，后端已隔离）
 
@@ -95,6 +102,10 @@ function buildPayload() {
     // 本表单唯一的日期字段；其它字段（责任分类/异常原因/处理人/处理措施）均为文本，
     // 无空串→日期解析问题，保持原值直传（空串即视为未填，业务口径不变）。
     planned_close_date: form.value.planned_close_date || null,
+    // v8.0 异常精确到套：未选套（null/undefined）时显式传 null，
+    // 后端 schema 为 Optional，历史异常与「整套/不指定」口径一致（三档反推第③档）。
+    set_seq: props.setSeq ?? null,
+    set_d0: props.setD0 || null,
   }
 }
 

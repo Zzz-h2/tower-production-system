@@ -902,6 +902,48 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
     return len(plans)
 
 
+def list_project_process_durations(project_id: int, manager: str | None = None,
+                                   month: str | None = None) -> list[dict]:
+    """读取项目「按套工序时长/偏移」的**原始行**（不归并，保留 set_seq）。
+
+    与 ``get_project_process_durations`` 的区别（两者并存，互不影响）：
+      - 本函数返回 ``project_process_durations`` 的**逐套明细行**，每行带 ``set_seq``，
+        是「第 N 套」展示层（set_index）的唯一数据源；
+      - ``get_project_process_durations`` 仍按 (process_name, plan_date) 取**中位数**归并，
+        是判定层（``build_time_rules``）的唯一数据源，**本函数绝不参与判定**。
+
+    ⚠️ 只读：不写库、不影响任何既有读取路径（生产路径在本次改造前未引用本函数）。
+
+    Args:
+        project_id: 项目 ID
+        manager: 负责人过滤；None=不区分负责人（汇总视图，与读计划行同口径）
+        month: 排产归属月 'YYYY-MM'；None=不限定月份（与读计划行同口径）
+
+    Returns:
+        list[dict]: 原始行，每项含
+            ``set_seq / process_name / plan_date / duration_days / offset_days / plan_month``。
+            无数据（存量项目未导入时长）→ 返回 ``[]``。
+    """
+    if project_id is None:
+        return []
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = ("SELECT set_seq, process_name, plan_date, duration_days, offset_days, plan_month "
+                   "FROM project_process_durations WHERE project_id = %s")
+            args: list = [project_id]
+            if manager is not None:
+                sql += " AND manager <=> %s"
+                args.append(str(manager).strip())
+            # 该表无 process_order 列 → 必须用简化片段（传 True 会 1054 Unknown column）
+            sql += _month_scope("", month, args, with_manual_order=False)
+            sql += " ORDER BY set_seq, process_name, plan_date"
+            cursor.execute(sql, tuple(args))
+            return [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
 def get_project_process_durations(project_id: int, manager: str | None = None,
                                  month: str | None = None) -> dict:
     """读取项目的「按套工序时长/偏移」，按 (process_name, plan_date) 归并后返回。
