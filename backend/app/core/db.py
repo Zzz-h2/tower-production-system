@@ -4,8 +4,17 @@
 沿用现有表结构（process_node_plans / node_actual_progress / node_exceptions 等），不重新设计。
 风险等级与整体进度均由 node_plans + node_actuals 实时计算，弃用 processes 表。
 """
-from .config import MYSQL_CONFIG, SCHEDULE_PROCESS_NAMES
+import functools
+import logging
+import os
+from typing import Any, Callable
+
+from .cache import TTLCache
+from .db_pool import get_connection as _pooled_get_connection
+from .config import MYSQL_CONFIG, SCHEDULE_PROCESS_NAMES  # MYSQL_CONFIG 仍对外 re-export（脚本/排障会 `db.MYSQL_CONFIG`）
 from .timeutil import business_today
+
+logger = logging.getLogger(__name__)
 
 # v7.2 排产工序白名单区间（与根 database.py 同源，顺序由 SCHEDULE_PROCESS_NAMES 保证）：
 # 排产导入写出的行满足 process_order = index+1，即 1..len(SCHEDULE_PROCESS_NAMES)。
@@ -21,19 +30,66 @@ SCHEDULE_ORDER_MAX = len(SCHEDULE_PROCESS_NAMES)
 MANUAL_COMPLETE_ORDER = 99
 
 
+def _env_float(name: str, default: float) -> float:
+    """读取浮点型环境变量（非法值回退默认，避免启动即崩）。"""
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        logger.warning("环境变量 %s=%r 不是数字，回退默认值 %s", name, raw, default)
+        return default
+
+
+# ---------- 首页 KPI 短缓存（2026-10 性能优化） ----------
+# 背景：get_dashboard_stats 为算 4 个数字，要把**全部项目**的风险判定（排产/实际/异常/工期）
+#       跑一遍（limit=100000），单次约 0.5s。首页每次刷新都调 → 加 30 秒 TTL 内存缓存。
+# 一致性：
+#   * key 必须含 month + big_area_person —— 大区行级隔离，绝不能按 month 单独建键。
+#   * 写操作（排产导入/填报保存/异常提报关闭/项目增删改/调度令导入）由
+#     ``_invalidates_dashboard`` 装饰器主动清空，改数据后首页立即变化（同副本内）。
+#   * 多副本部署时各副本独立缓存，最坏延迟 = TTL（默认 30s）；可用环境变量
+#     DASHBOARD_STATS_TTL_SECONDS 调整，设 0 则完全关闭缓存（A/B 比对用）。
+DASHBOARD_STATS_TTL_SECONDS = _env_float("DASHBOARD_STATS_TTL_SECONDS", 30.0)
+_dashboard_cache = TTLCache("dashboard_stats", DASHBOARD_STATS_TTL_SECONDS, max_entries=256)
+
+
+def invalidate_dashboard_stats() -> int:
+    """失效首页 KPI 缓存（全部月份 × 全部大区），返回清除条数。
+
+    写操作后调用；也可供脚本/运维在数据订正后手动清空。
+    """
+    cleared = _dashboard_cache.invalidate()
+    if cleared:
+        logger.debug("已失效首页 KPI 缓存 %d 条", cleared)
+    return cleared
+
+
+def _invalidates_dashboard(fn: Callable) -> Callable:
+    """写操作装饰器：执行后失效首页 KPI 缓存（异常也失效，宁可多算一次）。
+
+    注意：用 functools.wraps 保留原函数签名与 ``__wrapped__``，不影响桥接层
+    ``getattr(_fn, "__wrapped__", _fn)`` 的既有调用约定。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            invalidate_dashboard_stats()
+
+    return wrapper
+
+
 def get_connection():
-    """获取 pymysql 连接（与原 database.py 同配置）。"""
-    import pymysql
-    return pymysql.connect(
-        host=MYSQL_CONFIG["host"],
-        port=MYSQL_CONFIG["port"],
-        user=MYSQL_CONFIG["user"],
-        password=MYSQL_CONFIG["password"],
-        database=MYSQL_CONFIG["database"],
-        charset=MYSQL_CONFIG["charset"],
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    """获取池化 pymysql 连接（**每次调用不再新建 TCP 连接**，close() 即归还）。
+
+    语义与改造前完全一致：``autocommit=True`` + ``DictCursor`` + ``utf8mb4``。
+    调用方无需改动 —— ``PooledDB`` 连接的 ``close()`` 就是「归还到池」。
+    """
+    return _pooled_get_connection(autocommit=True)
 
 
 # ---------- 节点计划 / 实际进度（v4.0 表） ----------
@@ -111,6 +167,7 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
                                             big_area_person, month)
 
 
+@_invalidates_dashboard
 def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = None,
                       durations: list[dict] | None = None,
                       plan_month: str | None = None) -> int:
@@ -129,6 +186,7 @@ def insert_node_plans(project_id: int, plans: list[dict], manager: str | None = 
 # ---------- 排产上传台账（schedule_imports，v7.2 新增） ----------
 # ⚠️ 根 database.py 新增函数必须在此同步 re-export，否则 `db.xxx` 抛 AttributeError → FastAPI 默认 500。
 
+@_invalidates_dashboard
 def upsert_schedule_import(project_id: int, plan_month: str, manager: str = "",
                            row_count: int = 0, source_file: str = "") -> None:
     """写入「项目 × 排产归属月 × 负责人」上传台账（重复导入幂等覆盖）。"""
@@ -184,12 +242,14 @@ def get_actuals_rich_by_node_ids(node_ids: list[int]) -> dict:
     return getattr(_fn, "__wrapped__", _fn)(node_ids)
 
 
+@_invalidates_dashboard
 def delete_all_node_plans(project_id: int) -> None:
     """彻底清空项目全部节点计划（含独立工序）。"""
     from database import delete_all_node_plans as _fn
     _fn(project_id)
 
 
+@_invalidates_dashboard
 def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
                        actual_qty: int, report_date: str,
                        manager: str | None = None) -> None:
@@ -199,6 +259,7 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
                                      actual_qty, report_date, manager)
 
 
+@_invalidates_dashboard
 def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str,
                            manager: str | None = None) -> int:
     """手动完成：按日期 upsert 一条『附件安装』节点计划 + 实际完成，返回 node_plan_id。
@@ -210,6 +271,7 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
     return getattr(_fn, "__wrapped__", _fn)(project_id, complete_qty, complete_date, manager)
 
 
+@_invalidates_dashboard
 def save_independent_fill(project_id: int, process_name: str,
                           fill_qty: int, report_date: str,
                           manager: str | None = None) -> int:
@@ -223,6 +285,7 @@ def save_independent_fill(project_id: int, process_name: str,
                                             report_date, manager)
 
 
+@_invalidates_dashboard
 def move_independent_fill_date(project_id: int, process_name: str,
                                node_plan_id: int, new_report_date: str,
                                new_qty: int | None = None) -> int:
@@ -235,6 +298,7 @@ def move_independent_fill_date(project_id: int, process_name: str,
 
 # ---------- 按段填报（v7.1 行级化，node_segment_progress） ----------
 
+@_invalidates_dashboard
 def upsert_node_segment(project_id: int, node_plan_id: int,
                         segment_total: int, segment_done: int) -> None:
     """写入/更新某套（计划行）的分段进度（总段数/已完成段数）。
@@ -273,6 +337,7 @@ def split_managers(delivery_person: str | None) -> list[str]:
     return getattr(_fn, "__wrapped__", _fn)(delivery_person)
 
 
+@_invalidates_dashboard
 def upsert_manager_monthly_plan(project_id: int, manager: str, monthly_plan: int) -> None:
     """写入/更新「某负责人 对 某项目」的本月计划数（方案P：独立申报，不校验求和）。"""
     from database import upsert_manager_monthly_plan as _fn
@@ -304,6 +369,7 @@ def get_manual_completes(project_id: int, month: str | None = None) -> list[dict
     return getattr(_fn, "__wrapped__", _fn)(project_id, month)
 
 
+@_invalidates_dashboard
 def delete_manual_complete(project_id: int, node_plan_id: int) -> int:
     """删除一条手动完成记录（99 占位行）及其实际完成量（纠正/减少套数用）。
 
@@ -380,21 +446,34 @@ def get_dashboard_stats(month: str | None = None, big_area_person: str | None = 
     node_plans + node_actuals 实时风险判定结果，保证两者 100% 一致。
     month: 调度令月份（created_at 年月），透传给列表过滤。
     big_area_person: 大区负责人（大区行级隔离；admin 传 None 看全量）。
+
+    性能（2026-10）：结果按 (month, big_area_person) 缓存 DASHBOARD_STATS_TTL_SECONDS 秒。
+        首次/过期后仍走原实现（结果逐项相同）；写过数据后由 ``_invalidates_dashboard``
+        立即失效。缓存关闭（TTL=0）时行为与改造前完全一致。
     """
+    key = (month or "", big_area_person or "")
+    cached = _dashboard_cache.get(key)
+    if cached is not None:
+        return dict(cached)          # 返回副本，避免调用方改动污染缓存
+
     items, _ = get_projects_filtered(
         keyword="", person="", status="", skip=0, limit=100000, month=month,
         big_area_person=big_area_person,
     )
-    return {
+    stats = {
         "total_projects": len(items),
         "warning_projects": sum(1 for p in items if p.get("risk_level") == "warning"),
         "delayed_projects": sum(1 for p in items if p.get("risk_level") == "delayed"),
         "monthly_plan_total": sum(int(p.get("monthly_plan", 0) or 0) for p in items),
     }
+    _dashboard_cache.set(key, dict(stats))
+    return stats
+
 
 
 # ---------- 手动添加 / 调度令导入 复用封装 ----------
 
+@_invalidates_dashboard
 def upsert_project(data: dict, mapped_fields=None):
     """插入或更新项目（四字段唯一键），返回 (project_id, is_new)。
 
@@ -404,12 +483,14 @@ def upsert_project(data: dict, mapped_fields=None):
     return getattr(_fn, "__wrapped__", _fn)(data, mapped_fields)
 
 
+@_invalidates_dashboard
 def sync_independent_plans(project_id: int, contract_count) -> int:
     """同步项目两条独立工序节点计划（累计完成总数 / 累计发运总数）。"""
     from database import sync_independent_plans as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_id, contract_count)
 
 
+@_invalidates_dashboard
 def update_independent_contract_qty(project_id: int, contract_count) -> int:
     """非破坏性同步独立工序「合同占位行」的 plan_qty（只改 plan_date IS NULL 的占位行）。"""
     from database import update_independent_contract_qty as _fn
@@ -431,6 +512,7 @@ def insert_import_log(file_name: str, total: int, success: int, error: int, erro
 # ⚠️ 根 database.py 新增函数必须在此同步 re-export，否则调用方报
 #    AttributeError: module 'app.core.db' has no attribute 'xxx' → FastAPI 500。
 
+@_invalidates_dashboard
 def upsert_dispatch_record(project_id: int, plan_month: str, data: dict,
                            source_file: str = "", is_approx: int = 0) -> None:
     """写入/更新「项目 × 调度令归属月」快照。"""
@@ -671,12 +753,14 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
 
 # ---------- 项目编辑 / 删除 / 计划重排 ----------
 
+@_invalidates_dashboard
 def update_project(project_id: int, data: dict) -> None:
     """更新项目信息（仅更新 data 中出现的字段）。"""
     from database import update_project as _fn
     _fn(project_id, data)
 
 
+@_invalidates_dashboard
 def delete_project(project_id: int) -> None:
     """删除项目（级联删除工序/异常/里程碑等关联数据，行为与原版一致）。"""
     from database import delete_project as _fn
@@ -692,6 +776,7 @@ def get_node_plan_by_id(node_id: int) -> dict | None:
         conn.close()
 
 
+@_invalidates_dashboard
 def create_node_exception(exc: dict) -> int:
     """新增异常记录，返回 id。"""
     conn = get_connection()
@@ -799,6 +884,7 @@ def get_node_exception_by_id(exc_id: int) -> dict | None:
         conn.close()
 
 
+@_invalidates_dashboard
 def update_node_exception(exc_id: int, fields: dict) -> bool:
     """更新异常（仅允许白名单字段；status=closed 时自动写 closed_at）。"""
     allowed = {"responsibility_category", "reason_detail", "handler",
@@ -835,11 +921,35 @@ def get_node_exceptions_by_node(node_id: int) -> list[dict]:
 
 # ---------- 用户（认证：大区行级隔离 v5.0） ----------
 
+# 用户查询短缓存（2026-10 性能优化）：
+# 每个需认证的请求都会经 deps.get_current_user → get_user_by_id 查一次 users 表
+# （一次建连 + 一次查询）。用户信息读多写极少 → 30 秒 TTL 内存缓存。
+# 失效：upsert_user（新建/改角色/改大区/改状态）同步清空；TTL ≤ 60s 兜底，
+#       保证「用户被删除/停用/改角色/改密码」最迟 30 秒内对所有新请求生效。
+USER_CACHE_TTL_SECONDS = _env_float("USER_CACHE_TTL_SECONDS", 30.0)
+_user_cache = TTLCache("user_by_id", USER_CACHE_TTL_SECONDS, max_entries=2048)
+
+
+def invalidate_user_cache(uid: int | None = None) -> int:
+    """失效用户缓存：``uid`` 给定则只清该用户，否则清空全部。"""
+    if uid is None:
+        return _user_cache.invalidate()
+    return _user_cache.invalidate(int(uid))
+
+
+@_invalidates_dashboard
 def upsert_user(username: str, password_hash: str, role: str,
                 big_area_name: str = '', status: str = 'active') -> int:
-    """插入或更新用户（唯一键 username；已存在保留原密码哈希），返回用户 id。"""
+    """插入或更新用户（唯一键 username；已存在保留原密码哈希），返回用户 id。
+
+    写后清空用户缓存：角色 / 大区 / 状态变更必须立刻对新请求生效。
+    """
     from database import upsert_user as _fn
-    return getattr(_fn, "__wrapped__", _fn)(username, password_hash, role, big_area_name, status)
+    try:
+        return getattr(_fn, "__wrapped__", _fn)(username, password_hash, role,
+                                                big_area_name, status)
+    finally:
+        invalidate_user_cache()
 
 
 def get_user_by_username(username: str) -> dict | None:
@@ -849,9 +959,27 @@ def get_user_by_username(username: str) -> dict | None:
 
 
 def get_user_by_id(uid: int) -> dict | None:
-    """按 id 查询用户（不存在返回 None）。"""
+    """按 id 查询用户（不存在返回 None）。
+
+    性能（2026-10）：USER_CACHE_TTL_SECONDS（默认 30s）进程内缓存，命中 0 次查库；
+    返回**副本**，调用方改动不会污染缓存。写用户（upsert_user）后立即失效。
+    """
+    try:
+        key = int(uid)
+    except (TypeError, ValueError):
+        from database import get_user_by_id as _fn_raw
+        return getattr(_fn_raw, "__wrapped__", _fn_raw)(uid)
+
+    cached = _user_cache.get(key)
+    if cached is not None:
+        return dict(cached)
+
     from database import get_user_by_id as _fn
-    return getattr(_fn, "__wrapped__", _fn)(uid)
+    user = getattr(_fn, "__wrapped__", _fn)(key)
+    if user:
+        _user_cache.set(key, dict(user))
+    return user
+
 
 
 def get_closed_exceptions_by_project(project_id: int) -> list[dict]:
@@ -903,6 +1031,7 @@ def get_submission_override_records(month_start: str, month_end: str) -> list[di
     return getattr(_fn, "__wrapped__", _fn)(month_start, month_end)
 
 
+@_invalidates_dashboard
 def save_submission_overrides(items: list[dict], updated_by: str = "") -> dict:
     """批量保存人工覆盖（'missed'/'on_time' → UPSERT，'auto' → DELETE），单事务。
 

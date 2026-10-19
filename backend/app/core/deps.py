@@ -29,6 +29,9 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     Returns:
         dict: users 表记录（含 id/username/role/big_area_name/status）。
     """
+    # 性能注记（2026-10）：``db.get_user_by_id`` 内部已做 USER_CACHE_TTL_SECONDS（默认 30s）
+    # 进程内缓存，命中即 0 次查库，故本函数每个请求不再必然产生一次数据库往返。
+    # 失效：``db.upsert_user``（新建/改角色/改大区/改状态）会清空用户缓存，TTL ≤60s 兜底。
     if not authorization:
         raise _unauthorized()
     scheme, _, token = authorization.partition(" ")

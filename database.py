@@ -80,14 +80,24 @@ def _month_scope(alias: str, month: str | None, args: list,
 
 
 def get_connection() -> pymysql.Connection:
-    """获取 MySQL 数据库连接，自动开启外键约束"""
-    conn = pymysql.connect(
-        **MYSQL_CONFIG,
-        cursorclass=pymysql.cursors.DictCursor,  # 返回字典式行对象
-    )
-    with conn.cursor() as cursor:
-        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
-    return conn
+    """获取 MySQL 数据库连接（**池化**，close() 即归还），自动开启外键约束。
+
+    2026-10 性能优化：原先每次调用都 ``pymysql.connect()`` 新建 TCP 连接（云上走公网，
+    单次建连 30~80ms），一个请求内 5~11 次建连是卡顿主因。现改为从
+    ``backend.app.core.db_pool`` 的连接池取连接：
+
+    * ``autocommit=False``，与改造前**默认语义完全一致**：写操作必须显式 ``commit()``；
+      归还到池时会自动 ``ROLLBACK`` 掉未提交事务（等价于改造前「关连接丢弃未提交内容」）。
+    * 原「每次建连后 SET FOREIGN_KEY_CHECKS=1」改为物理连接初始化参数
+      （``init_command``），语义不变、且不再每次取连接都多一次往返。
+    * 调用方无需修改：``conn = get_connection() ... try/finally: conn.close()`` 照旧，
+      ``close()`` 的语义从「真关闭」变成「归还连接」。
+
+    Returns:
+        PooledDedicatedDBConnection: 与 ``pymysql.Connection`` 接口兼容的池化连接。
+    """
+    from backend.app.core.db_pool import get_connection as _pooled_get_connection
+    return _pooled_get_connection(autocommit=False)
 
 
 def _execute_script(conn: pymysql.Connection, script: str) -> None:
@@ -1179,12 +1189,21 @@ def upsert_manager_monthly_plan(project_id: int, manager: str, monthly_plan: int
         conn.close()
 
 
-def get_manager_monthly_plan_map(project_id: int) -> dict[str, int]:
+def get_manager_monthly_plan_map(project_id: int, conn: "pymysql.Connection | None" = None) -> dict[str, int]:
     """取项目各负责人的本月计划数映射：{负责人: monthly_plan}。
 
     未申报的负责人不会出现在结果里（调用方用 .get(m, 0) 取默认值 0）。
+
+    Args:
+        project_id: 项目 id。
+        conn: 可选的**已持有连接**。传入时复用该连接且**不关闭它**（由调用方负责关闭）。
+            用于 ``list_project_managers`` 这类「已持有连接又需要本函数数据」的场景：
+            改造前每次调用都新建连接，天然不会嵌套；接入连接池（maxconnections 有限、
+            blocking=True 无超时）后，同一请求内嵌套取第 2 条连接在极端并发下会排队，
+            故共享连接彻底消除该风险。
     """
-    conn = get_connection()
+    own = conn is None
+    conn = get_connection() if own else conn
     try:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -1193,7 +1212,8 @@ def get_manager_monthly_plan_map(project_id: int) -> dict[str, int]:
             )
             return {row["manager"]: int(row["monthly_plan"] or 0) for row in cursor.fetchall()}
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 def list_project_managers(project_id: int, month: str | None = None) -> list[dict]:
@@ -1255,7 +1275,9 @@ def list_project_managers(project_id: int, month: str | None = None) -> list[dic
                 cursor.execute(sql, tuple(args))
                 row_counts = {str(r["manager"]).strip(): int(r["c"]) for r in cursor.fetchall()}
 
-            plan_map = get_manager_monthly_plan_map(project_id)
+            # 复用当前已持有的连接（见 get_manager_monthly_plan_map 的 conn 参数说明：
+            # 池化后同一请求内再取第 2 条连接，在极端并发下会排队，故共享同一连接）
+            plan_map = get_manager_monthly_plan_map(project_id, conn)
             return [
                 {
                     "manager": nm,
