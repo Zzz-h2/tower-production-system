@@ -11,7 +11,7 @@ from ..core.deps import get_current_user, get_scope_big_area, require_admin, req
 from ..core.timeutil import business_today
 from ..schemas import ManualCompleteRequest, ProjectUpdateRequest
 from ..services.node_service import build_overview, build_process_detail, enrich_rows
-from ..services.business_logic import compute_real_overdue
+from ..services.business_logic import judge_project_risk, has_active_exception
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -85,6 +85,8 @@ def export_projects(month: Optional[str] = None, user: dict = Depends(get_curren
             "progress_pct": float(p.get("progress_pct", 0.0) or 0.0),
             "delivery_person": p.get("delivery_person", ""),
             "big_area_person": p.get("big_area_person", ""),
+            # 风险状态（2026-11）：与列表/ KPI 同一 risk_level 单源，导出不再缺"风险状态"列
+            "risk_level": p.get("risk_level", "normal") or "normal",
         })
     return {"month": month, "total": total, "items": result}
 
@@ -171,35 +173,26 @@ def get_project(pid: int, month: Optional[str] = None,
     require_project_access(project, user)
 
     mth = month.strip() if month and month.strip() else None
+    # 基准日：本入口取一次，逐层透传（禁止 SQL CURDATE / date.today()）
+    today = business_today()
     # 风险等级：基于 node_plans + node_actuals 实时判定
     plans = db.get_node_plans(pid, None, mth)
     actuals = db.get_node_actuals(pid)
     durations = db.get_project_process_durations(pid, None, mth)   # 工序时间规则升级：按套时长/偏移
     # 按段填报（v7.1 行级化）：按段提报的行（已完成段数>0）→ 进行中，不判「逾期未完成」（与弹窗口径一致）
     from ..services.node_service import load_node_segments, load_exception_context
-    _exc_anchors, _exc_by_node = load_exception_context(pid, durations, plans)
-    rows = enrich_rows(plans, actuals, durations=durations, seg_map=load_node_segments(pid),
+    _exc_anchors, _exc_by_node = load_exception_context(pid, durations, plans, today=today)
+    rows = enrich_rows(plans, actuals, today, durations=durations,
+                       seg_map=load_node_segments(pid),
                        exceptions=_exc_anchors, node_exceptions=_exc_by_node)
 
-    today_s = str(business_today())
-
-    # 1) 历史逾期（只统计「真逾期」：工序累计完成 < 调度令本月计划）
-    has_overdue = bool(compute_real_overdue(rows, int(project.get("monthly_plan") or 0)))
-
-    # 2) 今日计划且未完成（未来日期的 in_progress 不算预警）
-    has_today_unfinished = any(
-        r["status"] == "in_progress"
-        and str(r["plan_date"])[:10] == today_s
-        and r["actual_qty"] < r["plan_qty"]
-        for r in rows
+    # 风险等级（四态互斥：exception > delayed > warning > normal）
+    # 🔴 判定单源 = business_logic.judge_project_risk（与 db.get_projects_filtered 共用）
+    # 「项目级生效中异常」直接复用本请求已加载的 _exc_by_node（条目带 active，不额外查库）。
+    project["risk_level"] = judge_project_risk(
+        rows, int(project.get("monthly_plan") or 0), today,
+        has_active_exception=has_active_exception(_exc_by_node, today),
     )
-
-    if has_overdue:
-        project["risk_level"] = "delayed"
-    elif has_today_unfinished:
-        project["risk_level"] = "warning"
-    else:
-        project["risk_level"] = "normal"
 
     return project
 
@@ -527,31 +520,35 @@ def get_process_nodes(pid: int, process_name: str, manager: Optional[str] = None
 @router.get("/{pid}/alerts")
 def get_alerts(pid: int, month: Optional[str] = None,
                user: dict = Depends(get_current_user)):
-    """节点预警列表（逾期未完成 / 部分完成 / 进行中 重点节点）。行级隔离：非本大区项目返回 404。
+    """节点预警列表（异常 / 逾期未完成 / 部分完成 / 进行中 重点节点）。行级隔离：非本大区项目返回 404。
 
     排产按月隔离（v7.4）：带 month 时只看该月导入的行 ∪ 未标注月行。
+    「异常」排在最前（第 4 态，优先级 异常 > 逾期 > 预警 > 进行中）。
     """
     project = db.get_project_by_id(pid)
     require_project_access(project, user)
     mth = month.strip() if month and month.strip() else None
+    today = business_today()          # 本入口取一次，逐层透传
     plans = db.get_node_plans(pid, None, mth)
     actuals = db.get_node_actuals(pid)
     from ..services.node_service import enrich_rows, load_node_segments, load_exception_context
     _dur = db.get_project_process_durations(pid, None, mth)
-    _exc_anchors, _exc_by_node = load_exception_context(pid, _dur, plans)
-    rows = enrich_rows(plans, actuals, durations=_dur,
+    _exc_anchors, _exc_by_node = load_exception_context(pid, _dur, plans, today=today)
+    rows = enrich_rows(plans, actuals, today, durations=_dur,
                        seg_map=load_node_segments(pid),
                        exceptions=_exc_anchors, node_exceptions=_exc_by_node)
     from ..core.config import INDEPENDENT_PROCESS_NAMES
     # 独立工序（累计完成/累计发运）不参与预警：无日期语义，仅作为参考指标
     # count_as_overdue=False（待下料 / 法兰到货）也不进预警，避免出现不该有的延期项
+    # 🔴 2026-11：focus 必须显式纳入 "exception"——异常行 level=0 且 count_as_overdue=False，
+    #    若不纳入，异常工序会从「当前预警」列表**整体消失**（第 4 态没有可见入口）。
     focus = [
         r for r in rows
-        if r["status"] in ("overdue", "warning", "in_progress")
+        if r["status"] in ("exception", "overdue", "warning", "in_progress")
         and r["process_name"] not in INDEPENDENT_PROCESS_NAMES
-        and r.get("count_as_overdue", True)
+        and (r.get("count_as_overdue", True) or r["status"] == "exception")
     ]
-    focus.sort(key=lambda r: {"overdue": 0, "warning": 1, "in_progress": 2}[r["status"]])
+    focus.sort(key=lambda r: {"exception": 0, "overdue": 1, "warning": 2, "in_progress": 3}[r["status"]])
 
     # 携带节点异常提报（按 node_id 分组，供预警「管理」按钮展示）
     exceptions = db.get_node_exceptions_by_project(pid)

@@ -1,7 +1,7 @@
 <template>
   <div class="exception-tab">
-    <el-form :model="form" label-width="90px" size="small">
-      <el-form-item label="责任分类">
+    <el-form ref="formRef" :model="form" :rules="rules" label-width="90px" size="small">
+      <el-form-item label="责任分类" prop="responsibility_category">
         <el-select v-model="form.responsibility_category" placeholder="请选择" style="width:100%;">
           <el-option label="供应商" value="供应商" />
           <el-option label="内部生产" value="内部生产" />
@@ -10,14 +10,24 @@
           <el-option label="其他" value="其他" />
         </el-select>
       </el-form-item>
-      <el-form-item label="异常原因">
+      <el-form-item label="异常原因" prop="reason_detail">
         <el-input v-model="form.reason_detail" type="textarea" :rows="3" placeholder="请详细描述异常原因" />
       </el-form-item>
       <el-form-item label="处理人">
         <el-input v-model="form.handler" placeholder="请输入处理人姓名" />
       </el-form-item>
-      <el-form-item label="计划关闭">
-        <el-date-picker v-model="form.planned_close_date" value-format="YYYY-MM-DD" placeholder="选择日期" style="width:100%;" />
+      <!-- 计划关闭日（2026-11）：改为**必填**。到期未关闭 → 暂停自动失效、恢复逾期判定。 -->
+      <el-form-item label="计划关闭" prop="planned_close_date" required>
+        <el-date-picker
+          v-model="form.planned_close_date"
+          value-format="YYYY-MM-DD"
+          placeholder="选择日期（必填）"
+          :disabled-date="disabledPastDate"
+          style="width:100%;"
+        />
+        <div class="field-hint">
+          到期未关闭 → 该异常暂停自动失效，下游工序恢复按原计划日判逾期（不等于关闭）。
+        </div>
       </el-form-item>
       <el-form-item label="处理措施">
         <el-input v-model="form.measures" type="textarea" :rows="3" placeholder="请输入处理措施" />
@@ -26,30 +36,13 @@
         <el-button type="primary" :disabled="!auth.canFill" @click="onSubmit">提交异常</el-button>
       </el-form-item>
     </el-form>
-
-    <div v-if="exceptionList.length" class="exception-history">
-      <div class="history-title">历史异常记录（{{ exceptionList.length }}）</div>
-      <el-timeline>
-        <el-timeline-item v-for="e in exceptionList" :key="e.id" :type="e.status === 'closed' ? 'success' : 'warning'">
-          <div class="exc-item">
-            <span class="exc-status" :class="e.status">{{ statusText[e.status] }}</span>
-            <span class="exc-category">{{ e.responsibility_category }}</span>
-            <p>{{ e.reason_detail }}</p>
-            <p v-if="e.handler">处理人：{{ e.handler }}</p>
-            <p v-if="e.planned_close_date">计划关闭：{{ e.planned_close_date }}</p>
-            <p v-if="e.measures">处理措施：{{ e.measures }}</p>
-            <el-button v-if="e.status !== 'closed'" size="small" type="success" @click="onClose(e.id)">关闭</el-button>
-          </div>
-        </el-timeline-item>
-      </el-timeline>
-    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { createException, listExceptionsByNode, updateException } from '../api/exception'
+import { createException } from '../api/exception'
 import { useAuthStore } from '../store/auth'
 
 const props = defineProps({
@@ -70,16 +63,36 @@ const form = ref({
   planned_close_date: '',
   measures: '',
 })
-const exceptionList = ref([])
-const statusText = { pending: '待处理', processing: '处理中', closed: '已关闭' }
+const formRef = ref(null)
+// 计划关闭日（2026-11）：必填 + 不得早于今天。
+// 前后端同一条口径：后端 schemas/exception.py 的 field_validator 会再次拒绝过去日期，
+// 前端置灰只是提前拦一次，避免无谓请求。
+const rules = {
+  responsibility_category: [{ required: true, message: '请选择责任分类', trigger: 'change' }],
+  reason_detail: [{ required: true, message: '请填写异常原因', trigger: 'blur' }],
+  planned_close_date: [
+    { required: true, message: '请选择计划关闭日期（必填）', trigger: 'change' },
+    {
+      validator: (rule, value, callback) => {
+        if (!value) return callback()
+        const today = new Date()
+        today.setHours(0, 0, 0, 0)
+        const picked = new Date(`${value}T00:00:00`)
+        if (picked < today) return callback(new Error('计划关闭日期不能早于今天'))
+        return callback()
+      },
+      trigger: 'change',
+    },
+  ],
+}
 
-async function load() {
-  if (!props.nodeId) {
-    exceptionList.value = []
-    return
-  }
-  const res = await listExceptionsByNode(props.nodeId)
-  exceptionList.value = res.items || []
+// el-date-picker 的 disabled-date：今天之前的日期置灰不可选
+function disabledPastDate(d) {
+  const day = new Date(d)
+  day.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return day < today
 }
 
 /**
@@ -114,37 +127,30 @@ async function onSubmit() {
     ElMessage.warning('请先选择节点')
     return
   }
+  // 计划关闭日必填 + 不得早于今天（表单校验，失败直接返回并高亮错误项）
+  if (formRef.value) {
+    const ok = await formRef.value.validate().catch(() => false)
+    if (!ok) return
+  }
   if (!form.value.responsibility_category || !form.value.reason_detail) {
     ElMessage.warning('请填写责任分类和异常原因')
+    return
+  }
+  if (!form.value.planned_close_date) {
+    ElMessage.warning('请填写计划关闭日期（必填）')
     return
   }
   await createException(props.pid, props.nodeId, buildPayload())
   ElMessage.success('异常提报成功')
   form.value = { responsibility_category: '', reason_detail: '', handler: '', planned_close_date: '', measures: '' }
-  load()
-  emit('changed')   // 通知父组件触发预警列表刷新
-}
-
-async function onClose(id) {
-  await updateException(id, { status: 'closed' })
-  ElMessage.success('异常已关闭')
-  load()
+  formRef.value?.clearValidate()
+  // 历史记录列表已于 2026-11 移除（改由 ExceptionRecordTable 展示），
+  // 此事件仅用于通知父级重载异常记录表格 / 预警列表 / KPI。
   emit('changed')
 }
-
-watch(() => props.nodeId, load)
-onMounted(load)
 </script>
 
 <style scoped>
 .exception-tab { padding: 16px; }
-.exception-history { margin-top: 24px; }
-.history-title { font-weight: 600; margin-bottom: 12px; color: #1a365d; }
-.exc-item { font-size: 13px; color: #4a5568; }
-.exc-item p { margin: 4px 0; }
-.exc-status { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; margin-right: 8px; }
-.exc-status.pending { background: #fffaf0; color: #f6ad55; }
-.exc-status.processing { background: #e0f2fe; color: #0ea5e9; }
-.exc-status.closed { background: #f0fff4; color: #38a169; }
-.exc-category { color: #718096; }
+.field-hint { font-size: 11px; color: #94a3b8; line-height: 1.6; margin-top: 2px; }
 </style>

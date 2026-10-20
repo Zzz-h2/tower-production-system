@@ -34,37 +34,8 @@
       <el-empty v-else description="暂无当前预警" />
     </div>
 
-    <!-- 历史异常记录模块（已关闭的异常提报） -->
-    <div class="alert-section history-section">
-      <div class="section-header">
-        <span class="section-icon">📁</span>
-        <span class="section-title">历史异常记录</span>
-        <el-tag type="success" size="small">{{ historyItems.length }}</el-tag>
-      </div>
-      <el-table :data="historyItems" style="width: 100%" v-if="historyItems.length">
-        <el-table-column label="节点信息" min-width="180">
-          <template #default="{ row }">
-            <div class="node-title">{{ row.process_name }} · {{ row.plan_date }}</div>
-          </template>
-        </el-table-column>
-        <el-table-column label="异常原因" prop="reason_detail" show-overflow-tooltip min-width="200" />
-        <el-table-column label="责任分类" prop="responsibility_category" width="120" />
-        <el-table-column label="处理人" prop="handler" width="120" />
-        <el-table-column label="处理措施" prop="measures" show-overflow-tooltip min-width="180" />
-        <el-table-column label="计划关闭" prop="planned_close_date" width="120" />
-        <el-table-column label="实际关闭" width="170">
-          <template #default="{ row }">
-            {{ formatClosedAt(row.closed_at) }}
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag type="success" size="small">已关闭</el-tag>
-          </template>
-        </el-table-column>
-      </el-table>
-      <el-empty v-else description="暂无历史异常记录" />
-    </div>
+    <!-- 历史异常记录模块已移除（2026-10 用户要求）：已关闭异常统一在「⚠️ 异常记录」页签查看，
+         此处保留当前预警列表即可，避免同一批数据两处展示 -->
 
     <!-- 节点异常管理弹窗：查看该节点已提报异常，可编辑/关闭；无异常提示提报 -->
     <el-dialog v-model="manageVisible" :title="`异常管理：${manageNode?.process_name || ''} · ${manageNode?.plan_date || ''}`" width="620px">
@@ -110,8 +81,12 @@
             type="date"
             placeholder="选择日期"
             value-format="YYYY-MM-DD"
+            :disabled-date="disabledPastDate"
             style="width: 100%"
           />
+          <div class="field-hint">
+            计划关闭日到期未关闭 → 暂停自动失效、恢复逾期判定（可在异常记录页查看「已超期」）。
+          </div>
         </el-form-item>
         <el-form-item label="处理措施">
           <el-input v-model="editForm.measures" type="textarea" :rows="3" maxlength="500" show-word-limit />
@@ -135,26 +110,38 @@
 import { ref, reactive, watch, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAlerts } from '../api/node'
-import { listExceptionsByNode, listClosedExceptions, updateException } from '../api/exception'
+import { listExceptionsByNode, updateException } from '../api/exception'
 import { useProjectStore } from '../store/project'
 
 const props = defineProps({ pid: { type: String, required: true } })
 const store = useProjectStore()
 
 const currentItems = ref([])      // 当前预警（预警节点：overdue/warning/in_progress）
-const historyItems = ref([])      // 历史异常记录（closed）
+// 历史异常列表状态已随模块移除（2026-10）
 
 const statusText = { pending: '待处理', processing: '处理中', closed: '已关闭' }
+
+// 计划关闭日不得早于今天（与后端 schemas/exception.py 的校验口径一致）：
+// 到期失效是「暂停」的唯一截止线，允许选过去日期等于提交即失效。
+function disabledPastDate(d) {
+  const day = new Date(d)
+  day.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return day < today
+}
 
 const statusColors = {
   done: '#38a169', pending: '#718096', in_progress: '#3182ce', warning: '#3182ce', overdue: '#e53e3e',
   waiting_material: '#a0aec0',
   exception_paused: '#a0aec0',   // ⏸ 异常暂停（预警列表兜底，正常不会出现）
+  exception: '#dd6b20',          // 🟠 异常（第 4 态，已排到「当前预警」首位）
 }
 const statusBgs = {
   done: '#f0fff4', pending: '#f7fafc', in_progress: '#ebf8ff', warning: '#ebf8ff', overdue: '#fff5f5',
   waiting_material: '#f7fafc',
   exception_paused: '#f7fafc',
+  exception: '#fffaf0',
 }
 const pillStyle = (s) => ({ background: statusBgs[s] || '#f7fafc', color: statusColors[s] || '#718096' })
 
@@ -206,14 +193,22 @@ async function saveEdit() {
     ElMessage.warning('请填写责任分类和异常原因')
     return
   }
-  await updateException(editForm.id, {
+  const payload = {
     responsibility_category: editForm.responsibility_category,
     reason_detail: editForm.reason_detail,
     handler: editForm.handler,
-    planned_close_date: editForm.planned_close_date || null,
     measures: editForm.measures,
     status: editForm.status,
-  })
+  }
+  // 计划关闭日：仅在**实际改动**时提交。
+  // 历史异常的该字段可能是 NULL 或早于今天（提报时无该约束），原值回传会被后端
+  // 「不得早于今天」校验拒绝 → 只要用户没动这一项就不提交（后端按 exclude_unset 保留原值）。
+  const origClose = String(editingException.value?.planned_close_date || '').slice(0, 10)
+  const nextClose = String(editForm.planned_close_date || '').slice(0, 10)
+  if (nextClose !== origClose) {
+    payload.planned_close_date = nextClose || null
+  }
+  await updateException(editForm.id, payload)
   ElMessage.success('异常信息已更新')
   editVisible.value = false
   manageVisible.value = false
@@ -226,26 +221,13 @@ async function loadCurrent() {
   currentItems.value = res.items || []
 }
 
-async function loadHistory() {
-  const res = await listClosedExceptions(props.pid)
-  historyItems.value = res.items || []
-}
-
+// 历史异常记录已移除（2026-10）：已关闭异常在「⚠️ 异常记录」页签统一查看
 async function loadAll() {
-  await Promise.all([loadCurrent(), loadHistory()])
+  await loadCurrent()
 }
 
 // v7.4：全局月份切换时，预警列表同步按新月份口径刷新
 watch(() => store.filters.month, () => { loadCurrent() })
-
-function formatClosedAt(ts) {
-  if (!ts) return '-'
-  const d = new Date(ts)
-  return isNaN(d) ? ts : d.toLocaleString('zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit',
-  })
-}
 
 onMounted(loadAll)
 watch(() => props.pid, loadAll)
@@ -280,7 +262,7 @@ watch(() => store.lastNodeSavedAt, (ts) => {
   display: inline-block; margin-top: 4px; padding: 1px 8px; border-radius: 10px;
   font-size: 11px; background: #fffaf0; color: #f6ad55;
 }
-.history-section { background: #f8fafc; }
+/* 历史异常区样式已随模块移除（2026-10） */
 .exc-list { margin-top: 4px; }
 .exc-card {
   border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px;
@@ -292,4 +274,5 @@ watch(() => store.lastNodeSavedAt, (ts) => {
 .exc-status.processing { background: #e0f2fe; color: #0ea5e9; }
 .exc-status.closed { background: #f0fff4; color: #38a169; }
 .no-exc { color: #718096; font-size: 13px; padding: 16px 0; }
+.field-hint { font-size: 11px; color: #94a3b8; line-height: 1.6; margin-top: 2px; }
 </style>

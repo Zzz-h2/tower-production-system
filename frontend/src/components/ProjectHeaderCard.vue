@@ -46,6 +46,8 @@ const riskLevel = computed(() => props.project?.risk_level || 'normal')
 
 const riskMap = {
   normal: ['#f0fff4', '#38a169', '正常'],
+  // 异常（第 4 态，2026-11）：淡橙底 + 橙字，与「预警」的黄、与「延期」的红区分开
+  exception: ['#fffaf0', '#dd6b20', '异常'],
   warning: ['#fffff0', '#d69e2e', '预警'],
   delayed: ['#fff5f5', '#e53e3e', '延期'],
 }

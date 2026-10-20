@@ -4,7 +4,8 @@ from datetime import date, timedelta
 from typing import Optional
 
 from .business_logic import (judge_node_status, judge_process_card_status, split_node_groups,
-                             compute_real_overdue, build_time_rules, cutting_anchor_map)
+                             compute_real_overdue, build_time_rules, cutting_anchor_map,
+                             exception_is_active, exception_is_expired)
 from .workday_calendar import parse_date
 from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
 from ..core.timeutil import business_today
@@ -22,6 +23,21 @@ def _date10(value) -> str:
     if not text or text == "None":
         return ""
     return text[:10]
+
+
+def _exc_active(entry: dict, today=None) -> bool:
+    """取异常条目的「生效中」标记（先读索引阶段预算好的 ``active``，缺失时回退单源函数）。
+
+    索引（``build_exception_anchors`` / ``build_node_exception_index``）都会写入 ``active``；
+    仅当调用方直接塞入未加工的原始异常 dict 时才回退 ``exception_is_active``——
+    两种路径共用 ``business_logic`` 的同一份口径，前端/判定不会出现两套判断。
+    """
+    if not isinstance(entry, dict):
+        return False
+    flag = entry.get("active")
+    if flag is None:
+        return exception_is_active(entry, today)
+    return flag is True
 
 
 def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optional[dict] = None,
@@ -46,9 +62,15 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
     异常暂停（2026-10，exceptions 非空时）：
       - 每行输出 exception_paused / has_open_exception / has_closed_exception /
         exception_processes / exception_count / set_date；
-      - 该套有未关闭异常 → 其后续工序 status='exception_paused'（⏸ 异常暂停，灰），
+      - 该套有**生效中**异常 → 其后续工序 status='exception_paused'（⏸ 异常暂停，灰），
         不计入逾期/风险/排名；该套有已关闭异常 → 以解决时间重算后续工序计划日；
       - **exceptions 为 None 时行为与改动前逐项一致**（向后兼容红线）。
+    异常第 4 态（2026-11）：
+      - 本行自身即生效中异常所在工序 → status='exception'（🟠 异常，level=0，不计逾期）；
+      - 每行新增 ``has_active_exception`` / ``active_exception_processes`` /
+        ``exception_expired_count``（到期失效条数，暂停已失效、已恢复逾期判定）；
+      - ``has_open_exception`` / ``exception_count`` / ``exception_processes`` 语义**不变**
+        （= 未关闭，含到期失效），故老前端渲染口径不变。
 
     Args:
         plans: 待富化的计划行（可只含单工序，但此时建议由调用方传入 rules）
@@ -68,7 +90,7 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
     exc_map = exceptions or {}
     node_exc_map = node_exceptions or {}
     if rules is None:
-        rules = build_time_rules(plans, actuals, durations, exc_map)
+        rules = build_time_rules(plans, actuals, durations, exc_map, today=today)
     seg_map = seg_map or {}
     rows = []
     for r in plans:
@@ -98,6 +120,10 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
                 continue
             merged.append(e)
         open_excs = [e for e in merged if str(e.get("status") or "pending") != "closed"]
+        # 生效中 / 到期失效（2026-11）：判定口径统一来自 ``active`` 标记（business_logic 单源）
+        active_excs = [e for e in merged if _exc_active(e, today)]
+        expired_excs = [e for e in merged
+                        if not _exc_active(e, today) and exception_is_expired(e, today)]
         exception_paused = bool(ru.get("exception_paused"))
         if r["process_name"] in INDEPENDENT_PROCESS_NAMES:
             done = actual_qty >= r["plan_qty"]
@@ -116,6 +142,9 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
                 count_as_overdue=ru.get("count_as_overdue", True),
                 segment_active=segment_active,
                 exception_paused=exception_paused,
+                # 异常第 4 态（2026-11）：本行自身是否生效中异常所在工序
+                exception_active=bool(ru.get("self_exception")),
+                exception_close_date=ru.get("self_close_date"),
             )
         rows.append({
             "id": nid,
@@ -147,6 +176,17 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
                 str(e.get("process_name") or "") for e in open_excs if e.get("process_name")
             }),
             "exception_count": len(open_excs),
+            # === 异常第 4 态（2026-11）===
+            # has_active_exception       —— 该套是否存在**生效中**异常（未关闭且未过计划关闭日）
+            # active_exception_processes —— 生效中异常涉及的工序名（「本工序有 N 套存在生效中异常」）
+            # exception_expired_count    —— 该套已到期失效的异常条数（暂停已失效、已恢复逾期判定）
+            # ⚠️ 上面 has_open_exception / exception_count / exception_processes 语义仍是
+            #    「未关闭（含到期失效）」——老前端渲染与历史口径逐字段不变。
+            "has_active_exception": bool(active_excs),
+            "active_exception_processes": sorted({
+                str(e.get("process_name") or "") for e in active_excs if e.get("process_name")
+            }),
+            "exception_expired_count": len(expired_excs),
             **st,
         })
     return rows
@@ -177,17 +217,19 @@ def _load_node_segments(project_id: int) -> dict[int, tuple[int, int]]:
 load_node_segments = _load_node_segments
 
 
-def _load_open_exceptions(project_id: int) -> dict[str, int]:
-    """读取项目「未关闭」异常按工序聚合 → {process_name: 异常数量}。
+def _load_open_exceptions(project_id: int, today=None) -> dict[str, int]:
+    """读取项目「**生效中**」异常按工序聚合 → {process_name: 异常数量}。
 
     用于工序卡片打「存在异常」标签并置为预警态。
+    「生效中」= 未关闭 且 (计划关闭日为空 或 计划关闭日 ≥ today)——由 SQL 侧按
+    调用方传入的 today 过滤（禁止在 SQL 里用 CURDATE，时区/业务日历双口径会漂）。
     与 _load_node_segments 同口径：查询失败（如表未建）返回空 dict，不阻塞总览。
     """
     if project_id is None:
         return {}
     from ..core import db
     try:
-        return dict(db.get_open_exception_processes(int(project_id)) or {})
+        return dict(db.get_open_exception_processes(int(project_id), today=today) or {})
     except Exception as e:  # noqa: BLE001 — 异常标签为增强展示，失败不阻塞主流程
         import logging
         logging.getLogger(__name__).warning("get_open_exception_processes(%s) 失败：%s", project_id, e)
@@ -196,7 +238,8 @@ def _load_open_exceptions(project_id: int) -> dict[str, int]:
 
 def build_exception_anchors(exc_rows: Optional[list[dict]], durations: Optional[dict] = None,
                             plans: Optional[list[dict]] = None,
-                            set_index: Optional[dict] = None) -> dict[str, list[dict]]:
+                            set_index: Optional[dict] = None,
+                            today=None) -> dict[str, list[dict]]:
     """把异常记录**反推**到「所属套」并聚合（纯函数，无 IO，便于单测/回归）。
 
     「同一套」的关联键 = 该行的 **下料计划日 d0**（= 该行 plan_date − 该行 offset_days），
@@ -234,13 +277,17 @@ def build_exception_anchors(exc_rows: Optional[list[dict]], durations: Optional[
 
     Args:
         exc_rows: node_exceptions 原始行（含 project_id/node_id/process_name/plan_date/
-                  status/closed_at/id，可选 set_seq/set_d0）；None/空 → 返回 {}
+                  status/closed_at/id、**planned_close_date**，可选 set_seq/set_d0）；
+                  None/空 → 返回 {}
         durations: {(process_name, 'YYYY-MM-DD'): {"offset_days": int}}
         plans: 项目当前计划行（可选，用于把 node_id 映射到最新 plan_date）
         set_index: 可选，``build_set_index`` 的产物（套成员明细）；None → 只走第 ③ 档
+        today: 基准日（None → 业务时区今天）。由入口取一次后逐层透传；
+               **只**用于给每条异常写入 ``active``（active/expired 的单源实现）
 
     Returns:
-        dict[str, list[dict]]: 按「下料计划日」聚合的异常列表
+        dict[str, list[dict]]: 按「下料计划日」聚合的异常列表；
+        每条含 ``planned_close_date`` 与 ``active``（2026-11 新增，判定层只认 ``active``）
     """
     if not exc_rows or not durations:
         return {}
@@ -282,6 +329,7 @@ def build_exception_anchors(exc_rows: Optional[list[dict]], durations: Optional[
         d0 = (base - timedelta(days=offset)).strftime("%Y-%m-%d")
         status = str(e.get("status") or "pending").strip() or "pending"
         closed_at = str(e.get("closed_at") or "")[:10] or None
+        planned_close_date = _date10(e.get("planned_close_date")) or None
         # 套号元数据（三档；仅展示用，不改变上面的 d0 / offset）
         set_seq, set_d0 = _resolve_exception_set(e, pn, pd, set_index)
         anchors.setdefault(d0, []).append({
@@ -290,6 +338,12 @@ def build_exception_anchors(exc_rows: Optional[list[dict]], durations: Optional[
             "status": status,
             "closed_at": closed_at,
             "exception_id": e.get("id"),
+            # 计划关闭日（2026-11）：判定层据此判 active/expired，展示层据此显示「计划关闭 M-D」
+            "planned_close_date": planned_close_date,
+            # 生效中标记（唯一实现 = business_logic.exception_is_active）：
+            # 🔴 判定层只认这一个字段，不再各自比较 status/日期，杜绝两套口径。
+            "active": exception_is_active(
+                {"status": status, "planned_close_date": planned_close_date}, today),
             "set_seq": set_seq,
             "set_d0": set_d0,
             "bucket_d0": d0,
@@ -332,35 +386,55 @@ def _resolve_exception_set(exc: dict, process_name: str, plan_date: str,
     return None, None
 
 
-def build_node_exception_index(exc_rows: Optional[list[dict]]) -> dict[int, list[dict]]:
+def build_node_exception_index(exc_rows: Optional[list[dict]],
+                               today=None) -> dict[int, list[dict]]:
     """把异常记录按 **node_id** 建索引 → ``{node_plan_id: [{process_name, status, closed_at, ...}]}``。
 
-    用途（纯展示，不参与任何判定）：
+    用途：
       - 所属套无法反推时（存量项目无 ``project_process_durations``，见
         ``build_exception_anchors``），仍能在这条异常**自身的计划行**上打「⚠️ 异常」标识，
         让用户至少能一眼看到「哪一套的哪道工序有异常」；
       - 所属套可反推时，与「按套聚合」的数据按 exception_id 去重合并，避免重复计数。
+
+    ⚠️ 条目同时携带 ``planned_close_date`` 与 ``active``（2026-11）：
+    项目详情页的「项目级异常态」直接用本索引聚合判定（不额外查库），
+    若缺 ``planned_close_date``，active 判定会整体退化成「永不到期」。
+
+    Args:
+        exc_rows: node_exceptions 原始行
+        today: 基准日（None → 业务时区今天）——只用于 active 的单一实现处
+
+    Returns:
+        dict[int, list[dict]]: node_id → 异常条目列表
+            ⚠️ ``node_id <= 0`` 的历史脏数据（种子/早期提报未回填节点）统一收在 **键 0** 桶里：
+            它们不会命中任何真实计划行（节点 id 恒 > 0），但对「项目级是否存在生效中异常」
+            仍然必须可见——否则项目列表判 exception、详情页判 delayed，
+            同一条异常会出现两套结论（四态互斥的红线）。
     """
     index: dict[int, list[dict]] = {}
     for e in exc_rows or []:
         try:
             nid = int(e.get("node_id") or 0)
         except (TypeError, ValueError):
-            continue
-        if nid <= 0:
-            continue
-        index.setdefault(nid, []).append({
+            nid = 0
+        status = str(e.get("status") or "pending").strip() or "pending"
+        planned_close_date = _date10(e.get("planned_close_date")) or None
+        index.setdefault(max(nid, 0), []).append({
             "process_name": str(e.get("process_name") or "").strip(),
-            "status": str(e.get("status") or "pending").strip() or "pending",
+            "status": status,
             "closed_at": str(e.get("closed_at") or "")[:10] or None,
             "exception_id": e.get("id"),
+            "planned_close_date": planned_close_date,
+            "active": exception_is_active(
+                {"status": status, "planned_close_date": planned_close_date}, today),
         })
     return index
 
 
 def _load_exception_context(project_id: int, durations: Optional[dict] = None,
                             plans: Optional[list[dict]] = None,
-                            set_index: Optional[dict] = None) -> tuple[dict, dict]:
+                            set_index: Optional[dict] = None,
+                            today=None) -> tuple[dict, dict]:
     """一次查询同时返回「按套聚合的异常锚点」与「按节点建索引的异常」（避免两次 IO）。
 
     Args:
@@ -369,12 +443,15 @@ def _load_exception_context(project_id: int, durations: Optional[dict] = None,
         plans: 项目当前计划行（用于 node_id → plan_date 覆盖）
         set_index: 可选，``build_set_index`` 产物；传入时异常锚点会附带「指向第几套」的
             元数据（set_seq/set_d0），供展示层把异常标到具体套上。不传 → 与改造前一致。
+        today: 基准日（None → 业务时区今天）。**每个入口取一次后逐层透传**，
+            不在此重复取业务今天（否则跨零点请求会出现两套「今天」）。
 
     Returns:
         (anchors, node_index)：
           - anchors: {该套下料计划日 d0: [{process_name, offset_days, status, closed_at,
-            set_seq, set_d0, bucket_d0}]}
-          - node_index: {node_plan_id: [{process_name, status, closed_at}]}
+            planned_close_date, active, set_seq, set_d0, bucket_d0}]}
+          - node_index: {node_plan_id: [{process_name, status, closed_at,
+            planned_close_date, active}]}
         查询失败 / 缺表 → ({}, {})，绝不阻塞总览（与 _load_node_segments 同口径）。
     """
     if project_id is None:
@@ -387,22 +464,25 @@ def _load_exception_context(project_id: int, durations: Optional[dict] = None,
         logging.getLogger(__name__).warning("get_node_exceptions_by_project(%s) 失败：%s",
                                             project_id, e)
         return {}, {}
-    node_index = build_node_exception_index(rows)
-    anchors = (build_exception_anchors(rows, durations, plans, set_index) if durations else {})
+    node_index = build_node_exception_index(rows, today=today)
+    anchors = (build_exception_anchors(rows, durations, plans, set_index, today=today)
+               if durations else {})
     return anchors, node_index
 
 
 def _load_exception_anchors(project_id: int, durations: Optional[dict] = None,
                             plans: Optional[list[dict]] = None,
-                            set_index: Optional[dict] = None) -> dict[str, list[dict]]:
+                            set_index: Optional[dict] = None,
+                            today=None) -> dict[str, list[dict]]:
     """读取项目全部异常（含已关闭）并反推为「按套聚合」结构，供 build_time_rules 使用。
 
-    返回 ``{该套下料计划日 d0: [{process_name, offset_days, status, closed_at, ...}, ...]}``。
+    返回 ``{该套下料计划日 d0: [{process_name, offset_days, status, closed_at,
+    planned_close_date, active, ...}, ...]}``。
 
     ⚠️ 容错口径与 ``_load_node_segments`` 完全一致：**查询失败返回 {}**，绝不阻塞总览；
        无 durations（存量项目未导入时长）时同样返回 {}——无法反推「哪一套」，保守不动排产。
     """
-    return _load_exception_context(project_id, durations, plans, set_index)[0]
+    return _load_exception_context(project_id, durations, plans, set_index, today=today)[0]
 
 
 # 对外公开别名：路由层（项目详情风险 / 预警列表）复用同一带兜底的读取逻辑
@@ -578,7 +658,7 @@ def judge_set_display_status(member: dict, *, position: int, plan_qty: int, actu
     Returns:
         dict: ``set_seq/plan_date/plan_date_plan/d0/offset_days/duration_days/actual_qty_est/
         status_display/label_display/derived/source/exception_paused/has_open_exception/
-        exception_processes``
+        exception_processes/has_active_exception/self_exception/exception_expired_count``
     """
     today_date = parse_date(today) or business_today()
     plan_date = _date10(member.get("plan_date"))
@@ -588,12 +668,26 @@ def judge_set_display_status(member: dict, *, position: int, plan_qty: int, actu
 
     related = _match_set_exceptions(member, exc_entries)
     open_excs = [e for e in related if str(e.get("status") or "pending") != "closed"]
-    # 暂停：该套存在未关闭异常，且本工序 offset > 异常工序 offset（异常工序自身不暂停）
+    active_excs = [e for e in related if _exc_active(e, today)]
+    # 暂停：该套存在**生效中**异常，且本工序 offset > 异常工序 offset（异常工序自身不暂停）
+    # 🔴 2026-11：条件由「未关闭」改为「生效中」——已过计划关闭日的异常暂停失效。
     paused = any(
         _int_or_none(e.get("offset_days")) is not None
         and offset_days is not None
         and int(e.get("offset_days")) < int(offset_days)
-        for e in open_excs
+        for e in active_excs
+    )
+    # 自身异常（第 4 态）：该套在本工序上就有生效中异常
+    self_exception = any(
+        _int_or_none(e.get("offset_days")) is not None
+        and offset_days is not None
+        and int(e.get("offset_days")) == int(offset_days)
+        for e in active_excs
+    )
+    # 该套已到期失效的异常条数（展示「暂停已失效、已恢复逾期判定」提示）
+    expired_count = sum(
+        1 for e in related
+        if not _exc_active(e, today) and exception_is_expired(e, today)
     )
 
     # ---- 生效计划日（展示口径，每套各自算）----
@@ -619,8 +713,11 @@ def judge_set_display_status(member: dict, *, position: int, plan_qty: int, actu
         display_date = (anchor + timedelta(days=offset_days)).strftime("%Y-%m-%d")
 
     # ---- 逐套状态（仅展示；不做任何统计汇总）----
+    # 优先级：done > exception（本套本工序生效中异常）> exception_paused（上游暂停）> 待下料 > 日期判定
     if done_est:
         status_display, label_display = "done", "🟢 已完成"
+    elif self_exception:
+        status_display, label_display = "exception", "🟠 异常"
     elif paused:
         status_display, label_display = "exception_paused", "⏸ 异常暂停"
     elif anchor is None:
@@ -655,6 +752,10 @@ def judge_set_display_status(member: dict, *, position: int, plan_qty: int, actu
         "exception_processes": sorted({
             str(e.get("process_name") or "") for e in open_excs if e.get("process_name")
         }),
+        # 异常第 4 态（2026-11，只读展示）：本套本工序是否生效中异常 / 本套到期失效条数
+        "has_active_exception": bool(active_excs),
+        "self_exception": bool(self_exception),
+        "exception_expired_count": int(expired_count),
     }
 
 
@@ -809,11 +910,11 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
     # 按段填报（v7.1 行级化）：{node_plan_id: (segment_total, segment_done)}
     # ⚠️ 必须在 enrich_rows 之前加载——状态判定需要它（按段提报的行 → 进行中，不判逾期）
     seg_map = _load_node_segments(project_id)
-    # 未关闭异常按工序聚合：工序卡片「存在异常」标签 + 预警态
-    exc_map = _load_open_exceptions(project_id)
+    # 生效中异常按工序聚合：工序卡片「存在异常」标签 + 预警态（已到期失效的不再算）
+    exc_map = _load_open_exceptions(project_id, today)
     # 异常暂停 / 解决后重算（2026-10）：按「该套下料计划日」聚合的异常锚点 + 按节点兜底索引
     # ⚠️ 同样必须在 enrich_rows 之前加载——状态判定（暂停 / 新计划日）需要它
-    exc_anchors, exc_by_node = _load_exception_context(project_id, durations, plans)
+    exc_anchors, exc_by_node = _load_exception_context(project_id, durations, plans, today=today)
     rows = enrich_rows(plans, actuals, today, durations, seg_map=seg_map,
                        exceptions=exc_anchors, node_exceptions=exc_by_node)
 
@@ -963,10 +1064,11 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
     # 异常暂停 / 解决后重算（2026-10）：按「该套下料计划日」聚合的异常锚点 + 按节点兜底索引
     # ⚠️ 闸门锚点与异常锚点都必须基于【全项目】计划行（找「下料」行），不能只用本工序的行
     if project_id is not None:
-        exc_anchors, exc_by_node = _load_exception_context(project_id, durations, plans, set_index)
+        exc_anchors, exc_by_node = _load_exception_context(project_id, durations, plans,
+                                                           set_index, today=today)
     else:
         exc_anchors, exc_by_node = {}, {}
-    rules = build_time_rules(plans, actuals, durations, exc_anchors)
+    rules = build_time_rules(plans, actuals, durations, exc_anchors, today=today)
     proc_nodes = sorted(
         (r for r in plans if r["process_name"] == process_name),
         key=lambda r: str(r["plan_date"]),
@@ -1035,3 +1137,77 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
             for g, nodes in groups.items()
         },
     }
+
+
+# ============================================================
+# 异常记录展示层（2026-11）：把 node_exceptions 原始行加工成前端表格所需结构
+# ------------------------------------------------------------
+# 纯派生、无 IO、不写库（PRD 红线：实时派生，不落状态字段）。
+# 状态口径（三段互斥，与判定层同源）：
+#   closed  —— status == 'closed'（真正关闭：写 closed_at，触发锚点重算）
+#   expired —— 未关闭 且 已过计划关闭日（暂停失效、恢复逾期判定；🔴 不等于关闭）
+#   active  —— 其余（未关闭 且 未过期 / 无计划关闭日）
+# ============================================================
+def decorate_exception_records(rows: Optional[list[dict]], today=None) -> dict:
+    """给异常记录补「显示状态 + 天数 + 套号文案」，并汇总计数条。
+
+    Args:
+        rows: ``db.get_node_exceptions_by_project`` 等返回的原始异常行
+        today: 基准日（None → 业务时区今天；由调用方（路由）取一次后传入）
+
+    Returns:
+        dict: ``{"items": [...], "summary": {"total", "active", "expired", "closed"}}``
+            item 在原行基础上新增：
+              - ``display_status``: 'active' | 'expired' | 'closed'
+              - ``is_active`` / ``is_expired`` / ``is_closed``: bool
+              - ``days_to_close``: 距计划关闭日剩余天数（active 且有日期时 ≥0，否则 None）
+              - ``days_overdue``: 超计划关闭日天数（expired 时 >0，否则 None）
+              - ``age_days``: 提报至今自然日数（无 created_at → None）
+              - ``set_label``: '第 N 套' | '整套/未指定'
+              - ``planned_close_date``: 统一成 'YYYY-MM-DD' 字符串（None 保持 None）
+    """
+    today_date = parse_date(today) or business_today()
+    items: list[dict] = []
+    summary = {"total": 0, "active": 0, "expired": 0, "closed": 0}
+    for row in rows or []:
+        item = dict(row)
+        status = str(item.get("status") or "pending").strip() or "pending"
+        planned_close = _date10(item.get("planned_close_date")) or None
+        item["status"] = status
+        item["planned_close_date"] = planned_close
+        is_closed = status == "closed"
+        is_expired = (not is_closed) and exception_is_expired(item, today_date)
+        is_active = (not is_closed) and (not is_expired)
+        display_status = "closed" if is_closed else ("expired" if is_expired else "active")
+
+        days_to_close = None
+        days_overdue = None
+        if planned_close:
+            parsed_close = parse_date(planned_close)
+            if parsed_close is not None:
+                delta = (parsed_close - today_date).days
+                if delta >= 0:
+                    days_to_close = delta
+                else:
+                    days_overdue = -delta
+
+        created = item.get("created_at")
+        age_days = None
+        created_date = parse_date(created) if created is not None else None
+        if created_date is not None:
+            age_days = max(0, (today_date - created_date).days)
+
+        set_seq = _int_or_none(item.get("set_seq"))
+        item["display_status"] = display_status
+        item["is_active"] = is_active
+        item["is_expired"] = is_expired
+        item["is_closed"] = is_closed
+        item["days_to_close"] = days_to_close
+        item["days_overdue"] = days_overdue
+        item["age_days"] = age_days
+        item["set_label"] = f"第 {set_seq} 套" if set_seq else "整套/未指定"
+
+        summary["total"] += 1
+        summary[display_status] += 1
+        items.append(item)
+    return {"items": items, "summary": summary}

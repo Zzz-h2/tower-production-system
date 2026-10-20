@@ -26,6 +26,7 @@ const colorMap = {
   overdue: '#e53e3e',
   waiting_material: '#a0aec0',
   exception_paused: '#a0aec0',   // ⏸ 异常暂停（该套前序工序有未关闭异常，原计划失效）
+  exception: '#dd6b20',          // 🟠 异常（第 4 态：本行自身有生效中异常）
   pending: '#cbd5e0',
 }
 const labelMap = {
@@ -35,6 +36,7 @@ const labelMap = {
   overdue: '逾期未完成',
   waiting_material: '待下料',
   exception_paused: '异常暂停',
+  exception: '异常',
   pending: '未到',
 }
 

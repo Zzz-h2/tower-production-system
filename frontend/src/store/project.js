@@ -37,8 +37,11 @@ export const useProjectStore = defineStore('project', {
     lastExceptionChangedAt: 0,
 
     // 看板指标（KPI 卡，字段与 /api/dashboard/stats 一致）
+    // 2026-11：新增 exception_projects（第 4 态），恒等式
+    //   normal + warning + delayed + exception == total_projects（四态互斥）
     dashboard: {
       total_projects: 0,
+      exception_projects: 0,
       warning_projects: 0,
       delayed_projects: 0,
       monthly_plan_total: 0,

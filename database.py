@@ -1491,6 +1491,40 @@ def delete_manual_complete(project_id: int, node_plan_id: int) -> int:
         conn.close()
 
 
+# ---------- 节点异常记录：删除（2026-11 新增） ----------
+
+def delete_exception_by_id(exception_id: int) -> int:
+    """删除单条节点异常记录（异常记录表格「编辑」弹窗内的删除入口）。
+
+    职责边界（🔴 只删一行，绝不连带其它表）：
+      - 只删 ``node_exceptions`` 中 ``id = exception_id`` 的那一行；
+      - **不动** ``node_actual_progress``（已填报的完成量是既成事实）；
+      - **不动** ``process_node_plans``（计划行属排产，与异常无所有权关系）。
+        删除异常 = 该异常的「暂停/延期重算」影响同时解除，判定层下一次读取自然回到
+        无异常口径（判定逻辑本身不改，见 services/business_logic.py）。
+
+    幂等：不存在 / 已被删除时返回 0（不抛异常，由路由层决定是否 404）。
+
+    Args:
+        exception_id: 异常记录主键（node_exceptions.id）
+
+    Returns:
+        int: 实际删除的行数（1 = 删除成功，0 = 不存在或已被删除）
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM node_exceptions WHERE id = %s",
+                (int(exception_id),),
+            )
+            deleted = int(cursor.rowcount or 0)
+            conn.commit()
+            return deleted
+    finally:
+        conn.close()
+
+
 # ---------- 按段填报（v7.1 行级化，node_segment_progress） ----------
 
 def upsert_node_segment(project_id: int, node_plan_id: int,
@@ -1522,6 +1556,36 @@ def upsert_node_segment(project_id: int, node_plan_id: int,
                  int(segment_total or 0), int(segment_done or 0)),
             )
             conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_node_segment(project_id: int, node_plan_id: int) -> int:
+    """删除某套（计划行）的按段填报记录 —— 「取消按段提报」用。
+
+    - 只删 node_segment_progress 里该计划行的**分段进度记录**，一行最多一条（uk_node_seg）；
+    - **不动** process_node_actuals：actual_qty / report_date 是既成事实，取消按段提报
+      只是不再按段显示与判定，状态回落到按 actual_qty 的常规口径（由 backend 判定层自然完成）；
+    - 不存在的记录 → 返回 0（幂等：重复点击不会报错）；
+    - 计划行是否属于该项目/该工序由路由层校验（含大区隔离），此处只按 id + project_id 双条件删除，
+      避免任何跨项目误删。
+
+    Args:
+        project_id: 项目ID（与 node_plan_id 一起作为删除条件，双重校验）
+        node_plan_id: 计划行ID
+
+    Returns:
+        实际删除的行数（0 表示本来就没有按段记录）
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            affected = cursor.execute(
+                "DELETE FROM node_segment_progress WHERE project_id = %s AND node_plan_id = %s",
+                (int(project_id), int(node_plan_id)),
+            )
+            conn.commit()
+            return int(affected or 0)
     finally:
         conn.close()
 
@@ -1984,7 +2048,8 @@ def get_all_plans_by_month_and_person(month_start: str, month_end: str, person: 
 
 
 def get_ranking_manager_rows_by_month(month: str,
-                                      big_area_person: str | None = None) -> list[dict]:
+                                      big_area_person: str | None = None,
+                                      today: str | None = None) -> list[dict]:
     """出品排名（v6.0 多负责人）：返回当月每个 (项目 × 负责人) 的计划/完成明细行。
 
     与 get_ranking_summary_by_month 的区别：后者按 delivery_person 原样聚合成一行
@@ -1997,6 +2062,11 @@ def get_ranking_manager_rows_by_month(month: str,
       - total_plan：该负责人申报的本月计划数（project_manager_plans.monthly_plan）；
         单人项目且未申报时，回退用项目本月计划数（向后兼容旧数据）。
       - total_actual：该负责人名下『附件安装』工序实际完成量之和（按 pnp.manager 归属）。
+      - today_actual（v7.8）：其中「最后一次填报日期 = today」那部分实际完成量之和，
+        即该 (项目 × 负责人) 今日新增的完成套数（供前端 ↑ 箭头提示）。`today` 为 None →
+        该字段恒为 0（行为与改动前完全一致，不影响任何既有数字/口径）。
+        ⚠️ today 必须由 **Python 侧 business_today()** 传入，SQL 中禁止 CURDATE()
+        （服务器时区与业务时区 Asia/Shanghai 可能不一致）。
       - project_id / delivery_person / project_monthly_plan：便于上层追溯与前端展示。
 
     🔴 **当月项目口径（与 core/db.get_projects_filtered 严格一致）**：
@@ -2054,10 +2124,20 @@ def get_ranking_manager_rows_by_month(month: str,
             # 3) 各负责人名下『附件安装』实际完成量
             #    v7.4：叠加排产归属月作用域（该月 ∪ 未标注月），避免其他月份导入的
             #    「附件安装」行与手动完成占位行共同存在时把完成量重复计入。
-            actual_args: list = list(pids)
+            #    v7.8：同一条 SQL 附带算出「今日新增」（report_date = today 的那部分），
+            #    保证今日增量与被统计范围（项目集合 / 月份作用域 / 工序 / 负责人归属）完全一致。
+            #    ⚠️ 占位符顺序：CASE 在 SELECT 列表里 → 它的参数必须排在最前（pids / 月份之后不成立）。
+            today_arg: list = []
+            today_select = ""
+            if today:
+                today_select = (", SUM(CASE WHEN nap.report_date = %s THEN nap.actual_qty ELSE 0 END)"
+                                " AS today_actual")
+                today_arg.append(str(today)[:10])
+            actual_args: list = today_arg + list(pids)
             actual_month_sql = _month_scope("pnp.", month, actual_args)
             cur.execute(f"""
                 SELECT pnp.project_id, pnp.manager, SUM(nap.actual_qty) AS total_actual
+                       {today_select}
                 FROM process_node_plans pnp
                 JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id
                 WHERE pnp.project_id IN ({ph})
@@ -2066,9 +2146,13 @@ def get_ranking_manager_rows_by_month(month: str,
                   {actual_month_sql}
                 GROUP BY pnp.project_id, pnp.manager
             """, tuple(actual_args))
-            actuals: dict[tuple[int, str], int] = {}
+            # {(project_id, manager): {'total': int, 'today': int}}
+            actuals: dict[tuple[int, str], dict] = {}
             for r in cur.fetchall():
-                actuals[(int(r["project_id"]), str(r["manager"]).strip())] = int(r["total_actual"] or 0)
+                actuals[(int(r["project_id"]), str(r["manager"]).strip())] = {
+                    "total": int(r["total_actual"] or 0),
+                    "today": int(r.get("today_actual") or 0),
+                }
 
             # 4) 拆分并组装 (项目 × 负责人) 行
             rows: list[dict] = []
@@ -2086,13 +2170,16 @@ def get_ranking_manager_rows_by_month(month: str,
                         plan = proj_plan
                     else:
                         plan = 0
+                    act = actuals.get(key) or {}
                     rows.append({
                         "project_id": pid,
                         "delivery_person": raw_person,
                         "project_monthly_plan": proj_plan,
                         "manager": nm,
                         "total_plan": plan,
-                        "total_actual": int(actuals.get(key, 0)),
+                        "total_actual": int(act.get("total") or 0),
+                        # v7.8：今日新增完成套数（today 未传时恒为 0）
+                        "today_actual": int(act.get("today") or 0),
                     })
             return rows
     finally:

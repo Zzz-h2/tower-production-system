@@ -170,6 +170,7 @@ const STATUS_TEXT = {
   done: '已完成', done_early: '提前完成', overdue: '已逾期',
   waiting_material: '待下料',
   exception_paused: '异常暂停',   // ⏸ 异常暂停（兜底：普通接口不会返回该状态）
+  exception: '异常',              // 🟠 异常（第 4 态）
   in_progress: '进行中', pending: '未开始',
 }
 const statusText = (s) => STATUS_TEXT[s] || '未开始'
@@ -179,6 +180,7 @@ const statusStyle = (s) => {
     overdue: { c: '#e53e3e', b: '#fff5f5' }, in_progress: { c: '#3182ce', b: '#ebf4ff' },
     waiting_material: { c: '#a0aec0', b: '#f7fafc' },
     exception_paused: { c: '#a0aec0', b: '#f7fafc' },
+    exception: { c: '#dd6b20', b: '#fffaf0' },
     pending: { c: '#718096', b: '#f7fafc' },
   }
   const x = m[s] || m.pending

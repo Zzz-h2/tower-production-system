@@ -16,3 +16,10 @@ export const listExceptionsByNode = (nodeId) =>
 
 export const updateException = (excId, data) =>
   http.put(`/exceptions/${excId}`, data)
+
+// 删除单条异常记录（仅 admin；后端 require_admin 兜底校验，非 admin → 403）
+// 幂等（2026-11 定稿）：返回 { ok, deleted, id }
+//   deleted=1 → 本次确实删掉；deleted=0 → 记录已不存在（重复删 / 从未存在），仍是 HTTP 200
+//   调用方按 deleted 区分 success / warning 文案，不要当成失败处理
+export const deleteException = (excId) =>
+  http.delete(`/exceptions/${excId}`)

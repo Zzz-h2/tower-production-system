@@ -331,6 +331,19 @@ def get_node_segments(project_id: int) -> list[dict]:
     return getattr(_fn, "__wrapped__", _fn)(project_id)
 
 
+@_invalidates_dashboard
+def delete_node_segment(project_id: int, node_plan_id: int) -> int:
+    """删除某套（计划行）的按段填报记录（「取消按段提报」用）。
+
+    桥接根目录 database.py 的 delete_node_segment：只清 node_segment_progress，
+    **不改** actual_qty / report_date —— 已填完成套数是既成事实，取消后状态自然回落到
+    按 actual_qty 的常规判定（取消按段不影响进度百分比与排名口径）。
+    返回实际删除行数（0 = 本来没有按段记录，幂等）。
+    """
+    from database import delete_node_segment as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_id, node_plan_id)
+
+
 def get_node_segments_batch(project_ids: list[int]) -> dict:
     """批量查询多项目的按段填报行 → {project_id: {node_plan_id: (total, done)}}。
 
@@ -401,14 +414,18 @@ def list_project_managers(project_id: int, month: str | None = None) -> list[dic
 
 
 def get_ranking_manager_rows_by_month(month: str,
-                                      big_area_person: str | None = None) -> list[dict]:
+                                      big_area_person: str | None = None,
+                                      today: str | None = None) -> list[dict]:
     """出品排名（v6.0 多负责人）：返回当月每个 (项目 × 负责人) 的计划/完成明细行。
 
     与 get_ranking_summary_by_month 的区别：按 '/' 拆分后，每位负责人各占一行，
     使出品排名能把多位负责人的数据分别展示、分别排名。桥接根目录 database.py 同名函数。
+
+    v7.8：新增 ``today``（'YYYY-MM-DD'，由调用方用 business_today() 传入，禁 SQL CURDATE()）。
+    传入后每行附带 ``today_actual`` = 该 (项目 × 负责人) 今日新增完成套数；不传则为 0。
     """
     from database import get_ranking_manager_rows_by_month as _fn
-    return getattr(_fn, "__wrapped__", _fn)(month, big_area_person)
+    return getattr(_fn, "__wrapped__", _fn)(month, big_area_person, today)
 
 
 # ---------- 项目（复用于项目列表/详情） ----------
@@ -475,6 +492,10 @@ def get_dashboard_stats(month: str | None = None, big_area_person: str | None = 
         "total_projects": len(items),
         "warning_projects": sum(1 for p in items if p.get("risk_level") == "warning"),
         "delayed_projects": sum(1 for p in items if p.get("risk_level") == "delayed"),
+        # 异常项目数（第 4 态，2026-11）：与列表 status=exception 的筛选结果**必然相等**
+        # （同一数据源 + 同一 risk_level 单源判定）。
+        # 恒等式：normal + warning + delayed + exception == total_projects（四态互斥）。
+        "exception_projects": sum(1 for p in items if p.get("risk_level") == "exception"),
         "monthly_plan_total": sum(int(p.get("monthly_plan", 0) or 0) for p in items),
     }
     _dashboard_cache.set(key, dict(stats))
@@ -547,10 +568,11 @@ def get_dispatch_months() -> list:
 
 def get_projects_filtered(keyword: str | None = None, person: str | None = None,
                           status: str | None = None, skip: int = 0, limit: int = 10,
-                          month: str | None = None, big_area_person: str | None = None):
+                          month: str | None = None, big_area_person: str | None = None,
+                          today=None):
     """项目搜索/筛选 + 服务端分页。
 
-    status 语义为「风险等级」（normal/warning/delayed），由 node_plans + node_actuals
+    status 语义为「风险等级」（normal/warning/delayed/exception），由 node_plans + node_actuals
     实时计算（与详情页/节点预警口径一致），因此**不能**下推到 SQL 的 projects.status
     （生命周期字段 in_progress/completed）。
     实现：取全量项目 → keyword/person/big_area_person 内存过滤 → 计算 risk_level/progress_pct →
@@ -558,9 +580,16 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
     month: 调度令归属月份（'YYYY-MM'），口径 = projects.created_at 年月 ∪ dispatch_records.plan_month；
            命中快照的项目以该月快照口径覆盖 monthly_plan/last_month_output，三页联动共享。
     big_area_person: 大区负责人 精确相等过滤。
+    today: 基准日（None → 业务时区今天）。本函数是「列表入口」，**在此取一次**后逐层透传，
+           下游不再各自取业务今天（避免跨零点请求出现两个"今天"）。
+
+    🔴 项目级风险等级四态互斥：``exception > delayed > warning > normal``，
+       判定单源 = ``business_logic.judge_project_risk``（与 routers/projects.py 详情页共用）。
     """
     # status 不再作为生命周期条件下推，统一取全量项目（big_area_person 下推 SQL 做行级隔离）
     rows = get_all_projects(None, big_area_person)
+    # 基准日：本入口取一次，逐层透传（禁止 SQL CURDATE / 各处 date.today()）
+    today_date = business_today() if today is None else today
 
     # ★ 按调度令月份过滤：口径 = 「创建月」∪「月度调度令快照（dispatch_records）」
     #   历史实现只看 created_at，导致「8/9 月建过的项目在 10 月调度令中再次出现」时
@@ -606,8 +635,7 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
 
     # 风险等级 + 整体进度：基于 node_plans + node_actuals 实时计算（弃用 processes 表）
     from ..services.node_service import enrich_rows, build_exception_anchors
-    from ..services.business_logic import compute_real_overdue
-    today_s = str(business_today())
+    from ..services.business_logic import judge_project_risk, has_active_exception
 
     # 一次性批量查询（消除 N+1：原逻辑每项目 2 次 DB 往返 → 现在全程仅 3 次）
     # v7.4：三处批量查询统一带上当前列表月份 —— 「整体进度 / 风险等级」必须与列表的
@@ -626,8 +654,9 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         seg_map_by_pid = {}
 
     # 异常暂停（2026-10）：批量取回全部项目的异常（含已关闭），避免逐项目 N+1。
-    # 与详情页同口径：未关闭异常 → 该套后续工序暂停（不计逾期/风险）；
-    # 已关闭异常 → 以解决时间重算后续工序计划日（按新计划日判逾期）。
+    # 与详情页同口径：**生效中**异常 → 该套后续工序暂停（不计逾期/风险）；
+    # 已关闭异常 → 以解决时间重算后续工序计划日（按新计划日判逾期）；
+    # 已到期失效（expired）→ 暂停失效、**不**重算计划日（expired ≠ closed），按原计划日判逾期。
     # 缺表/查询失败 → 降级为「无异常」，风险口径回到改动前行为（不阻塞列表）。
     try:
         exc_map_by_pid = get_node_exceptions_batch(all_pids)   # 1 次查询
@@ -714,28 +743,22 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         plans = plans_map.get(pid, [])
         actuals = actuals_map.get(pid, {})
         _dur = durations_map.get(pid)
-        nodes = enrich_rows(plans, actuals, durations=_dur,
+        _exc_rows = exc_map_by_pid.get(pid) or []
+        nodes = enrich_rows(plans, actuals, today_date, durations=_dur,
                             seg_map=seg_map_by_pid.get(pid) or {},
                             exceptions=build_exception_anchors(
-                                exc_map_by_pid.get(pid) or [], _dur, plans))
+                                _exc_rows, _dur, plans, today=today_date))
 
-        # 风险等级：历史逾期 > 今日未完成 > 正常
-        # （未来日期的 in_progress「提前进行中」不算预警；今日 in_progress 须 actual < plan 才算）
-        # 逾期判定规则：只统计「真逾期」（工序累计完成 < 调度令本月计划 的逾期节点）
-        has_overdue = bool(compute_real_overdue(nodes, int(p.get("monthly_plan") or 0)))
-        has_today_unfinished = any(
-            r["status"] == "in_progress"
-            and str(r["plan_date"])[:10] == today_s
-            and r["actual_qty"] < r["plan_qty"]
-            for r in nodes
+        # ---- 风险等级（四态互斥：exception > delayed > warning > normal）----
+        # 🔴 单源 = business_logic.judge_project_risk（与 routers/projects.py 详情页共用同一函数）
+        # 项目级「生效中异常」用 **原始异常表** 判定（不依赖 durations 能否反推所属套）：
+        # 无时长数据的存量项目同样能进 exception 态（PRD 明确口径）。
+        _has_active_exc = has_active_exception(_exc_rows, today_date)
+        p["has_active_exception"] = _has_active_exc
+        p["risk_level"] = judge_project_risk(
+            nodes, int(p.get("monthly_plan") or 0), today_date,
+            has_active_exception=_has_active_exc,
         )
-
-        if has_overdue:
-            p["risk_level"] = "delayed"
-        elif has_today_unfinished:
-            p["risk_level"] = "warning"
-        else:
-            p["risk_level"] = "normal"
 
         # 整体进度：取「附件安装」工序进度
         att_plans = [n for n in plans if n["process_name"] == "附件安装"]
@@ -754,7 +777,8 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         p["remaining_sets"] = max(0, _total - att_actual_qty)
 
     # status 按风险等级在内存过滤（all / None / 其它值 → 不过滤）
-    if status in ("normal", "warning", "delayed"):
+    # 🔴 2026-11：白名单必须含 exception，否则「筛选异常」恒返回空、KPI 与列表对不上。
+    if status in ("normal", "warning", "delayed", "exception"):
         rows = [p for p in rows if p.get("risk_level") == status]
 
     total = len(rows)
@@ -835,15 +859,26 @@ def get_node_exceptions_by_project(project_id: int) -> list[dict]:
         conn.close()
 
 
-def get_open_exception_processes(project_id: int) -> dict[str, int]:
-    """查询项目下**未关闭**异常按工序聚合的数量：{process_name: 数量}。
+def get_open_exception_processes(project_id: int, today=None) -> dict[str, int]:
+    """查询项目下**生效中**异常按工序聚合的数量：{process_name: 数量}。
 
     用于工序卡片显示「存在异常」标签并把该工序置为预警态。
-    - 未关闭 = status 不为 'closed'（pending / processing 都算；NULL 视为未关闭，防御历史脏数据）
+    - 生效中 = status 不为 'closed'（pending / processing 都算；NULL 视为未关闭，防御历史脏数据）
+      **且** (planned_close_date IS NULL OR planned_close_date >= today)
+      —— 已过计划关闭日（expired）的异常暂停失效，不再计入「存在异常」。
+      🔴 today 由 Python 传入，**禁止**在 SQL 里用 CURDATE()（时区/业务日历双口径会漂）。
     - 直接用 node_exceptions.process_name（该列 NOT NULL，提报时写入），
       **不 JOIN process_node_plans**：排产重导会删旧节点，JOIN 会让历史异常查不到
     - 独立工序（累计完成/发运）若有异常也会返回，由调用方决定是否展示
+
+    Args:
+        project_id: 项目 ID
+        today: 基准日（None → 业务时区今天）
+
+    Returns:
+        dict[str, int]: {process_name: 生效中异常数量}
     """
+    today_s = str(today if today is not None else business_today())[:10]
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -853,9 +888,10 @@ def get_open_exception_processes(project_id: int) -> dict[str, int]:
                 FROM node_exceptions
                 WHERE project_id = %s
                   AND (status IS NULL OR status <> 'closed')
+                  AND (planned_close_date IS NULL OR planned_close_date >= %s)
                 GROUP BY process_name
                 """,
-                (project_id,),
+                (project_id, today_s),
             )
             return {row["process_name"]: int(row["cnt"]) for row in cur.fetchall()}
     finally:
@@ -871,6 +907,9 @@ def get_node_exceptions_batch(project_ids: list[int]) -> dict[int, list[dict]]:
     ⚠️ 与 ``get_open_exception_processes`` 同口径：**不 JOIN process_node_plans**
     （排产重导会删旧节点，JOIN 会让历史异常查不到），只按 project_id 过滤。
     缺表/查询失败时抛异常，由调用方决定是否降级（列表页降级为"无异常"）。
+
+    🔴 必须取回 ``planned_close_date``（2026-11）：调用方据此判 active/expired。
+       漏掉该列会让 active 判定在**列表/KPI/排名全域**退化成「永不到期」（到期不失效）。
     """
     if not project_ids:
         return {}
@@ -884,7 +923,7 @@ def get_node_exceptions_batch(project_ids: list[int]) -> dict[int, list[dict]]:
                 fmt = ",".join(["%s"] * len(chunk))
                 cur.execute(
                     f"SELECT id, project_id, node_id, process_name, plan_date, status, "
-                    f"created_at, updated_at, closed_at FROM node_exceptions "
+                    f"created_at, updated_at, closed_at, planned_close_date FROM node_exceptions "
                     f"WHERE project_id IN ({fmt})",
                     tuple(chunk),
                 )
@@ -939,6 +978,29 @@ def get_node_exceptions_by_node(node_id: int) -> list[dict]:
             return [row for row in cur.fetchall()]
     finally:
         conn.close()
+
+
+@_invalidates_dashboard
+def delete_exception_by_id(exception_id: int) -> int:
+    """删除单条异常记录（**仅** node_exceptions 该行，不动实际进度/计划行）。
+
+    桥接根目录 ``database.py`` 的同名函数。
+    ⚠️ 根 database.py 新增函数必须在此同步 re-export，否则 ``db.delete_exception_by_id``
+    抛 AttributeError → FastAPI 默认 500（本项目最高频踩坑点）。
+
+    语义（与业务口径一致）：
+      - 删除异常 = 该异常的「暂停 / 已关闭后重算计划日」影响**同时解除**；
+        判定逻辑（services/business_logic.py）一行不改，下次读取自然回到无异常口径。
+      - 幂等：记录不存在 / 已被删除 → 返回 0（由路由层决定 404）。
+
+    Args:
+        exception_id: 异常记录主键（node_exceptions.id）
+
+    Returns:
+        int: 实际删除行数（1 = 成功，0 = 不存在或已被删除）
+    """
+    from database import delete_exception_by_id as _fn
+    return getattr(_fn, "__wrapped__", _fn)(int(exception_id))
 
 
 # ---------- 用户（认证：大区行级隔离 v5.0） ----------

@@ -41,14 +41,16 @@ const statusColors = {
   overdue: '#e53e3e', done_early: '#0ea5e9', matches_dispatch: '#38a169',
   waiting_material: '#a0aec0',
   exception_paused: '#a0aec0',   // ⏸ 异常暂停（该套前序工序有未关闭异常）
+  exception: '#dd6b20',          // 🟠 异常（第 4 态：该工序当前处于生效中异常）
 }
 const statusBgs = {
   done: '#f0fff4', pending: '#f7fafc', in_progress: '#ebf8ff', warning: '#ebf8ff',
   overdue: '#fff5f5', done_early: '#e0f2fe', matches_dispatch: '#f0fff4',
   waiting_material: '#f7fafc',
   exception_paused: '#f7fafc',
+  exception: '#fffaf0',
 }
-const emojis = { done: '🟢', pending: '⚪', in_progress: '🔵', warning: '🟡', overdue: '🔴', done_early: '✨', matches_dispatch: '✅', waiting_material: '⏸', exception_paused: '⏸' }
+const emojis = { done: '🟢', pending: '⚪', in_progress: '🔵', warning: '🟡', overdue: '🔴', done_early: '✨', matches_dispatch: '✅', waiting_material: '⏸', exception_paused: '⏸', exception: '🟠' }
 const colorOf = (s) => statusColors[s] || '#718096'
 const pillStyle = (s) => ({ background: statusBgs[s] || '#f7fafc', color: statusColors[s] || '#718096' })
 const emojiOf = (s) => emojis[s] || '⚪'
