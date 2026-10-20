@@ -149,7 +149,7 @@ import { importDispatch, previewDispatch } from '../api/node'
 
 const emit = defineEmits(['imported'])
 
-defineProps({
+const props = defineProps({
   disabled: { type: Boolean, default: false },  // 普通账号禁用导入（按钮级权限）
 })
 
@@ -249,6 +249,27 @@ function resetAll() {
   systemFields.value = []
   planMonth.value = ''
 }
+
+/**
+ * 供父组件调用：直接解析一个 Excel 文件（首页折叠行「收起态拖入文件」时使用）。
+ *
+ * 行为与用户在虚线框里点选文件完全一致：回到选文件步骤 → 复位上一轮状态 → 触发预览，
+ * 因此导入逻辑（预览 / 字段映射 / 确认导入）一行未改。
+ *
+ * @param {File} file 拖入的 Excel 文件（.xlsx/.xls）
+ * @returns {Promise<void>}
+ */
+async function previewFile(file) {
+  if (!file) return
+  if (props.disabled) {
+    ElMessage.warning('当前账号无导入权限，请联系管理员')
+    return
+  }
+  resetAll()                       // 上一轮可能停在「确认映射」步骤，先复位再解析
+  await doPreview({ file })
+}
+
+defineExpose({ previewFile })
 </script>
 
 <style scoped>
