@@ -152,7 +152,11 @@
             </div>
           </template>
         </el-tab-pane>
-        <el-tab-pane v-if="!isIndependent" label="📝 填报进度" name="input">
+        <!-- 2026-11 修复：本 pane 此前带 v-if="!isIndependent"，而独立工序（累计完成总数 /
+             累计发运总数）的填报 UI（下方 fill-card / record-card 两个独立分支）**全部在这个
+             pane 内部** → 独立工序根本没有「填报进度」页签，用户无入口可填（线上反馈）。
+             现改为对所有工序渲染；pane 内部的 v-if="isIndependent && ..." 分支自行分流。 -->
+        <el-tab-pane label="📝 填报进度" name="input">
           <!-- 填报模式（四分组手风琴）：⚠️ 内容必须留在本 pane 内部（2026-11 修复）。
                历史写法是把它放在 el-tabs 之外、再用第二个 v-if="innerMode === 'input'" 控制显隐，
                于是同一个页签的「激活态」存在两份互相独立的来源：一旦某次 patch 被中断
@@ -161,9 +165,15 @@
                el-tabs 自己的 v-show（作用在 pane 元素上、先于子节点 patch）负责，物理上不可能与
                其他页签同时可见。 -->
           <div style="font-size:12px; color:#718096; margin-bottom:10px;">
-            {{ auth.isAdmin
-              ? '管理员可为每行指定历史日期补录（含"已完成"组可编辑）；已保存过的节点，日期会沿用上次保存值，无变更提交不会重置为今天。未开始/未填写的节点日期默认当天（不显示历史值）。'
-              : `大区账号仅可填报本大区节点；未填写节点默认当天，填报日期可回填最近 ${BACKFILL_DAYS} 天内的日期（含今天）；已保存过的节点沿用上次保存值（仅限本大区数据）` }}
+            <template v-if="isIndependent">
+              累计填报：每次填写「本次新增套数」（不是累计总数），保存后按填报日期生成一条记录并累加计入累计完成数；
+              上限 = 合同 {{ independentContract }} 套 − 已填报 {{ independentFilled }} 套。「已完成」分组可按日期修改或订正记录{{ auth.isAdmin ? '（管理员不限日期）' : `（日期仅可回填最近 ${BACKFILL_DAYS} 天）` }}。
+            </template>
+            <template v-else>
+              {{ auth.isAdmin
+                ? '管理员可为每行指定历史日期补录（含"已完成"组可编辑）；已保存过的节点，日期会沿用上次保存值，无变更提交不会重置为今天。未开始/未填写的节点日期默认当天（不显示历史值）。'
+                : `大区账号仅可填报本大区节点；未填写节点默认当天，填报日期可回填最近 ${BACKFILL_DAYS} 天内的日期（含今天）；已保存过的节点沿用上次保存值（仅限本大区数据）` }}
+            </template>
           </div>
           <el-segmented v-model="activeGroup" :options="groupOptions" block style="margin-bottom:14px;" />
           <div v-if="groupNodes.length === 0" class="empty-hint">当前分组「{{ groupLabel }}」没有可保存的节点。</div>
@@ -276,9 +286,12 @@
                 </div>
               </div>
             </div>
-            <!-- 11 道排产工序：原有 row-grid 行为（分页展开，避免大量 row-card 一次性渲染导致卡顿） -->
+            <!-- 11 道排产工序：原有 row-grid 行为（分页展开，避免大量 row-card 一次性渲染导致卡顿）
+                 互斥兜底（2026-11）：显式加 !isIndependent —— 独立工序只可能落 today / done 两个分组
+                 （groupOptions 已裁到这两项、打开弹窗强制 activeGroup='today'），万一分组状态异常，
+                 也不会把「排产工序的日期/数量/按段填报/异常提报」混进独立工序。 -->
             <div
-              v-else
+              v-else-if="!isIndependent"
               v-for="node in displayedGroupNodes"
               :key="node.id"
               class="row-card row-grid fill-row"
@@ -435,7 +448,9 @@
           </template>
           <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
             <el-button @click="innerMode = 'detail'">← 返回详情</el-button>
+            <!-- 一键提报仅对 11 道排产工序有意义（批量按行提报计划/日期）；独立工序是单卡累计填报，不渲染 -->
             <el-button
+              v-if="!isIndependent"
               type="warning"
               plain
               :disabled="!auth.canFill || groupNodes.length === 0"
@@ -1121,7 +1136,18 @@ async function save() {
     if (totalSaved > 0) {
       ElMessage.success(`已保存 ${totalSaved} 条节点进度`)
     }
-    if (ok.length) emit('saved')          // 父组件关闭弹窗 + 刷新
+    // 独立工序（累计完成 / 累计发运）：保存后**不关闭弹窗** —— 重新拉取明细，让用户在
+    // 「今日待填报」看到待完成数下降，并能切到「已完成」核对刚生成的日期记录（累计填报天然需要「填→看」闭环）；
+    // 父级工序卡片通过 refresh 事件同步刷新。
+    // 11 道排产工序保持既有行为：saved → 父组件关闭弹窗 + 刷新。
+    if (ok.length) {
+      if (isIndependent.value) {
+        await load()
+        emit('refresh')
+      } else {
+        emit('saved')        // 父组件关闭弹窗 + 刷新
+      }
+    }
   } finally {
     saving.value = false
   }
