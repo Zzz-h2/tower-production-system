@@ -59,7 +59,15 @@
           <template #default="{ row }">{{ fmtQty(row.total_plan) }}</template>
         </el-table-column>
         <el-table-column label="累计完成套数" width="160" align="center">
-          <template #default="{ row }">{{ fmtQty(row.total_actual) }}</template>
+          <template #default="{ row }">
+            <!-- 今日有新增 → 数字右侧极小 ↑（悬停显示「YYYY-MM-DD 新增 N 套」）；无新增则不显示 -->
+            <el-tooltip v-if="todayIncrement(row) > 0" placement="top" :content="todayTip(row)">
+              <span class="actual-cell is-today">
+                {{ fmtQty(row.total_actual) }}<span class="today-up">↑</span>
+              </span>
+            </el-tooltip>
+            <span v-else class="actual-cell">{{ fmtQty(row.total_actual) }}</span>
+          </template>
         </el-table-column>
         <el-table-column label="完成率" min-width="300" align="center">
           <template #default="{ row }">
@@ -151,6 +159,18 @@ const stats = computed(() => {
 const fmtQty = (v) => (v === null || v === undefined ? '0' : Number(v).toLocaleString())
 const rateColor = (rate) => (rate >= 100 ? '#38a169' : rate < 60 ? '#e53e3e' : '#ed8936')
 
+// ── 今日新增（v7.8）：后端 /ranking/production 返回 today_increment + today ──
+// today_increment = 该负责人名下『附件安装』中「最后一次填报日期 = 业务今日」的实际完成量之和；
+// > 0 才在「累计完成套数」旁显示 ↑（无新增保持简洁，不给每条都挂箭头）。
+const todayIncrement = (row) => {
+  const n = Number(row?.today_increment)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+const todayTip = (row) => `${row?.today || '今日'} 新增 ${fmtQty(todayIncrement(row))} 套`
+// ⚠️ 口径如实标注（tooltip 第二行灰字）：库里没有填报流水表，node_actual_progress 是
+// 覆盖式保存（report_date = 最后一次填报日期、actual_qty = 该节点累计值），
+// 故这里统计的是「最后一次填报发生在今天的节点累计量」，同一节点跨天分批填报时会偏高。
+
 // 详情
 const detailVisible = ref(false)
 const detailPerson = ref('')
@@ -196,6 +216,28 @@ onMounted(load)
 .block-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px 20px; }
 .block-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .block-title { font-size: 15px; font-weight: 600; color: #1a365d; }
+/* 「累计完成套数」单元：数字 + 今日新增 ↑
+   箭头刻意做小（12px / #38a169），不抢数字视觉；仅在今日有新增时渲染。
+   箭头用绝对定位悬浮在数字右侧 → 有无箭头都不影响数字的居中位置（列内数字始终对齐）。 */
+.actual-cell {
+  position: relative;
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+}
+.actual-cell.is-today { cursor: help; }
+.today-up {
+  position: absolute;
+  /* 与数字拉开一点（4px → 8px），避免挤在一起 */
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-58%);
+  font-size: 14px;
+  line-height: 1;
+  /* 加深一档（#38a169 → #2f855a），在浅底表头下更实 */
+  color: #2f855a;
+  font-weight: 800;
+  opacity: .9;
+}
 /* 详情弹窗表格：表头与单元格强制单行，避免短文本被竖排 */
 .detail-dialog-table th.el-table__cell,
 .detail-dialog-table td.el-table__cell {

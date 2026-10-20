@@ -271,3 +271,39 @@ def save_segment_progress(pid: int, process_name: str, req: SaveSegmentRequest,
 
     db.upsert_node_segment(pid, req.node_id, req.segment_total, req.segment_done)
     return {"ok": True}
+
+
+@router.delete("/{pid}/nodes/{process_name}/segments/{node_id}")
+def cancel_segment_progress(pid: int, process_name: str, node_id: int,
+                            user: dict = Depends(get_current_user)):
+    """取消按段提报：清除某套（计划行）的按段进度记录，该行回落到整行填报口径。
+
+    - 行级隔离：big_area 用户仅可操作本大区项目（非本区 404 防探测）；admin 全量；
+    - 只删除 node_segment_progress 中该 node_plan_id 的记录（一行最多一条，uk_node_seg）；
+    - **不改动 process_node_actuals**：actual_qty / report_date 是已发生的既成事实，
+      取消按段只是不再按段展示与按段判定，该行状态由后端按 actual_qty 走常规判定
+      （segment_active 消失 → 逾期/进行中/未开始等常规口径自然生效）；
+    - 归属校验与 save-segments 完全一致：计划行必须属于该项目 + 该工序；
+    - 幂等：本来没有按段记录时返回 deleted=0，不报错（避免重复点击造成 404 噪音）。
+    """
+    project = db.get_project_by_id(pid)
+    require_project_access(project, user)
+
+    # 计划行归属校验（防跨项目/跨工序误删）
+    plan = db.get_node_plan_by_id(node_id)
+    if not plan:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NODE_NOT_FOUND",
+                    "message": f"计划行 {node_id} 不存在"},
+        )
+    if int(plan.get("project_id") or 0) != int(pid) \
+            or str(plan.get("process_name") or "") != str(process_name):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "NODE_MISMATCH",
+                    "message": f"计划行 {node_id} 不属于项目 {pid} 的工序「{process_name}」"},
+        )
+
+    deleted = db.delete_node_segment(pid, node_id)
+    return {"ok": True, "deleted": deleted}

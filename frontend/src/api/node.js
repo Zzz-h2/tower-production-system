@@ -65,6 +65,12 @@ export const saveNodeProgress = (pid, processName, payload) =>
 export const saveSegmentProgress = (pid, processName, payload) =>
   http.post(`/projects/${pid}/nodes/${encodeURIComponent(processName)}/save-segments`, payload)
 
+// 取消按段提报：清除该计划行的按段进度记录，该行回到整行填报口径。
+// 只删 node_segment_progress，不改 actual_qty / report_date（已完成套数是既成事实）。
+// 返回 { ok: true, deleted: 0|1 }（本来没有记录时 deleted=0，幂等不报错）
+export const cancelSegmentProgress = (pid, processName, nodeId) =>
+  http.delete(`/projects/${pid}/nodes/${encodeURIComponent(processName)}/segments/${nodeId}`)
+
 // 多负责人管理（v6.0）
 // v7.4：可带 month，使 plan_rows / has_imported 表示「该负责人本月是否已导入排产」
 export const fetchProjectManagers = (pid, month) =>

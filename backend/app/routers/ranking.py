@@ -33,8 +33,17 @@ def api_production_ranking(month: str = None, user: dict = Depends(get_current_u
     """出品排名：按交付负责人聚合当月『附件安装』出品并排名。
 
     行级隔离：big_area 用户仅统计本大区项目；admin 全量。
+
+    v7.8：每行附加 ``today_increment``（今日新增完成套数，仅供前端「累计完成套数 ↑」
+    提示）+ ``today``（业务日）。业务日由 Python 侧 ``business_today()`` 显式传入，
+    走 SQL 参数绑定而**不用 CURDATE()**，避免数据库时区与业务时区不一致。
+    完成率等既有口径（累计完成 ÷ 累计计划）一律不变。
     """
-    return get_production_ranking(_valid_month(month), big_area_person=get_scope_big_area(user))
+    return get_production_ranking(
+        _valid_month(month),
+        big_area_person=get_scope_big_area(user),
+        today=business_today(),
+    )
 
 
 @router.get("/ranking/production/detail")

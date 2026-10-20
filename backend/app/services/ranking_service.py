@@ -33,7 +33,23 @@ def _month_range(month: str) -> tuple[str, str]:
     return f"{y}-{m:02d}-01", f"{y}-{m + 1:02d}-01"
 
 
-def get_production_ranking(month: str, big_area_person: str | None = None) -> list[dict]:
+def _today_str(today: date | str | None = None) -> str:
+    """把业务日统一成 'YYYY-MM-DD'（None → business_today()）。
+
+    全项目单一时间来源：业务时区由 ``core.timeutil`` 决定，**SQL 中禁止 CURDATE()**
+    （数据库服务器时区可能与业务时区 Asia/Shanghai 不一致，导致「今日」错位）。
+    """
+    if today is None:
+        today = business_today()
+    if isinstance(today, datetime):
+        return today.strftime("%Y-%m-%d")
+    if isinstance(today, date):
+        return today.strftime("%Y-%m-%d")
+    return str(today)[:10]
+
+
+def get_production_ranking(month: str, big_area_person: str | None = None,
+                           today: date | str | None = None) -> list[dict]:
     """返回按完成率降序的负责人排名列表（v6.0 多负责人：每位负责人独立一行）。
 
     month 形如 '2026-08'。
@@ -47,11 +63,15 @@ def get_production_ranking(month: str, big_area_person: str | None = None) -> li
     - project_count = 该负责人当月涉及的项目数（去重）。
     排名：完成率降序（None 排最后）→ 计划套数降序 → 负责人升序。
     big_area_person: 大区负责人（大区行级隔离；admin 传 None 看全量）。
+    today: 业务日（'YYYY-MM-DD' 或 date）；None → 取 business_today()。
+       仅用于计算展示字段 today_increment，**不参与**任何计划/完成/完成率的计算。
 
     返回字段：manager / delivery_person(=manager 兼容别名) / total_plan / total_actual /
-              completion_rate / project_count / rank。
+              completion_rate / project_count / rank /
+              today_increment（今日新增完成套数，v7.8）/ today（业务日 'YYYY-MM-DD'）。
     """
-    manager_rows = db.get_ranking_manager_rows_by_month(month, big_area_person)
+    today_s = _today_str(today)
+    manager_rows = db.get_ranking_manager_rows_by_month(month, big_area_person, today_s)
 
     # 按负责人聚合：同一负责人名下跨多个项目汇总
     agg: dict[str, dict] = {}
@@ -63,10 +83,12 @@ def get_production_ranking(month: str, big_area_person: str | None = None) -> li
             "manager": mgr,
             "total_plan": 0,
             "total_actual": 0,
+            "today_increment": 0,
             "project_ids": set(),
         })
         bucket["total_plan"] += int(r.get("total_plan") or 0)
         bucket["total_actual"] += int(r.get("total_actual") or 0)
+        bucket["today_increment"] += int(r.get("today_actual") or 0)
         bucket["project_ids"].add(int(r.get("project_id")))
 
     rows = []
@@ -81,6 +103,9 @@ def get_production_ranking(month: str, big_area_person: str | None = None) -> li
             "total_actual": actual,
             "completion_rate": rate,   # None 表示分母为零
             "project_count": len(b["project_ids"]),
+            # v7.8：今日新增（仅展示用，>0 时前端在「累计完成套数」旁显示 ↑）
+            "today_increment": b["today_increment"],
+            "today": today_s,
         })
 
     # 排序：完成率降序（None 排最后）→ 计划套数降序 → 负责人升序
