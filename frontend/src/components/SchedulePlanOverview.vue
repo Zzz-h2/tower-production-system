@@ -80,40 +80,45 @@
         <span class="block-hint">含「本月未上传 · 上次上传 X 月」与「从未上传」两类，请按需补传；已手动完成的项目已单独归入下方「手动完成」分组</span>
       </div>
       <el-table :data="notUploadedList" style="width: 100%" :row-style="{ height: '48px' }">
+        <!-- 2026-11 列宽演进：定宽收紧 → 用户反馈"名称与机号之间空白太大"。
+             根因：名称是唯一 flex 列独吞剩余 ~494px，内容限宽 320 后空白留在格内。
+             现内容列全部改 min-width —— el-table(fit) 按 min-width 比例均分剩余宽度，
+             各列均匀变宽、内容互相靠近；超长仍走省略号/换行。操作列保持固定宽贴最右。 -->
         <el-table-column label="项目名称" min-width="240">
           <template #default="{ row }">
             <a class="proj-link" @click="goDetail(row)">{{ row.project_name }}</a>
           </template>
         </el-table-column>
-        <el-table-column label="机号" prop="machine_type" width="100">
+        <el-table-column label="机号" prop="machine_type" min-width="130" show-overflow-tooltip>
           <template #default="{ row }">{{ row.machine_type || '-' }}</template>
         </el-table-column>
-        <el-table-column label="塔筒厂家" prop="factory_name" min-width="140" />
-        <el-table-column label="交付负责人" prop="delivery_person" width="110" />
-        <el-table-column label="计划开工 → 交付" min-width="200">
-          <template #default="{ row }">
-            {{ row.plan_start_date || '-' }} → {{ row.plan_end_date || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="上次上传" width="140">
+        <el-table-column label="塔筒厂家" prop="factory_name" min-width="130" show-overflow-tooltip />
+        <el-table-column label="交付负责人" prop="delivery_person" min-width="90" show-overflow-tooltip />
+        <el-table-column label="上次上传" min-width="110" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.schedule_upload_month" class="last-month">{{ row.schedule_upload_month }}</span>
             <span v-else-if="row.has_schedule_plan_ever" class="last-month muted">历史数据（月份未标记）</span>
             <span v-else class="last-month muted">从未上传</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" min-width="90">
           <template #default="{ row }">
             <span class="st-pill" style="background:#fffaf0; color:#ed8936;">
               {{ row.has_schedule_plan_ever ? '本月未上传' : '未上传' }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="210" fixed="right">
+        <!-- 2026-11 交互调整：① 表头「操作」居中于按钮组正上方（列宽收窄到按钮组实际宽度 + align="center"）；
+             ② 按钮组整体贴住右边框（td.op-col .cell 改 flex + justify-content:flex-end + 收窄右内边距）；
+             ③ 浅色小框包住按钮组，视觉上明确“这是一组操作”（边 #e2e8f0 / 底 #f8fafc，与页面色板一致）。
+             三表操作列均已统一为此样式。 -->
+        <el-table-column label="操作" width="190" align="center" fixed="right" class-name="op-col">
           <template #default="{ row }">
-            <el-button size="small" type="primary" plain :disabled="!auth.canEdit" @click="openImport(row)">导入</el-button>
-            <el-button size="small" @click="goDetail(row)">查看</el-button>
-            <el-button size="small" type="warning" plain disabled title="预警功能即将上线">预警</el-button>
+            <div class="op-group">
+              <el-button size="small" type="primary" plain :disabled="!auth.canEdit" @click="openImport(row)">导入</el-button>
+              <el-button size="small" @click="goDetail(row)">查看</el-button>
+              <el-button size="small" type="warning" plain disabled title="预警功能即将上线">预警</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -129,22 +134,21 @@
         <span class="block-hint">提前完工且无排产计划，已由管理员手动补录产出（占位行 process_order=99）；无需再上传排产</span>
       </div>
       <el-table :data="manualDoneList" style="width: 100%" :row-style="{ height: '48px' }">
+        <!-- 2026-11 排版统一（与「未上传排产计划」表同标准）：
+             名称列内容 max-width 320 换行（见 .proj-link）；机号 show-overflow-tooltip 单行省略
+             （多机型拼接串靠加宽救不了，省略+悬停看全是唯一正解）；操作列同款 .op-group 小框。
+             内容列全部 min-width 均分剩余宽度（同未上传表）。 -->
         <el-table-column label="项目名称" min-width="240">
           <template #default="{ row }">
             <a class="proj-link" @click="goDetail(row)">{{ row.project_name }}</a>
           </template>
         </el-table-column>
-        <el-table-column label="机号" prop="machine_type" width="100">
+        <el-table-column label="机号" prop="machine_type" min-width="130" show-overflow-tooltip>
           <template #default="{ row }">{{ row.machine_type || '-' }}</template>
         </el-table-column>
-        <el-table-column label="塔筒厂家" prop="factory_name" min-width="140" />
-        <el-table-column label="交付负责人" prop="delivery_person" width="110" />
-        <el-table-column label="计划开工 → 交付" min-width="200">
-          <template #default="{ row }">
-            {{ row.plan_start_date || '-' }} → {{ row.plan_end_date || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="完成归属月" width="140">
+        <el-table-column label="塔筒厂家" prop="factory_name" min-width="130" show-overflow-tooltip />
+        <el-table-column label="交付负责人" prop="delivery_person" min-width="90" show-overflow-tooltip />
+        <el-table-column label="完成归属月" min-width="110">
           <template #default="{ row }">
             <div class="mc-cell">
               <span class="st-pill" style="background:#ebf8ff; color:#3182ce;">手动完成</span>
@@ -152,10 +156,10 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="整体进度" width="100">
+        <el-table-column label="整体进度" min-width="100">
           <template #default="{ row }">{{ Number(row.progress_pct || 0).toFixed(1) }}%</template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" min-width="90">
           <template #default="{ row }">
             <span
               class="st-pill"
@@ -164,11 +168,14 @@
             >手动完成</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="170" fixed="right">
+        <!-- 操作列：2 钮小框（导入/查看）≈114px + 右内边距 → 列宽 130，表头中心与按钮组中心偏差 ~4px -->
+        <el-table-column label="操作" width="130" align="center" fixed="right" class-name="op-col">
           <template #default="{ row }">
-            <el-button size="small" type="primary" plain :disabled="!auth.canEdit"
-                       title="如需补传排产计划可点击导入" @click="openImport(row)">导入</el-button>
-            <el-button size="small" @click="goDetail(row)">查看</el-button>
+            <div class="op-group">
+              <el-button size="small" type="primary" plain :disabled="!auth.canEdit"
+                         title="如需补传排产计划可点击导入" @click="openImport(row)">导入</el-button>
+              <el-button size="small" @click="goDetail(row)">查看</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -183,36 +190,37 @@
         <el-tag type="success" size="small">{{ uploadedList.length }}</el-tag>
       </div>
       <el-table :data="uploadedList" style="width: 100%" :row-style="{ height: '48px' }">
+        <!-- 2026-11 排版统一（与「未上传排产计划」表同标准）：名称 max-width 换行、
+             机号/厂家/负责人单行省略、操作列 3 钮小框（重新导入/查看/预警）。
+             内容列全部 min-width 均分剩余宽度（同未上传表）。 -->
         <el-table-column label="项目名称" min-width="240">
           <template #default="{ row }">
             <a class="proj-link" @click="goDetail(row)">{{ row.project_name }}</a>
           </template>
         </el-table-column>
-        <el-table-column label="机号" prop="machine_type" width="100">
+        <el-table-column label="机号" prop="machine_type" min-width="130" show-overflow-tooltip>
           <template #default="{ row }">{{ row.machine_type || '-' }}</template>
         </el-table-column>
-        <el-table-column label="塔筒厂家" prop="factory_name" min-width="140" />
-        <el-table-column label="交付负责人" prop="delivery_person" width="110" />
-        <el-table-column label="计划开工 → 交付" min-width="200">
-          <template #default="{ row }">
-            {{ row.plan_start_date || '-' }} → {{ row.plan_end_date || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="上传归属月" width="130">
+        <el-table-column label="塔筒厂家" prop="factory_name" min-width="130" show-overflow-tooltip />
+        <el-table-column label="交付负责人" prop="delivery_person" min-width="90" show-overflow-tooltip />
+        <el-table-column label="上传归属月" min-width="110">
           <template #default="{ row }">
             <span class="last-month">{{ row.schedule_upload_month || monthLabel }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" min-width="90">
           <template #default="{ row }">
             <span class="st-pill" style="background:#f0fff4; color:#38a169;">已上传</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="230" fixed="right">
+        <!-- 操作列：3 钮小框（重新导入/查看/预警）≈191px + 右内边距 → 列宽 210，偏差 ~6px -->
+        <el-table-column label="操作" width="210" align="center" fixed="right" class-name="op-col">
           <template #default="{ row }">
-            <el-button size="small" type="primary" plain :disabled="!auth.canEdit" @click="openImport(row)">重新导入</el-button>
-            <el-button size="small" @click="goDetail(row)">查看</el-button>
-            <el-button size="small" type="warning" plain disabled title="预警功能即将上线">预警</el-button>
+            <div class="op-group">
+              <el-button size="small" type="primary" plain :disabled="!auth.canEdit" @click="openImport(row)">重新导入</el-button>
+              <el-button size="small" @click="goDetail(row)">查看</el-button>
+              <el-button size="small" type="warning" plain disabled title="预警功能即将上线">预警</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -431,8 +439,36 @@ onMounted(async () => {
 .mc-sub { font-size: 11px; color: #a0aec0; }
 .last-month { font-size: 12px; color: #4a5568; }
 .last-month.muted { color: #a0aec0; }
-.proj-link { color: #3182ce; cursor: pointer; font-weight: 500; }
+.proj-link {
+  color: #3182ce; cursor: pointer; font-weight: 500;
+  /* 2026-11 用户要求：名称到一定长度就换行，不要一行拉到底。
+     限制内容最大宽度 320px（列的 flex 机制不动，避免全固定列后右侧留白）；
+     word-break 防长串字母/数字溢出。三个分组表格的名称列共用此类。 */
+  display: inline-block;
+  max-width: 320px;
+  word-break: break-word;
+}
 .proj-link:hover { text-decoration: underline; }
+/* 「未上传排产计划」操作列：按钮组浅色小框 + 贴右 + 表头居中（2026-11 交互调整）
+   实现：列挂 class-name="op-col"（th/td 都会带上），但 flex 靠右规则**只作用于 td**——
+   若写成 .op-col .cell 会把表头“操作”也推到右边，破坏 align="center" 的表头居中。
+   列宽 190 ≈ 按钮组实际宽度（3 个 small 按钮 + gap/padding/边框 = 170）+ 两侧留白，
+   表头中心与按钮组中心偏差仅 ~6px，视觉上即为正上方。 */
+.schedule-overview :deep(td.op-col .cell) {
+  display: flex;
+  justify-content: flex-end;   /* 按钮组贴住单元格右缘（靠近表格右边框） */
+  padding-right: 4px;          /* 右内边距收窄，让小框尽量贴近边框又不顶死 */
+}
+.op-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;                    /* 间距交给 gap，覆盖 el-button 相邻默认 12px 左边距 */
+  padding: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.op-group .el-button + .el-button { margin-left: 0; }
 .import-dialog-actions {
   display: flex;
   justify-content: flex-end;
