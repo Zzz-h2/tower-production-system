@@ -156,17 +156,20 @@
         >手动添加项目</el-button>
       </div>
       <el-table v-if="store.projects.length || store.loading" :data="store.projects" v-loading="store.loading" stripe>
-        <el-table-column prop="project_name" label="项目名称" min-width="180" />
-        <el-table-column prop="machine_type" label="机型" min-width="120" />
-        <el-table-column prop="factory_name" label="钢塔厂家" min-width="140" />
-        <el-table-column prop="contract_count" label="合同总数" width="100" align="right">
+        <!-- 列对齐规范（2026-10）：除「项目名称」左对齐外，其余列统一居中——
+             表头与内容同列居中，视觉上文字正对列名下方。 -->
+        <el-table-column prop="project_name" label="项目名称" min-width="220" align="left" />
+        <el-table-column prop="machine_type" label="机型" min-width="120" align="center" />
+        <el-table-column prop="factory_name" label="钢塔厂家" min-width="140" align="center" />
+        <el-table-column prop="contract_count" label="合同总数" width="100" align="center">
           <template #default="{ row }">
             <span>{{ row.contract_count ?? '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="last_month_output" label="截止上月" width="100" align="right" />
-        <el-table-column prop="monthly_plan" label="本月计划" width="100" align="right" />
-        <el-table-column label="整体进度" width="180" align="center">
+        <el-table-column prop="last_month_output" label="截止上月" width="100" align="center" />
+        <el-table-column prop="monthly_plan" label="本月计划" width="100" align="center" />
+        <!-- 整体进度：宽度 180 → 210（原宽度下「进度条 + 百分比」溢出使 100.0% 换行） -->
+        <el-table-column label="整体进度" width="210" align="center">
           <template #default="{ row }">
             <div class="progress-cell">
               <el-progress
@@ -180,18 +183,18 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="delivery_person" label="交付负责人" width="120" />
-        <el-table-column prop="big_area_person" label="大区负责人" width="120">
+        <el-table-column prop="delivery_person" label="交付负责人" width="120" align="center" />
+        <el-table-column prop="big_area_person" label="大区负责人" width="120" align="center">
           <template #default="{ row }">
             <span class="region-cell">{{ row.big_area_person || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="风险状态" width="100">
+        <el-table-column label="风险状态" width="100" align="center">
           <template #default="{ row }">
             <span class="status-pill" :style="riskStyle(row.risk_level)">{{ riskLabel(row.risk_level) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="remarks" label="备注" min-width="160" show-overflow-tooltip>
+        <el-table-column prop="remarks" label="备注" min-width="160" align="center" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="remark-cell">{{ row.remarks || '—' }}</span>
           </template>
@@ -711,19 +714,23 @@ onMounted(async () => {
 .progress-cell {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;              /* 12→8：与百分比拉开但不浪费横向空间 */
   justify-content: center;
+  white-space: nowrap;   /* 整块不换行（关键：原 100.0% 被挤成两行） */
 }
 .list-progress {
-  width: 120px;          /* 加宽，保证填充比例视觉可见 */
+  width: 108px;          /* 120→108：给百分比留出安全宽度 */
+  flex: 0 0 auto;
   display: inline-block;
 }
 .progress-text {
   font-size: 13px;
   color: #1a365d;
   font-weight: 500;
-  min-width: 44px;
+  min-width: 52px;       /* 44→52：容纳 "100.0%" 完整宽度 */
   text-align: right;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 /* 操作列：三个按钮强制同一行 */
