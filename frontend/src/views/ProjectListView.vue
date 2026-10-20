@@ -33,11 +33,15 @@
             <span class="block-subtitle">按月度调度令建项目 · 实时跟踪各风场塔筒生产进度与风险</span>
           </div>
 
-    <!-- ② 概览指标卡区 -->
+    <!-- ② 概览指标卡区（2026-11：4 → 5 卡，在「预警」与「延期」之间插入第 4 态「异常」） -->
     <div class="kpi-row">
       <div class="kpi-card">
         <div class="kpi-value">{{ stats.total_projects }}</div>
         <div class="kpi-label">在产项目总数</div>
+      </div>
+      <div class="kpi-card kpi-exception">
+        <div class="kpi-value" style="color:#dd6b20;">{{ stats.exception_projects }}</div>
+        <div class="kpi-label">异常项目</div>
       </div>
       <div class="kpi-card kpi-warning">
         <div class="kpi-value" style="color:#f6ad55;">{{ stats.warning_projects }}</div>
@@ -53,14 +57,30 @@
       </div>
     </div>
 
-    <!-- ③ 导入月度调度令卡片 -->
-    <div class="block-card">
-      <div class="block-header">
+    <!-- ③ 导入月度调度令（可折叠行：默认收起，整行点击展开/收起，交互语言同「填报进度」行） -->
+    <div class="block-card import-card">
+      <div
+        class="block-header import-header"
+        :class="{ 'is-open': importOpen, 'is-drag-over': importDragging }"
+        @click="importOpen = !importOpen"
+        @dragover="onImportDragOver"
+        @dragleave="onImportDragLeave"
+        @drop="onImportDrop"
+      >
         <span class="icon"></span>
-        <span class="block-title">导入月度调度令</span>
-        <span class="block-subtitle">通过 Excel 批量创建项目（必填：项目名称/钢塔厂家/本月计划/交付负责人）</span>
+        <span class="block-title">📥 导入月度调度令</span>
+        <span class="import-hint">{{ importHint }}</span>
+        <span class="import-caret" :class="{ 'is-open': importOpen }"></span>
       </div>
-      <DispatchImport :disabled="!auth.canEdit" @imported="onDispatchImported" />
+      <!-- 展开区：@click.stop 隔离，区内控件操作不触发行折叠 -->
+      <div v-show="importOpen" class="import-body" @click.stop>
+        <div class="import-desc">通过 Excel 批量创建项目（必填：项目名称/钢塔厂家/本月计划/交付负责人）</div>
+        <DispatchImport
+          ref="dispatchImportRef"
+          :disabled="!auth.canEdit"
+          @imported="onDispatchImported"
+        />
+      </div>
     </div>
 
     <!-- ④ 搜索/筛选栏卡片 -->
@@ -228,7 +248,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy, Calendar, Download } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -255,6 +275,73 @@ function handleViewSwitch(index) {
   activeView.value = index
 }
 
+// ============================================================
+// ③ 导入月度调度令：折叠行（默认收起，节省首屏空间）
+// ------------------------------------------------------------
+// 交互语言与项目详情页「填报进度」行完全一致：
+//   整行可点 → 展开/收起；hover 背景微变 + cursor:pointer；折叠三角旋转 180°；
+//   展开区内的控件用 @click.stop 隔离，操作控件不会误触行折叠。
+// 顺带支持「收起态直接拖入 Excel」：自动展开 → 立刻解析（省去先展开再点选的两步）。
+// ============================================================
+const importOpen = ref(false)        // 默认收起（不持久化：每次进首页保持简洁）
+const importDragging = ref(false)    // 拖拽悬停高亮（仅在拖着文件经过该行时）
+const dispatchImportRef = ref(null)  // DispatchImport 组件实例（收起态拖入时直接触发解析）
+
+const importHint = computed(() => {
+  if (importDragging.value) return '松开即导入该 Excel 文件'
+  if (importOpen.value) return '点击收起导入区'
+  return '点击展开 / 拖拽 Excel 到此处导入'
+})
+
+/** 从 DataTransfer 中取第一个 Excel 文件（.xlsx/.xls）；没有则返回 null。 */
+function pickExcelFile(event) {
+  const files = event?.dataTransfer?.files
+  if (!files || !files.length) return null
+  for (const file of files) {
+    if (/\.(xlsx|xls)$/i.test(file.name || '')) return file
+  }
+  return null
+}
+
+/** 拖拽内容是否含文件（用于判断要不要接管 dragover/drop）。 */
+function isFileDrag(event) {
+  const types = event?.dataTransfer?.types
+  return !!types && Array.from(types).includes('Files')
+}
+
+// dragover 必须 preventDefault 才允许 drop（收起态也能直接拖入）
+function onImportDragOver(event) {
+  if (!isFileDrag(event)) return
+  event.preventDefault()
+  event.dataTransfer.dropEffect = 'copy'
+  importDragging.value = true
+}
+
+function onImportDragLeave(event) {
+  // 只有真正离开整行才取消高亮（子元素之间移动会反复触发 leave）
+  if (event?.currentTarget?.contains?.(event.relatedTarget)) return
+  importDragging.value = false
+}
+
+async function onImportDrop(event) {
+  if (!isFileDrag(event)) return
+  event.preventDefault()
+  importDragging.value = false
+  const file = pickExcelFile(event)
+  if (!file) {
+    ElMessage.warning('请拖入 .xlsx / .xls 格式的调度令文件')
+    return
+  }
+  if (!auth.canEdit) {
+    ElMessage.warning('当前账号无导入权限，请联系管理员')
+    return
+  }
+  // 收起态拖入 → 先展开，等 DOM 渲染完再把文件交给 DispatchImport 解析
+  importOpen.value = true
+  await nextTick()
+  dispatchImportRef.value?.previewFile?.(file)
+}
+
 // 首页总览 KPI（字段与 /api/dashboard/stats 一致）
 const stats = computed(() => store.dashboard)
 
@@ -273,6 +360,7 @@ const filterForm = reactive({
 const statusOptions = [
   { label: '全部', value: 'all' },
   { label: '正常', value: 'normal' },
+  { label: '异常', value: 'exception' },
   { label: '预警', value: 'warning' },
   { label: '延期', value: 'delayed' },
 ]
@@ -287,9 +375,11 @@ const totalPages = computed(() =>
 // 交付负责人下拉项：使用全量列表（store.allPersons），与当前筛选结果隔离
 // （旧实现基于当前表格行推导，会被筛选结果污染，已移除）
 
-// 风险状态四色（normal 绿 / warning 黄 / delayed 红 / 未开始灰）
+// 风险状态四色（normal 绿 / exception 实心橙 / warning 黄 / delayed 红）
+// exception 用**实心橙底白字**：与预警（淡黄底深黄字）区分层级——异常是第 4 态、优先级最高。
 const riskColors = {
   normal: ['#f0fff4', '#38a169', '正常'],
+  exception: ['#dd6b20', '#ffffff', '异常'],
   warning: ['#fffff0', '#d69e2e', '预警'],
   delayed: ['#fff5f5', '#e53e3e', '延期'],
 }
@@ -391,16 +481,18 @@ async function onExport() {
   try {
     const res = await fetchExportProjects(store.filters.month)
     const rows = (res.items || res.data?.items || [])
-    const header = [['项目名称', '机型', '钢塔厂家', '合同总数', '截至上月进度', '本月计划', '整体进度(%)', '交付负责人', '大区负责人']]
+    const header = [['项目名称', '机型', '钢塔厂家', '合同总数', '截至上月进度', '本月计划', '整体进度(%)', '交付负责人', '大区负责人', '风险状态']]
     const body = rows.map(r => [
       r.project_name, r.machine_type, r.factory_name, r.contract_count ?? '',
       r.last_month_output, r.monthly_plan,
       (Number(r.progress_pct) || 0).toFixed(1), r.delivery_person, r.big_area_person,
+      // 风险状态：与列表 pill 同一套文案（后端 risk_level 单源，四态互斥）
+      (riskColors[r.risk_level] || riskColors.normal)[2],
     ])
     const ws = XLSX.utils.aoa_to_sheet([...header, ...body])
     ws['!cols'] = [
       { wch: 26 }, { wch: 14 }, { wch: 18 }, { wch: 12 },
-      { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 12 },
+      { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 10 },
     ]
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, '生产进度总览')
@@ -536,14 +628,58 @@ onMounted(async () => {
 .page-title { margin-bottom: 16px; }
 .kpi-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);   /* 2026-11：4 → 5 卡（新增「异常项目」） */
   gap: 16px;
   margin-bottom: 16px;
 }
+.kpi-exception { border-top: 3px solid #dd6b20; }
 .kpi-warning { border-top: 3px solid var(--color-warning); }
 .kpi-delayed { border-top: 3px solid var(--color-red); }
 .kpi-blue { border-top: 3px solid var(--color-blue); }
 .add-btn { margin-left: auto; }
+/* === ③ 导入月度调度令：折叠行（2026-10 界面优化） ===
+   收起态 = 卡片内只有一行标题；展开态 = 标题 + 原有导入控件。
+   hover 背景 / cursor / 三角旋转与项目详情页「填报进度」行同一套语言。 */
+.import-card { padding: 0; }          /* 内边距交给行与展开区各自持有，hover 底色才能铺满整张卡 */
+.import-header {
+  padding: 16px 24px;
+  margin-bottom: 0;
+  cursor: pointer;
+  border-radius: 12px;
+  transition: background-color .12s, box-shadow .12s;
+  user-select: none;
+}
+.import-header:hover { background: #f9fbfd; }
+.import-header.is-open { background: #fbfdff; }
+.import-header.is-open:hover { background: #f4f9fd; }
+/* 拖拽悬停：整行高亮 + 内描边，提示「可以松手导入」 */
+.import-header.is-drag-over,
+.import-header.is-drag-over:hover {
+  background: #ebf8ff;
+  box-shadow: inset 0 0 0 2px #3182ce;
+}
+.import-hint {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--color-sub);
+  white-space: nowrap;
+}
+.import-header.is-drag-over .import-hint { color: #2b6cb0; font-weight: 600; }
+/* 折叠三角：CSS 边框画（与 ProcessDetailDialog 的 .fill-row-caret 同一手法），展开时旋转 180° */
+.import-caret {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #a0aec0;
+  transition: transform .15s, border-top-color .15s;
+  flex-shrink: 0;
+}
+.import-header:hover .import-caret { border-top-color: #4a5568; }
+.import-caret.is-open { transform: rotate(180deg); border-top-color: #2b6cb0; }
+.import-body { padding: 2px 24px 20px; }
+.import-desc { font-size: 13px; color: var(--color-sub); margin-bottom: 12px; }
+
 .page-bar { display: flex; align-items: center; gap: 12px; }
 .page-info { margin-left: auto; color: var(--color-sub); font-size: 13px; }
 .progress-cell {

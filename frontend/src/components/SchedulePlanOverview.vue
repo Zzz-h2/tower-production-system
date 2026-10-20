@@ -16,7 +16,7 @@
       </div>
       <div class="kpi-card">
         <div class="kpi-value" style="color:#3182ce;">{{ manualDoneCount }}</div>
-        <div class="kpi-label">{{ monthLabel }}手动完成（免传）</div>
+        <div class="kpi-label">{{ monthLabel }}手动完成</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-value">{{ monthDueCount }}</div>
@@ -77,7 +77,7 @@
         <span class="section-dot" style="background:#ed8936;"></span>
         <span class="block-title" style="color:#ed8936;">{{ monthLabel }}未上传排产计划</span>
         <el-tag type="warning" size="small">{{ notUploadedList.length }}</el-tag>
-        <span class="block-hint">含「本月未上传 · 上次上传 X 月」与「从未上传」两类，请按需补传；已手动完成的项目已单独归入下方「手动完成（免传）」分组</span>
+        <span class="block-hint">含「本月未上传 · 上次上传 X 月」与「从未上传」两类，请按需补传；已手动完成的项目已单独归入下方「手动完成」分组</span>
       </div>
       <el-table :data="notUploadedList" style="width: 100%" :row-style="{ height: '48px' }">
         <el-table-column label="项目名称" min-width="240">

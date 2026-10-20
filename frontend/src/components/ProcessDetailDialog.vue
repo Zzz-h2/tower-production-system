@@ -34,17 +34,23 @@
           </template>
           <!-- 11 道排产工序：按节点逐行展示（分页展开，避免 60+ 行一次性渲染卡顿） -->
           <template v-else>
-            <!-- 异常暂停汇总条（2026-10）：让用户一眼看出「本工序有哪几套存在未关闭异常」
-                 数据源 = 后端 enrich_rows 的 has_open_exception / exception_processes /
-                 exception_paused / set_date（所属套 = 同一「下料计划日」） -->
-            <div v-if="openExcSets.length" class="exc-banner">
-              <span class="exc-banner-title">⚠️ 本工序有 {{ openExcSets.length }} 套存在未关闭异常</span>
-              <span class="exc-banner-body">
-                <span v-for="s in openExcSets" :key="s.key" class="exc-banner-item">
-                  {{ s.label }}
+            <!-- 异常汇总条（2026-11 改造）：让用户一眼看出「本工序有哪几套存在**生效中**异常」
+                 数据源 = 后端 enrich_rows 的 has_active_exception / active_exception_processes /
+                 exception_paused / set_date；第二行单独提示「已超计划关闭日」的条数
+                 （expired ≠ closed：暂停已失效，下游已恢复逾期判定）。 -->
+            <div v-if="activeExcSets.length || expiredExcCount" class="exc-banner">
+              <template v-if="activeExcSets.length">
+                <span class="exc-banner-title">⚠️ 本工序有 {{ activeExcSets.length }} 套存在<strong>生效中</strong>异常</span>
+                <span class="exc-banner-body">
+                  <span v-for="s in activeExcSets" :key="s.key" class="exc-banner-item">
+                    {{ s.label }}
+                  </span>
                 </span>
+                <!-- 说明文案已移除（2026-10 用户要求）：暂停/重算口径在异常记录页与状态胶囊已可推断，不再占一行 -->
+              </template>
+              <span v-if="expiredExcCount" class="exc-banner-expired">
+                另有 {{ expiredExcCount }} 条已超计划关闭日，暂停已失效，已恢复逾期判定
               </span>
-              <span class="exc-banner-hint">这些套的后续工序已暂停（⏸ 异常暂停），不计逾期；异常解决后按解决时间重算计划日。</span>
             </div>
             <template v-for="row in displayedDetailNodes" :key="row.id">
             <div
@@ -84,12 +90,8 @@
                     :title="`展开/收起本行 ${row.set_count} 套的逐套计划日与推定完成情况（只读）`"
                     @click="toggleSetRows(row.id)"
                   >共 {{ row.set_count }} 套（第1-{{ row.set_count }}套）{{ expandedSetRows[row.id] ? ' ▴' : ' ▾' }}</span>
-                  <!-- 「哪一套」标识：该行所属套存在未关闭异常（红色小标签 + 异常工序名） -->
-                  <span
-                    v-if="row.has_open_exception"
-                    class="exc-chip"
-                    :title="`所属套（下料计划日 ${row.set_date || '—'}）存在未关闭异常：${(row.exception_processes || []).join('、') || '—'}`"
-                  >{{ excChipText(row.exception_processes, row.set_date) }}</span>
+                  <!-- 行内异常 chip 已移除（2026-10 用户要求）：异常具体原因统一在「⚠️ 异常记录」页签查看，
+                       行内只保留状态胶囊（异常 / 异常暂停 / 计划关闭日），避免每行重复堆叠 -->
                 </div>
               </div>
               <span class="status-pill" :style="pillStyle(row.status)">{{ row.label }}</span>
@@ -126,8 +128,10 @@
                 <span
                   v-if="s.has_open_exception"
                   class="exc-chip"
-                  :title="`第 ${s.set_seq} 套存在未关闭异常：${(s.exception_processes || []).join('、') || '—'}`"
-                >⚠️ {{ (s.exception_processes || []).join('、') || '存在' }}异常</span>
+                  :title="s.has_active_exception
+                    ? `第 ${s.set_seq} 套存在生效中异常：${(s.exception_processes || []).join('、') || '—'}`
+                    : `第 ${s.set_seq} 套的异常已超计划关闭日：暂停已失效，已恢复逾期判定`"
+                >{{ s.has_active_exception ? '⚠️ ' + ((s.exception_processes || []).join('、') || '存在') + '异常' : '⚠️ 异常已超期' }}</span>
               </div>
               <div class="set-child-hint">
                 逐套明细只读展示：计划日按各套自己的下料锚点重算；实际完成按套号升序推定（填报仍为合并填写）。
@@ -148,81 +152,226 @@
             </div>
           </template>
         </el-tab-pane>
-        <el-tab-pane label="📝 填报进度" name="input" />
-        <el-tab-pane v-if="!isIndependent" label="⚠️ 异常提报" name="exception">
-          <div v-if="detail.nodes.length" class="exc-node-select">
-            <div class="exc-node-label">选择节点：</div>
-            <el-select v-model="selectedNodeId" placeholder="选择要提报异常的节点" style="width: 100%;">
-              <el-option
-                v-for="n in detail.nodes"
-                :key="n.id"
-                :label="`${n.plan_date} · 计划 ${n.plan_qty} 套 / 实际 ${n.actual_qty} 套`"
-                :value="n.id"
-              />
-            </el-select>
+        <el-tab-pane v-if="!isIndependent" label="📝 填报进度" name="input">
+          <!-- 填报模式（四分组手风琴）：⚠️ 内容必须留在本 pane 内部（2026-11 修复）。
+               历史写法是把它放在 el-tabs 之外、再用第二个 v-if="innerMode === 'input'" 控制显隐，
+               于是同一个页签的「激活态」存在两份互相独立的来源：一旦某次 patch 被中断
+               （例如子组件 setup 抛错），「异常记录」pane 已经显示、这块填报内容却没被卸载，
+               就会看到两个页签的内容叠在一起、整块 UI 也点不动。放进 pane 后显隐只由
+               el-tabs 自己的 v-show（作用在 pane 元素上、先于子节点 patch）负责，物理上不可能与
+               其他页签同时可见。 -->
+          <div style="font-size:12px; color:#718096; margin-bottom:10px;">
+            {{ auth.isAdmin
+              ? '管理员可为每行指定历史日期补录（含"已完成"组可编辑）；已保存过的节点，日期会沿用上次保存值，无变更提交不会重置为今天。未开始/未填写的节点日期默认当天（不显示历史值）。'
+              : `大区账号仅可填报本大区节点；未填写节点默认当天，填报日期可回填最近 ${BACKFILL_DAYS} 天内的日期（含今天）；已保存过的节点沿用上次保存值（仅限本大区数据）` }}
           </div>
-          <!-- 套级二级选择（2026-10）：仅当选中的节点有套明细时出现；
-               首项「整套/不指定」= 老口径（不写 set_seq），其余项精确到某一套 -->
-          <div v-if="selectedNode && selectedNode.has_set_detail" class="exc-node-select">
-            <div class="exc-node-label">套：</div>
-            <el-select v-model="selectedSetSeq" placeholder="整套 / 不指定" style="width: 100%;">
-              <el-option :value="null" label="整套 / 不指定（默认，按行口径）" />
-              <el-option
-                v-for="s in (selectedNode.sets || [])"
-                :key="s.set_seq"
-                :value="s.set_seq"
-                :label="setOptionLabel(s)"
-              />
-            </el-select>
-          </div>
-          <ExceptionReportTab
-            v-if="selectedNodeId"
-            :pid="pid"
-            :node-id="selectedNodeId"
-            :set-seq="selectedSetSeq"
-            :set-d0="selectedSetD0"
-            @changed="onExceptionChanged"
-          />
-        </el-tab-pane>
-      </el-tabs>
-
-      <!-- 填报模式（四分组手风琴） -->
-      <template v-if="innerMode === 'input'">
-        <div style="font-size:12px; color:#718096; margin-bottom:10px;">
-          {{ auth.isAdmin
-            ? '管理员可为每行指定历史日期补录（含"已完成"组可编辑）；已保存过的节点，日期会沿用上次保存值，无变更提交不会重置为今天。未开始/未填写的节点日期默认当天（不显示历史值）。'
-            : `大区账号仅可填报本大区节点；未填写节点默认当天，填报日期可回填最近 ${BACKFILL_DAYS} 天内的日期（含今天）；已保存过的节点沿用上次保存值（仅限本大区数据）` }}
-        </div>
-        <el-segmented v-model="activeGroup" :options="groupOptions" block style="margin-bottom:14px;" />
-        <div v-if="groupNodes.length === 0" class="empty-hint">当前分组「{{ groupLabel }}」没有可保存的节点。</div>
-        <template v-else>
-          <!-- 独立工序（累计完成/累计发运）· 今日待填报：单卡增量输入（管理员不限日期，大区账号可回填近 7 天） -->
-          <div v-if="isIndependent && activeGroup === 'today'" class="fill-card">
-            <div class="fill-card-left">
-              <span class="fill-card-label">本次填报</span>
-              <el-input-number
-                v-model="inputValues[groupNodes[0].id]"
-                :min="0"
-                :max="independentRemaining"
-                size="default"
-                class="fill-card-input"
-              />
-              <span class="fill-card-unit">套</span>
-              <span class="fill-card-pending" :title="`合同 ${independentContract} − 已填报 ${independentFilled} − 本次 ${inputValues[groupNodes[0].id] || 0}`">
-                待完成 <span class="qty-num">{{ independentRemainingAfter }}</span> 套
-              </span>
-            </div>
-            <div class="fill-card-right">
-              <!-- 与 11 道排产工序的「更改填报日期」机制一致：修改本次填报的 report_date（管理员不限，大区账号限近 7 天） -->
-              <div class="cell-report-date">
-                <span class="rd-tag" :class="{ 'rd-today': (reportDates[groupNodes[0].id] || fmtToday()) === fmtToday() }">
-                  📅 {{ reportDates[groupNodes[0].id] || fmtToday() }}
+          <el-segmented v-model="activeGroup" :options="groupOptions" block style="margin-bottom:14px;" />
+          <div v-if="groupNodes.length === 0" class="empty-hint">当前分组「{{ groupLabel }}」没有可保存的节点。</div>
+          <template v-else>
+            <!-- 独立工序（累计完成/累计发运）· 今日待填报：单卡增量输入（管理员不限日期，大区账号可回填近 7 天） -->
+            <div v-if="isIndependent && activeGroup === 'today'" class="fill-card">
+              <div class="fill-card-left">
+                <span class="fill-card-label">本次填报</span>
+                <el-input-number
+                  v-model="inputValues[groupNodes[0].id]"
+                  :min="0"
+                  :max="independentRemaining"
+                  size="default"
+                  class="fill-card-input"
+                />
+                <span class="fill-card-unit">套</span>
+                <span class="fill-card-pending" :title="`合同 ${independentContract} − 已填报 ${independentFilled} − 本次 ${inputValues[groupNodes[0].id] || 0}`">
+                  待完成 <span class="qty-num">{{ independentRemainingAfter }}</span> 套
                 </span>
+              </div>
+              <div class="fill-card-right">
+                <!-- 与 11 道排产工序的「更改填报日期」机制一致：修改本次填报的 report_date（管理员不限，大区账号限近 7 天） -->
+                <div class="cell-report-date">
+                  <span class="rd-tag" :class="{ 'rd-today': (reportDates[groupNodes[0].id] || fmtToday()) === fmtToday() }">
+                    📅 {{ reportDates[groupNodes[0].id] || fmtToday() }}
+                  </span>
+                  <el-popover
+                    placement="left-start"
+                    :width="260"
+                    trigger="click"
+                    v-model:visible="datePickerOpen[groupNodes[0].id]"
+                  >
+                    <template #reference>
+                      <el-button
+                        size="small"
+                        :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin && !isIndependent)"
+                        class="rd-btn"
+                      >更改填报日期</el-button>
+                    </template>
+                    <div class="rd-picker-panel">
+                      <div class="rd-picker-hint">
+                        上次保存：<b>{{ savedDates[groupNodes[0].id] || '无' }}</b>
+                      </div>
+                      <el-date-picker
+                        v-model="reportDates[groupNodes[0].id]"
+                        type="date"
+                        value-format="YYYY-MM-DD"
+                        format="YYYY-MM-DD"
+                        :clearable="false"
+                        :teleported="false"
+                        :disabled-date="isDateDisabled"
+                        style="width: 100%;"
+                        @change="onDatePicked(groupNodes[0].id, $event)"
+                      />
+                    </div>
+                  </el-popover>
+                </div>
+                <span class="status-pill" :style="pillStyle('in_progress')">🔵 进行中</span>
+              </div>
+            </div>
+            <!-- 独立工序· 已完成：每条记录一张卡（按日期降序；管理员可改日期/数量，大区账号置灰） -->
+            <div v-else-if="isIndependent && activeGroup === 'done'">
+              <div v-for="node in groupNodes" :key="node.id" class="record-card">
+                <div class="record-card-left">
+                  <span class="record-card-date">📅 {{ reportDates[node.id] || node.plan_date }}</span>
+                  <el-input-number
+                    v-model="inputValues[node.id]"
+                    :min="0"
+                    size="small"
+                    class="cell-qty-input"
+                    :disabled="!auth.isAdmin"
+                  />
+                  <span class="qty-unit">套</span>
+                </div>
+                <div class="record-card-right">
+                  <!-- 与 11 道排产工序的「更改填报日期」机制一致：移动该条记录到所选日期（管理员可改，大区账号置灰） -->
+                  <div class="cell-report-date">
+                    <el-popover
+                      placement="left-start"
+                      :width="260"
+                      trigger="click"
+                      v-model:visible="datePickerOpen[node.id]"
+                    >
+                      <template #reference>
+                        <el-button
+                          size="small"
+                          :disabled="!auth.isAdmin"
+                          class="rd-btn"
+                        >更改填报日期</el-button>
+                      </template>
+                      <div class="rd-picker-panel">
+                        <div class="rd-picker-hint">
+                          上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
+                        </div>
+                        <el-date-picker
+                          v-model="reportDates[node.id]"
+                          type="date"
+                          value-format="YYYY-MM-DD"
+                          format="YYYY-MM-DD"
+                          :clearable="false"
+                          :teleported="false"
+                          :disabled-date="isDateDisabled"
+                          style="width: 100%;"
+                          @change="onDatePicked(node.id, $event)"
+                        />
+                      </div>
+                    </el-popover>
+                  </div>
+                  <span class="status-pill" :style="pillStyle('done')">🟢 已完成</span>
+                </div>
+              </div>
+            </div>
+            <!-- 11 道排产工序：原有 row-grid 行为（分页展开，避免大量 row-card 一次性渲染导致卡顿） -->
+            <div
+              v-else
+              v-for="node in displayedGroupNodes"
+              :key="node.id"
+              class="row-card row-grid fill-row"
+              :class="{ 'row-has-exception': hasOpenExc(node), 'is-expanded': isFillExpanded(node.id) }"
+              :title="isFillExpanded(node.id) ? '点击行收起明细' : '点击行展开明细（套信息 / 填报日期 / 按段填报 / 异常提报）'"
+              @click="toggleFillRow(node.id)"
+            >
+              <div class="row-bar" :style="{ background: colorOf(statusOf(node)) }"></div>
+              <div class="row-left-section">
+                <span v-if="!isIndependent" class="cell-plan-date">
+                  {{ node.plan_date }}
+                  <!-- 已关闭异常把锚点后推 → 生效计划日已重算，附原排产日对照（与节点详情一致） -->
+                  <span
+                    v-if="origPlanOf(node) && origPlanOf(node) !== node.plan_date"
+                    class="date-orig"
+                    :title="`原排产计划日 ${origPlanOf(node)}（已按异常解决时间重算为新计划日）`"
+                  >原 {{ origPlanOf(node) }}</span>
+                </span>
+                <span class="cell-plan-qty">
+                  <span class="qty-num">{{ node.plan_qty }}</span><span class="qty-unit">套</span>
+                </span>
+                <!-- 套明细（共 N 套 / 逐套计划日与完成情况）已移至下方 fill-row-detail 下拉（2026-10 界面优化） -->
+                <!-- 收起态极简提示（2026-10 界面优化）：明细（套号/异常原因/填报日期/操作按钮）
+                     统一收进下方 fill-row-detail 下拉，此处只留一个 ⚠️ 小标，避免一行塞满导致屏幕放不下 -->
+                <span
+                  v-if="hasOpenExc(node)"
+                  class="exc-mini"
+                  :title="excChipText(hasActiveExc(node) ? excOf(node).active_exception_processes : excOf(node).exception_processes, excOf(node).set_date, hasActiveExc(node))"
+                >⚠️ 异常</span>
+              </div>
+              <div class="row-center-section" @click.stop>
+                <el-input-number
+                  class="cell-qty-input"
+                  v-model="inputValues[node.id]"
+                  :min="0"
+                  :max="maxOf(node)"
+                  size="small"
+                  :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin && !isIndependent)"
+                />
+                <span v-if="isIndependent" class="cell-pending" :title="`总套数 ${node.plan_qty} − 当前填报 ${inputValues[node.id] ?? node.actual_qty ?? 0}`">
+                  待完成 <span class="qty-num">{{ pendingOf(node) }}</span> 套
+                </span>
+              </div>
+              <div class="row-status-section">
+                <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
+                <!-- 折叠指示（纯视觉，非按钮）：整行点击即可展开/收起 -->
+                <span
+                  v-if="!isIndependent"
+                  class="fill-row-caret"
+                  :class="{ 'is-open': isFillExpanded(node.id) }"
+                  aria-hidden="true"
+                ></span>
+              </div>
+              <!-- 明细区（跨满整行）：套信息 + 填报日期 + 按段/异常入口。@click.stop 保证区内操作不触发行折叠 -->
+              <div v-if="!isIndependent && isFillExpanded(node.id)" class="fill-row-detail" @click.stop>
+                <!-- 套明细（只读） -->
+                <el-popover v-if="node.has_set_detail" placement="bottom-start" :width="380" trigger="click">
+                  <template #reference>
+                    <span class="set-badge set-badge-lite" :title="`只读：本行共 ${node.set_count} 套（填报仍按「计划 N 套 / 实际 M 套」合并填写）`">
+                      共 {{ node.set_count }} 套（第1-{{ node.set_count }}套）
+                    </span>
+                  </template>
+                  <div class="set-bubble">
+                    <div class="set-bubble-title">本行共 {{ node.set_count }} 套 · 逐套明细（只读）</div>
+                    <div v-for="s in setsOf(node)" :key="s.set_seq" class="set-bubble-row">
+                      <span class="set-name">第 {{ s.set_seq }} 套</span>
+                      <span class="set-bubble-date">计划 {{ s.plan_date }}</span>
+                      <span v-if="s.actual_qty_est > 0" class="set-bubble-done">
+                        已完成<span v-if="s.derived" class="set-derived">（推定）</span>
+                      </span>
+                      <span v-else class="set-bubble-todo">未完成</span>
+                      <span v-if="s.source === 'backfill'" class="set-src">（推定套号）</span>
+                      <span
+                        v-if="s.has_open_exception"
+                        class="exc-chip"
+                        :title="`第 ${s.set_seq} 套存在未关闭异常：${(s.exception_processes || []).join('、') || '—'}`"
+                      >⚠️ 第{{ s.set_seq }}套</span>
+                    </div>
+                    <div class="set-bubble-hint">
+                      填报仍为「计划 N 套 / 实际 M 套」合并填写；实际完成按套号升序推定（前 M 套视为完成），
+                      故标「（推定）」。本气泡仅作明细查看，不参与任何判定。
+                    </div>
+                  </div>
+                </el-popover>
+                <!-- 该行异常 chip 组已移除（2026-10 用户要求）：逐套异常原因改在「⚠️ 异常记录」页签查看 -->
+                <!-- 填报日期文字已隐藏（2026-10 用户要求）：当前日期在「更改填报日期」气泡内可见，
+                     此处不再重复展示；三个操作按钮整体靠右排列 -->
+                <div class="fill-detail-actions">
                 <el-popover
                   placement="left-start"
                   :width="260"
                   trigger="click"
-                  v-model:visible="datePickerOpen[groupNodes[0].id]"
+                  v-model:visible="datePickerOpen[node.id]"
                 >
                   <template #reference>
                     <el-button
@@ -233,10 +382,10 @@
                   </template>
                   <div class="rd-picker-panel">
                     <div class="rd-picker-hint">
-                      上次保存：<b>{{ savedDates[groupNodes[0].id] || '无' }}</b>
+                      上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
                     </div>
                     <el-date-picker
-                      v-model="reportDates[groupNodes[0].id]"
+                      v-model="reportDates[node.id]"
                       type="date"
                       value-format="YYYY-MM-DD"
                       format="YYYY-MM-DD"
@@ -244,235 +393,110 @@
                       :teleported="false"
                       :disabled-date="isDateDisabled"
                       style="width: 100%;"
-                      @change="onDatePicked(groupNodes[0].id, $event)"
+                      @change="onDatePicked(node.id, $event)"
                     />
                   </div>
                 </el-popover>
-              </div>
-              <span class="status-pill" :style="pillStyle('in_progress')">🔵 进行中</span>
-            </div>
-          </div>
-          <!-- 独立工序· 已完成：每条记录一张卡（按日期降序；管理员可改日期/数量，大区账号置灰） -->
-          <div v-else-if="isIndependent && activeGroup === 'done'">
-            <div v-for="node in groupNodes" :key="node.id" class="record-card">
-              <div class="record-card-left">
-                <span class="record-card-date">📅 {{ reportDates[node.id] || node.plan_date }}</span>
-                <el-input-number
-                  v-model="inputValues[node.id]"
-                  :min="0"
+                <!-- 按段填报（v7.1 行级化）：按套（计划行）生效；状态胶囊保留在行右侧不动 -->
+                <el-button
                   size="small"
-                  class="cell-qty-input"
-                  :disabled="!auth.isAdmin"
-                />
-                <span class="qty-unit">套</span>
-              </div>
-              <div class="record-card-right">
-                <!-- 与 11 道排产工序的「更改填报日期」机制一致：移动该条记录到所选日期（管理员可改，大区账号置灰） -->
-                <div class="cell-report-date">
-                  <el-popover
-                    placement="left-start"
-                    :width="260"
-                    trigger="click"
-                    v-model:visible="datePickerOpen[node.id]"
-                  >
-                    <template #reference>
-                      <el-button
-                        size="small"
-                        :disabled="!auth.isAdmin"
-                        class="rd-btn"
-                      >更改填报日期</el-button>
-                    </template>
-                    <div class="rd-picker-panel">
-                      <div class="rd-picker-hint">
-                        上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
-                      </div>
-                      <el-date-picker
-                        v-model="reportDates[node.id]"
-                        type="date"
-                        value-format="YYYY-MM-DD"
-                        format="YYYY-MM-DD"
-                        :clearable="false"
-                        :teleported="false"
-                        :disabled-date="isDateDisabled"
-                        style="width: 100%;"
-                        @change="onDatePicked(node.id, $event)"
-                      />
-                    </div>
-                  </el-popover>
+                  type="primary"
+                  plain
+                  class="seg-btn"
+                  :disabled="!auth.canFill"
+                  @click="openSegmentDialog(node)"
+                >🧩 按段填报</el-button>
+                <!-- 异常提报（v7.8 行级化）：每套（计划行）直达该行的异常表单，
+                     复用「⚠️ 异常提报」页签内的同一个 ExceptionReportTab，不重写任何提报逻辑。
+                     该按钮位于 v-if="!isIndependent" 的 .cell-report-date 内 → 独立工序天然不渲染。
+                     权限口径与既有页签入口一致（页签本身无限制，仅组件内「提交异常」受 auth.canFill 控制），
+                     故此处不加 :disabled，避免无填报权限账号连历史异常都看不到。 -->
+                <el-button
+                  size="small"
+                  type="warning"
+                  plain
+                  class="exc-btn"
+                  @click="openExceptionForNode(node)"
+                >⚠️ 异常提报</el-button>
                 </div>
-                <span class="status-pill" :style="pillStyle('done')">🟢 已完成</span>
               </div>
             </div>
+            <!-- 展开更多按钮：超过 PAGE_SIZE 时显示，避免一次性渲染大量 row-card -->
+            <div v-if="groupNodes.length > PAGE_SIZE && !showAllFill" class="expand-more">
+              <el-button link type="primary" @click="showAllFill = true">
+                ⬇ 展开更多（还有 {{ groupNodes.length - PAGE_SIZE }} 条）
+              </el-button>
+            </div>
+            <div v-else-if="groupNodes.length > PAGE_SIZE && showAllFill" class="expand-more">
+              <el-button link type="primary" @click="showAllFill = false">
+                ⬆ 收起（仅显示前 {{ PAGE_SIZE }} 条）
+              </el-button>
+            </div>
+          </template>
+          <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
+            <el-button @click="innerMode = 'detail'">← 返回详情</el-button>
+            <el-button
+              type="warning"
+              plain
+              :disabled="!auth.canFill || groupNodes.length === 0"
+              @click="openBatchDialog"
+            >
+              ⚡ 一键提报（{{ groupNodes.length }}）
+            </el-button>
+            <el-button type="primary" :disabled="!auth.canFill" @click="save" :loading="saving">💾 保存节点进度</el-button>
           </div>
-          <!-- 11 道排产工序：原有 row-grid 行为（分页展开，避免大量 row-card 一次性渲染导致卡顿） -->
-          <div
-            v-else
-            v-for="node in displayedGroupNodes"
-            :key="node.id"
-            class="row-card row-grid"
-            :class="{ 'row-has-exception': hasOpenExc(node) }"
-          >
-            <div class="row-bar" :style="{ background: colorOf(statusOf(node)) }"></div>
-            <div class="row-left-section">
-              <span v-if="!isIndependent" class="cell-plan-date">
-                {{ node.plan_date }}
-                <!-- 已关闭异常把锚点后推 → 生效计划日已重算，附原排产日对照（与节点详情一致） -->
-                <span
-                  v-if="origPlanOf(node) && origPlanOf(node) !== node.plan_date"
-                  class="date-orig"
-                  :title="`原排产计划日 ${origPlanOf(node)}（已按异常解决时间重算为新计划日）`"
-                >原 {{ origPlanOf(node) }}</span>
-              </span>
-              <span class="cell-plan-qty">
-                <span class="qty-num">{{ node.plan_qty }}</span><span class="qty-unit">套</span>
-              </span>
-              <!-- 「第 N 套」只读角标（2026-10）：不加逐套输入框（填报仍是合并填），
-                   仅在「N 套」右侧给一个浅色角标，点开气泡查看逐套明细 -->
-              <el-popover
-                v-if="node.has_set_detail"
-                placement="bottom-start"
-                :width="380"
-                trigger="click"
-              >
-                <template #reference>
-                  <span class="set-badge set-badge-lite" :title="`只读：本行共 ${node.set_count} 套（填报仍按「计划 N 套 / 实际 M 套」合并填写）`">
-                    共 {{ node.set_count }} 套（第1-{{ node.set_count }}套）
-                  </span>
-                </template>
-                <div class="set-bubble">
-                  <div class="set-bubble-title">本行共 {{ node.set_count }} 套 · 逐套明细（只读）</div>
-                  <div v-for="s in setsOf(node)" :key="s.set_seq" class="set-bubble-row">
-                    <span class="set-name">第 {{ s.set_seq }} 套</span>
-                    <span class="set-bubble-date">计划 {{ s.plan_date }}</span>
-                    <span v-if="s.actual_qty_est > 0" class="set-bubble-done">
-                      已完成<span v-if="s.derived" class="set-derived">（推定）</span>
-                    </span>
-                    <span v-else class="set-bubble-todo">未完成</span>
-                    <span v-if="s.source === 'backfill'" class="set-src">（推定套号）</span>
-                    <span
-                      v-if="s.has_open_exception"
-                      class="exc-chip"
-                      :title="`第 ${s.set_seq} 套存在未关闭异常：${(s.exception_processes || []).join('、') || '—'}`"
-                    >⚠️ 第{{ s.set_seq }}套</span>
-                  </div>
-                  <div class="set-bubble-hint">
-                    填报仍为「计划 N 套 / 实际 M 套」合并填写；实际完成按套号升序推定（前 M 套视为完成），
-                    故标「（推定）」。本气泡仅作明细查看，不参与任何判定。
-                  </div>
-                </div>
-              </el-popover>
-              <!-- 有异常的套：直接在本行给 ⚠️ 第N套 chip（复用 exc-chip 样式） -->
-              <span
-                v-for="s in excSetsOf(node)"
-                :key="`exc-${node.id}-${s.set_seq}`"
-                class="exc-chip"
-                :title="`第 ${s.set_seq} 套存在未关闭异常：${(s.exception_processes || []).join('、') || '—'}`"
-              >⚠️ 第{{ s.set_seq }}套</span>
-              <!-- 「哪一套」标识（填报进度同样醒目提示，与节点详情一致） -->
-              <span
-                v-if="hasOpenExc(node)"
-                class="exc-chip"
-                :title="`所属套（下料计划日 ${excOf(node).set_date || '—'}）存在未关闭异常：${excProcesses(node) || '—'}`"
-              >{{ excChipText(excOf(node).exception_processes, excOf(node).set_date) }}</span>
-            </div>
-            <div class="row-center-section">
-              <el-input-number
-                class="cell-qty-input"
-                v-model="inputValues[node.id]"
-                :min="0"
-                :max="maxOf(node)"
-                size="small"
-                :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin && !isIndependent)"
-              />
-              <span v-if="isIndependent" class="cell-pending" :title="`总套数 ${node.plan_qty} − 当前填报 ${inputValues[node.id] ?? node.actual_qty ?? 0}`">
-                待完成 <span class="qty-num">{{ pendingOf(node) }}</span> 套
-              </span>
-            </div>
-            <div v-if="!isIndependent" class="cell-report-date">
-              <span class="rd-tag" :class="{ 'rd-today': (node.actual_qty || 0) === 0 }">
-                📅 {{ reportDates[node.id] || fmtToday() }}
-              </span>
-              <el-popover
-                placement="left-start"
-                :width="260"
-                trigger="click"
-                v-model:visible="datePickerOpen[node.id]"
-              >
-                <template #reference>
-                  <el-button
-                    size="small"
-                    :disabled="!auth.canFill || (activeGroup === 'done' && !auth.isAdmin && !isIndependent)"
-                    class="rd-btn"
-                  >更改填报日期</el-button>
-                </template>
-                <div class="rd-picker-panel">
-                  <div class="rd-picker-hint">
-                    上次保存：<b>{{ savedDates[node.id] || '无' }}</b>
-                  </div>
-                  <el-date-picker
-                    v-model="reportDates[node.id]"
-                    type="date"
-                    value-format="YYYY-MM-DD"
-                    format="YYYY-MM-DD"
-                    :clearable="false"
-                    :teleported="false"
-                    :disabled-date="isDateDisabled"
-                    style="width: 100%;"
-                    @change="onDatePicked(node.id, $event)"
+        </el-tab-pane>
+        <!-- ⚠️ 异常记录（2026-11 重构）：本工序全部异常（生效中 / 已超期 / 已关闭）
+             → 计数条 + 筛选 + 9 列表格（复用项目级 ExceptionRecordTable，锁定到本工序）；
+             提报表单折叠在底部，避免长期占屏。 -->
+        <el-tab-pane v-if="!isIndependent" label="⚠️ 异常记录" name="exception">
+          <ExceptionRecordTable
+            :pid="pid"
+            :process-name="processName"
+            :refresh-key="excTableRefreshKey"
+            @changed="onExceptionChanged"
+          />
+          <el-collapse v-model="excFormOpen" class="exc-form-collapse">
+            <el-collapse-item name="report" title="➕ 提报异常（展开：选择节点 / 套 → 填写表单）">
+              <div v-if="detail.nodes.length" class="exc-node-select">
+                <div class="exc-node-label">选择节点：</div>
+                <el-select v-model="selectedNodeId" placeholder="选择要提报异常的节点" style="width: 100%;">
+                  <el-option
+                    v-for="n in detail.nodes"
+                    :key="n.id"
+                    :label="`${n.plan_date} · 计划 ${n.plan_qty} 套 / 实际 ${n.actual_qty} 套`"
+                    :value="n.id"
                   />
-                </div>
-              </el-popover>
-              <!-- 按段填报（v7.1 行级化）：按套（计划行）生效；状态胶囊保留在行右侧不动 -->
-              <el-button
-                size="small"
-                type="primary"
-                plain
-                class="seg-btn"
-                :disabled="!auth.canFill"
-                @click="openSegmentDialog(node)"
-              >🧩 按段填报</el-button>
-              <!-- 异常提报（v7.8 行级化）：每套（计划行）直达该行的异常表单，
-                   复用「⚠️ 异常提报」页签内的同一个 ExceptionReportTab，不重写任何提报逻辑。
-                   该按钮位于 v-if="!isIndependent" 的 .cell-report-date 内 → 独立工序天然不渲染。
-                   权限口径与既有页签入口一致（页签本身无限制，仅组件内「提交异常」受 auth.canFill 控制），
-                   故此处不加 :disabled，避免无填报权限账号连历史异常都看不到。 -->
-              <el-button
-                size="small"
-                type="warning"
-                plain
-                class="exc-btn"
-                @click="openExceptionForNode(node)"
-              >⚠️ 异常提报</el-button>
-            </div>
-            <div class="row-status-section">
-              <span class="cell-status status-pill" :style="pillStyle(statusOf(node))">{{ labelOf(node) }}</span>
-            </div>
-          </div>
-          <!-- 展开更多按钮：超过 PAGE_SIZE 时显示，避免一次性渲染大量 row-card -->
-          <div v-if="groupNodes.length > PAGE_SIZE && !showAllFill" class="expand-more">
-            <el-button link type="primary" @click="showAllFill = true">
-              ⬇ 展开更多（还有 {{ groupNodes.length - PAGE_SIZE }} 条）
-            </el-button>
-          </div>
-          <div v-else-if="groupNodes.length > PAGE_SIZE && showAllFill" class="expand-more">
-            <el-button link type="primary" @click="showAllFill = false">
-              ⬆ 收起（仅显示前 {{ PAGE_SIZE }} 条）
-            </el-button>
-          </div>
-        </template>
-        <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:16px;">
-          <el-button @click="innerMode = 'detail'">← 返回详情</el-button>
-          <el-button
-            type="warning"
-            plain
-            :disabled="!auth.canFill || groupNodes.length === 0"
-            @click="openBatchDialog"
-          >
-            ⚡ 一键提报（{{ groupNodes.length }}）
-          </el-button>
-          <el-button type="primary" :disabled="!auth.canFill" @click="save" :loading="saving">💾 保存节点进度</el-button>
-        </div>
-      </template>
+                </el-select>
+              </div>
+              <!-- 套级二级选择（2026-10）：仅当选中的节点有套明细时出现；
+                   首项「整套/不指定」= 老口径（不写 set_seq），其余项精确到某一套 -->
+              <div v-if="selectedNode && selectedNode.has_set_detail" class="exc-node-select">
+                <div class="exc-node-label">套：</div>
+                <el-select v-model="selectedSetSeq" placeholder="整套 / 不指定" style="width: 100%;">
+                  <el-option :value="null" label="整套 / 不指定（默认，按行口径）" />
+                  <el-option
+                    v-for="s in (selectedNode.sets || [])"
+                    :key="s.set_seq"
+                    :value="s.set_seq"
+                    :label="setOptionLabel(s)"
+                  />
+                </el-select>
+              </div>
+              <ExceptionReportTab
+                v-if="selectedNodeId"
+                :pid="pid"
+                :node-id="selectedNodeId"
+                :set-seq="selectedSetSeq"
+                :set-d0="selectedSetD0"
+                @changed="onReportChanged"
+              />
+              <div v-else class="exc-form-hint">请先在上方选择要提报异常的节点。</div>
+            </el-collapse-item>
+          </el-collapse>
+        </el-tab-pane>
+      </el-tabs>
+
     </template>
 
     <!-- 一键提报弹窗（嵌套） -->
@@ -564,7 +588,7 @@
       width="560px"
       :close-on-click-modal="false"
       append-to-body
-      @closed="segmentSubmitting = false"
+      @closed="onSegmentDialogClosed"
     >
       <div class="seg-body">
         <div class="seg-tip">
@@ -603,12 +627,28 @@
         <div class="seg-progress-line">
           折算进度：<b>{{ segPct }}%</b>（{{ segDone }}/{{ segTotal }} 段）
         </div>
+        <!-- 本行已有按段记录（取消按段提报的前提）：提示当前口径与取消后的影响 -->
+        <div v-if="segHasRecord" class="seg-record-hint">
+          ⚠️ 本行已保存按段记录（<b>{{ segNodeSavedDone }}/{{ segNodeSavedTotal }} 段</b>）。
+          取消按段提报只会清除这条按段进度记录，<b>已填写的完成套数（{{ segNodeActualQty }} 套）与填报日期不会被改动</b>，
+          该行状态回落到按完成套数的常规判定。
+        </div>
       </div>
       <template #footer>
-        <el-button @click="segmentDialogVisible = false" :disabled="segmentSubmitting">取消</el-button>
+        <el-button @click="segmentDialogVisible = false" :disabled="segmentSubmitting || segmentCancelling">取消</el-button>
+        <!-- 取消按段提报（destructive）：仅当该行已有按段记录时出现；二次确认后清除段进度记录 -->
+        <el-button
+          v-if="segHasRecord"
+          type="danger"
+          plain
+          :loading="segmentCancelling"
+          :disabled="segmentSubmitting"
+          @click="cancelSegments"
+        >🗑 取消按段提报</el-button>
         <el-button
           type="primary"
           :loading="segmentSubmitting"
+          :disabled="segmentCancelling"
           @click="saveSegments"
         >
           {{ segmentSubmitting ? '保存中...' : '保存' }}
@@ -619,12 +659,13 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { fetchProcessNodes, saveNodeProgress, saveSegmentProgress } from '../api/node'
+import { ref, computed, watch, onErrorCaptured } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { fetchProcessNodes, saveNodeProgress, saveSegmentProgress, cancelSegmentProgress } from '../api/node'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
 import ExceptionReportTab from './ExceptionReportTab.vue'
+import ExceptionRecordTable from './ExceptionRecordTable.vue'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -638,6 +679,21 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'saved', 'refresh'])
 const store = useProjectStore()
 const auth = useAuthStore() // canFill 决定填报/日期是否可编辑（admin 或大区账号；后端已按大区隔离）
+
+/**
+ * 错误边界（2026-11 修复「页签内容叠加 / 整块点不动」）：
+ * 弹窗内任一子组件在 setup / render 阶段抛错时，Vue 默认会让错误沿 patch 调用栈冒泡，
+ * 导致本次渲染整棵树被打断 —— 表现为「pane 已切换但旧内容没被卸载」且整块 UI 失去响应。
+ * 这里兜住错误并显式打日志（返回 false 会阻止 Vue 的默认向上抛出，故必须自己 console.error，
+ * 以免错误被静默吞掉），保证弹窗其余部分仍然可用。
+ *
+ * 说明：这只是兜底，不掩盖问题 —— 真正的错误依旧完整打印在控制台，且结构上已经
+ * 把「填报内容」收进 el-tab-pane（见模板注释），两者叠加时不可能再出现内容串页签。
+ */
+onErrorCaptured((err, instance, info) => {
+  console.error('[ProcessDetailDialog] 子组件异常已被错误边界拦截：', info, err)
+  return false
+})
 
 // 填报日期：默认今天，格式 YYYY-MM-DD
 function fmtToday() {
@@ -681,28 +737,40 @@ const inputValues = ref({})
 const saving = ref(false)
 const selectedNodeId = ref(null)
 
-// 异常提报后触发预警列表刷新（复用节点保存事件总线）
+// 异常记录页签：表格刷新令牌 + 提报表单折叠态
+const excTableRefreshKey = ref(0)
+const excFormOpen = ref([])
+
+// 异常提报/关闭后触发全局刷新（复用节点保存事件总线）
 function onExceptionChanged() {
   store.lastNodeSavedAt = Date.now()          // 预警列表（AlertList）刷新
   store.lastExceptionChangedAt = Date.now()   // 工序卡片刷新「存在异常」标签与预警态
 }
 
+// 提报成功：除上面的全局刷新外，还要让「异常记录」表格重新拉取（令牌 +1）
+function onReportChanged() {
+  onExceptionChanged()
+  excTableRefreshKey.value += 1
+}
+
 // === 异常提报（v7.8 行级化：每套直达） ===
-// 复用「⚠️ 异常提报」页签里的同一个 <ExceptionReportTab>：本函数只做两件事 ——
+// 复用「⚠️ 异常记录」页签里折叠的同一个 <ExceptionReportTab>：本函数只做三件事 ——
 //   1) 把 selectedNodeId 指向被点击的这一套（计划行）；与已选不同则直接覆盖（下拉随之更新）
-//   2) 切到异常提报页签，让用户立刻看到该套的表单 + 历史异常
-// ExceptionReportTab 内部 `watch(() => props.nodeId, load)` 会在 nodeId 变化时重新拉取该节点异常，
-// 因此不需要 :key 强制重建组件（保留组件实例还能避免重复挂载带来的多余请求）。
+//   2) 展开提报表单并切到异常记录页签，让用户立刻看到该套的表单
+//   3) 重置二级「套」选择为整套/不指定（用户可在下拉里再精确到某一套）
+// 说明：2026-11 起 ExceptionReportTab 不再承担历史列表（历史改由 ExceptionRecordTable 展示），
+// 因此原先依赖其内部 watch(nodeId) 重新拉取节点的写法已不适用；表单本身无需重建。
 // 权限口径：与既有入口完全一致 —— 页签本身无限制，写操作由组件内「提交异常」按钮的 auth.canFill 把关，
 // 所以行内入口同样不加 :disabled。
 function openExceptionForNode(node) {
   if (!node || node.id == null) return
-  // 独立工序（累计完成/累计发运）本就没有异常提报页签，行内按钮也不会渲染；此处再兜底一次
+  // 独立工序（累计完成/累计发运）本就没有异常记录页签，行内按钮也不会渲染；此处再兜底一次
   if (isIndependent.value) return
   selectedNodeId.value = node.id
   // 从行内入口进入时一律按「整套/不指定」起步（用户可在二级下拉里再选具体某一套）
   selectedSetSeq.value = null
   innerMode.value = 'exception'
+  excFormOpen.value = ['report']       // 行内入口直达表单：自动展开折叠区
 }
 
 // ---- 失败信息紧凑渲染工具（纯函数，放最前，不依赖响应式状态） ----
@@ -742,6 +810,18 @@ const groupLabelMap = { today: '今日待填报', overdue: '逾期未完成', fu
 const groupLabel = computed(() => groupLabelMap[activeGroup.value] || activeGroup.value)
 const groupNodes = computed(() => detail.value?.groups?.[activeGroup.value] || [])
 
+// 填报行折叠（2026-10 界面优化）
+// 收起态只保留：计划日(+原计划日) / 计划套数 / 数量输入 / 状态胶囊（+有异常时的 ⚠️ 小标）
+// 展开态（fill-row-detail）追加：套明细、异常 chip、填报日期+更改、按段填报、异常提报
+// 按 node.id 记忆展开状态；切换分组/刷新数据不丢失。
+const fillExpanded = ref({})
+function isFillExpanded(id) {
+  return !!fillExpanded.value[id]
+}
+function toggleFillRow(id) {
+  fillExpanded.value = { ...fillExpanded.value, [id]: !fillExpanded.value[id] }
+}
+
 // 分页展开：节点数超过 PAGE_SIZE 时默认只渲染前 PAGE_SIZE 条，避免大量 row-card 一次性渲染导致卡顿
 const PAGE_SIZE = 20
 const showAllFill = ref(false)
@@ -766,12 +846,14 @@ const statusColors = {
   done: '#38a169', pending: '#718096', in_progress: '#3182ce', warning: '#3182ce', overdue: '#e53e3e',
   waiting_material: '#a0aec0',
   exception_paused: '#a0aec0',   // ⏸ 异常暂停（灰，与待下料同视觉层级）
+  exception: '#dd6b20',          // 🟠 异常（第 4 态：本行自身有生效中异常）
   matches_dispatch: '#38a169',
 }
 const statusBgs = {
   done: '#f0fff4', pending: '#f7fafc', in_progress: '#ebf8ff', warning: '#ebf8ff', overdue: '#fff5f5',
   waiting_material: '#f7fafc',
   exception_paused: '#f7fafc',
+  exception: '#fffaf0',
   matches_dispatch: '#f0fff4',
 }
 const colorOf = (s) => statusColors[s] || '#718096'
@@ -793,22 +875,27 @@ const excOf = (node) => detail.value?.nodes?.find((x) => x.id === node.id) || {}
 // 未重算的行它与 plan_date 相等 → 不显示「原 X」删除线（避免误显示）。
 const origPlanOf = (node) => node?.plan_date_plan || ''
 const hasOpenExc = (node) => !!excOf(node).has_open_exception
-const excProcesses = (node) => (excOf(node).exception_processes || []).join('、')
-// 「哪一套」标签文案：有 set_date（可反推所属套）时带上该套下料计划日，
-// 反之（存量项目无时长数据，无法反推）只显示异常工序名，不显示误导性的「下料 —」。
-function excChipText(procs, setDate) {
+const hasActiveExc = (node) => !!excOf(node).has_active_exception
+// 「哪一套」标签文案：
+//   ① 有生效中异常（has_active_exception）→ 显示异常工序名（+ 该套下料计划日）
+//   ② 未关闭但已全部到期失效（has_open_exception=true, has_active_exception=false）
+//      → 「⚠️ 异常已超期」：暂停已失效、已恢复逾期判定，不能再显示成"正在暂停"
+//   ③ 存量项目无时长数据（无法反推所属套）→ 只显示异常工序名，不显示误导性的「下料 —」
+function excChipText(procs, setDate, active = true) {
+  if (!active) return '⚠️ 异常已超期'
   const name = (procs || []).join('、') || '存在'
   return setDate ? `⚠️ ${name}异常 · 下料 ${setDate}` : `⚠️ ${name}异常`
 }
-// 本工序「有未关闭异常」的套汇总（节点详情页顶部提示条用）：按 set_date 去重
-const openExcSets = computed(() => {
+// 本工序「有**生效中**异常」的套汇总（节点详情页顶部提示条用）：按 set_date 去重
+// ⚠️ 与「未关闭」区分：已过计划关闭日的异常暂停已失效，不计入本提示条。
+const activeExcSets = computed(() => {
   const map = new Map()
   for (const r of detail.value?.nodes || []) {
-    if (!r.has_open_exception) continue
+    if (!r.has_active_exception) continue
     const key = r.set_date || `#${r.id}`
     if (!map.has(key)) map.set(key, { key, set_date: r.set_date, processes: new Set() })
     const item = map.get(key)
-    ;(r.exception_processes || []).forEach((p) => p && item.processes.add(p))
+    ;(r.active_exception_processes || []).forEach((p) => p && item.processes.add(p))
   }
   return [...map.values()].map((x) => ({
     key: x.key,
@@ -816,6 +903,18 @@ const openExcSets = computed(() => {
       ? `下料 ${x.set_date} 套${x.processes.size ? `（${[...x.processes].join('、')}）` : ''}`
       : `该套（${[...x.processes].join('、') || '—'}）`,
   }))
+})
+// 本工序「已超计划关闭日」的异常条数（同一套的多行只计一次：按 set_date 取该套的计数）
+const expiredExcCount = computed(() => {
+  const perSet = new Map()
+  for (const r of detail.value?.nodes || []) {
+    const key = r.set_date || `#${r.id}`
+    const n = Number(r.exception_expired_count || 0)
+    if (!perSet.has(key) || n > perSet.get(key)) perSet.set(key, n)
+  }
+  let total = 0
+  perSet.forEach((v) => { total += v })
+  return total
 })
 
 // === 「第 N 套」展示（2026-10，只读） ===
@@ -839,7 +938,7 @@ function nodeRowOf(node) {
 function setsOf(node) {
   return nodeRowOf(node)?.sets || []
 }
-// 该行「有未关闭异常」的套（填报 tab 的 ⚠️ 第N套 chip 数据源）
+// 该行「有异常」的套（填报 tab 的 ⚠️ 第N套 chip 数据源；含已超期，文案由模板区分）
 function excSetsOf(node) {
   return setsOf(node).filter((s) => s.has_open_exception)
 }
@@ -1037,6 +1136,8 @@ watch(
       selectedNodeId.value = null
       selectedSetSeq.value = null      // 「套」二级选择随节点一起重置
       expandedSetRows.value = {}       // 逐套子行默认折叠
+      excFormOpen.value = []           // 提报表单默认折叠（行内入口会再展开）
+      excTableRefreshKey.value += 1    // 重新打开时强制刷新「异常记录」表格
       // 不在此重置 reportDates：load() 内部已有 重置+按节点回填 逻辑，避免双重处理
       originalValues.value = {} // 脏值基线同样由 load() 重新初始化
       load()
@@ -1131,6 +1232,7 @@ async function executeBatchReport() {
 // === 按段填报（嵌套二级弹窗，v7.1 行级化：按套/计划行生效） ===
 const segmentDialogVisible = ref(false)
 const segmentSubmitting = ref(false)
+const segmentCancelling = ref(false)   // 「取消按段提报」进行中（与保存互斥，防重复提交）
 // 当前填报的节点（计划行）id；总段数/已完成段数预填该行已保存值，无记录默认 5/0
 const segNodeId = ref(null)
 const segTotal = ref(5)
@@ -1148,6 +1250,15 @@ const segNodeTitle = computed(() => {
     ? `🧩 按段填报：${props.processName} · ${n.plan_date}（${n.plan_qty} 套）`
     : `🧩 按段填报：${props.processName}`
 })
+// === 「取消按段提报」相关（2026-11） ===
+// 该行是否**已存在**按段记录：segment_total 非 null 即库里已有 node_segment_progress 行
+// （后端 enrich_rows 对无记录的函数返回 None → 前端据此决定是否显示取消按钮）
+const segHasRecord = computed(() => segNode.value?.segment_total != null)
+// 库里已保存的段进度（提示文案用；与弹窗内可编辑的 segTotal/segDone 区分）
+const segNodeSavedTotal = computed(() => Number(segNode.value?.segment_total ?? 0))
+const segNodeSavedDone = computed(() => Number(segNode.value?.segment_done ?? 0))
+// 该行已填写的完成套数（取消按段后**不会**被改动，提示文案里明示）
+const segNodeActualQty = computed(() => Number(segNode.value?.actual_qty ?? 0))
 // 折算进度（仅弹窗内展示，不参与任何主进度计算）
 const segPct = computed(() => {
   const t = Number(segTotal.value) || 0
@@ -1157,7 +1268,7 @@ const segPct = computed(() => {
 
 // 点击第 i 个方块 → 已完成段数 = i；再次点击「当前最后一块已完成」→ 回退 1 段（i=1 时归 0）
 function onPickSegments(i) {
-  if (segmentSubmitting.value) return
+  if (segmentSubmitting.value || segmentCancelling.value) return
   const n = Number(i)
   if (!Number.isFinite(n) || n < 1 || n > Number(segTotal.value)) return
   segDone.value = n === Number(segDone.value) ? n - 1 : n
@@ -1176,7 +1287,78 @@ function openSegmentDialog(node) {
   segTotal.value = node.segment_total ?? 5
   segDone.value = Math.min(node.segment_done ?? 0, segTotal.value)
   segmentSubmitting.value = false
+  segmentCancelling.value = false
   segmentDialogVisible.value = true
+}
+
+// 弹窗关闭：复位两个提交态（避免上次的 loading 残留到下次打开）
+function onSegmentDialogClosed() {
+  segmentSubmitting.value = false
+  segmentCancelling.value = false
+}
+
+/**
+ * 取消按段提报（destructive）。
+ *
+ * 语义：
+ *  1) 删除该 node_plan_id 的 node_segment_progress 记录（后端 DELETE）；
+ *  2) actual_qty / report_date **不动** —— 已完成的套数是既成事实，
+ *     只是该行不再按段展示、状态回落到按 actual_qty 的常规判定；
+ *  3) 必须二次确认，文案明确「仅清除按段进度记录，不改动已填写的完成套数」；
+ *  4) 该按钮仅在已有按段记录时显示（模板 v-if="segHasRecord"）。
+ */
+async function cancelSegments() {
+  if (segNodeId.value == null || segmentCancelling.value || segmentSubmitting.value) return
+  const n = segNode.value
+  const dateLabel = n?.plan_date || '该计划行'
+  const qtyLabel = segNodeActualQty.value
+  try {
+    await ElMessageBox.confirm(
+      `<div style="line-height:1.7;">
+        确认取消 <b>${esc(dateLabel)}</b> 这一行的按段提报吗？
+        <div style="margin-top:6px; color:#4a5568; font-size:13px;">
+          仅清除<b>按段进度记录</b>（当前 ${segNodeSavedDone.value}/${segNodeSavedTotal.value} 段），
+          <b>不改动已填写的完成套数</b>（${esc(String(qtyLabel))} 套）与填报日期。<br/>
+          取消后该行回到「整行填报」模式，状态按完成套数常规判定。
+        </div>
+      </div>`,
+      '🗑 取消按段提报',
+      {
+        dangerouslyUseHTMLString: true,
+        type: 'warning',
+        confirmButtonText: '确认取消按段提报',
+        cancelButtonText: '再想想',
+        confirmButtonClass: 'el-button--danger',
+        closeOnClickModal: false,
+      },
+    )
+  } catch {
+    return   // 用户取消（ElMessageBox 拒绝 = 取消操作）
+  }
+  segmentCancelling.value = true
+  try {
+    const res = await cancelSegmentProgress(props.pid, props.processName, segNodeId.value)
+    const deleted = Number(res?.deleted ?? 0)
+    segmentDialogVisible.value = false
+    // ⚠️ ElMessage 只传单个参数（传第二参会崩）
+    ElMessage.success(deleted > 0 ? '✅ 已取消按段提报，该行回到整行填报' : '该行没有按段记录，无需取消')
+    await load()      // 刷新详情（segment 字段消失 → 行不再显示「已完成 k/N 段」）
+    emit('refresh')   // 父级总览（工序卡片标签 / 进度）同步刷新
+  } catch (e) {
+    const errDetail = e?.response?.data?.detail
+    const code = errDetail && typeof errDetail === 'object' ? errDetail.code : null
+    const msg = errDetail?.message || e?.message || '取消按段提报失败'
+    const headline = code === 'NODE_MISMATCH' || code === 'NODE_NOT_FOUND' ? '⚠️ 节点归属校验未通过'
+      : '⚠️ 取消按段提报失败'
+    safeToast('error', {
+      dangerouslyUseHTMLString: true,
+      message: `<div style="line-height:1.6; max-width:520px;"><b>${esc(headline)}</b><div style="margin-top:4px; color:#4a5568; font-size:13px;">${esc(msg)}</div></div>`,
+      duration: 6000,
+      showClose: true,
+    })
+  } finally {
+    segmentCancelling.value = false
+  }
 }
 
 async function saveSegments() {
@@ -1304,7 +1486,8 @@ async function saveSegments() {
 /* 填报进度行：色条 / 左（日期+套数）/ 中（输入+待完成/已填报）/ 报告日期（非独立）/ 1fr 弹性空间 / 状态（最右） */
 .row-grid {
   display: grid;
-  grid-template-columns: 6px auto auto auto 1fr;
+  /* 4 列：色条 / 左信息(日期+套数+异常小标) / 数量输入 / 状态+折叠三角（1fr → 靠最右） */
+  grid-template-columns: 6px auto auto 1fr;
   align-items: center;
   gap: 14px;
   padding: 12px 18px;
@@ -1312,6 +1495,67 @@ async function saveSegments() {
 .row-left-section { display: flex; align-items: baseline; gap: 14px; white-space: nowrap; }
 .row-center-section { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .row-status-section { display: flex; align-items: center; justify-self: end; }
+
+/* === 填报行折叠（2026-10 界面优化） ===
+   主行：色条 / 日期+套数(+异常小标) / 数量输入 / 状态+折叠指示
+   交互：**整行点击**展开/收起明细（区内控件用 @click.stop 隔离）
+   明细区：跨满整行（grid-column 1/-1），默认收起 */
+.fill-row {
+  cursor: pointer;
+  transition: background-color .12s;
+}
+.fill-row:hover { background: #f9fbfd; }
+/* 有异常的行：hover 保持红系底色，不被通用 hover 覆盖 */
+.fill-row.row-has-exception:hover { background: #fff5f5; }
+.fill-row.is-expanded { background: #fbfdff; }
+.fill-row.row-has-exception.is-expanded { background: #fffafa; }
+/* 折叠三角：CSS 边框画，展开时旋转 180°（不占位置、不抢视觉） */
+.fill-row-caret {
+  margin-left: 8px;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #a0aec0;
+  transition: transform .15s, border-top-color .15s;
+  flex-shrink: 0;
+}
+.fill-row:hover .fill-row-caret { border-top-color: #4a5568; }
+.fill-row-caret.is-open { transform: rotate(180deg); border-top-color: #2b6cb0; }
+.fill-row-detail {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+  min-width: 0;
+  cursor: default;
+}
+/* 明细区操作按钮组：整体靠右（margin-left:auto），内部按逻辑顺序左→右排列
+   （更改填报日期 → 按段填报 → 异常提报），视觉上从右边缘往里收 */
+.fill-detail-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+/* 收起态的异常极简提示（明细在展开区） */
+.exc-mini {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: #fffaf0;
+  border: 1px solid #fbd38d;
+  color: #c05621;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
 
 /* 节点详情行：色条/信息/状态/偏差 */
 .row-grid-detail {
@@ -1380,6 +1624,23 @@ async function saveSegments() {
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .exc-banner-hint { color: #975a16; flex-basis: 100%; }
+/* 已超计划关闭日（expired）：灰字提示——暂停已失效、已恢复逾期判定（不等于关闭） */
+.exc-banner-expired {
+  flex-basis: 100%;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.6;
+  border-top: 1px dashed #fbd38d;
+  padding-top: 4px;
+}
+/* 异常记录页签：提报表单折叠区 */
+.exc-form-collapse { margin-top: 14px; }
+.exc-form-collapse :deep(.el-collapse-item__header) {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a365d;
+}
+.exc-form-hint { font-size: 12px; color: #94a3b8; padding: 8px 0; }
 
 /* === 「第 N 套」展示（2026-10，只读） === */
 /* 浅色可点角标：紧贴「N 套」右侧，弱化视觉层级（不抢计划/实际套数） */
@@ -1577,6 +1838,18 @@ async function saveSegments() {
 .seg-hint { font-size: 12px; color: #94a3b8; margin-bottom: 10px; }
 .seg-progress-line { font-size: 13px; color: #4a5568; }
 .seg-progress-line b { color: #1a365d; }
+/* 「已保存按段记录」提示：低调橙色底，说明取消按段的影响范围（不动完成套数） */
+.seg-record-hint {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: #fffaf0;
+  border: 1px solid #fbd38d;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #975a16;
+}
+.seg-record-hint b { color: #744210; }
 
 @media (max-width: 1100px) {
   .row-grid { gap: 10px; padding: 10px 14px; }
