@@ -30,24 +30,9 @@
       <el-form-item label="截止上月出品" prop="last_month_output">
         <el-input v-model.number="form.last_month_output" placeholder="选填，整数" />
       </el-form-item>
-      <el-form-item label="计划开工日期" prop="plan_start_date">
-        <el-date-picker
-          v-model="form.plan_start_date"
-          type="date"
-          value-format="YYYY-MM-DD"
-          placeholder="选填"
-          style="width: 100%"
-        />
-      </el-form-item>
-      <el-form-item label="计划交付日期" prop="plan_end_date">
-        <el-date-picker
-          v-model="form.plan_end_date"
-          type="date"
-          value-format="YYYY-MM-DD"
-          placeholder="选填"
-          style="width: 100%"
-        />
-      </el-form-item>
+      <!-- 2026-11 需求：移除两个日期表单项（与编辑弹窗同批精简）。
+           仅删前端表单项 —— 数据库列与后端 ProjectCreate 的选填字段均保留；
+           因为 form 与提交 payload 里已不含这两个 key，POST 不会携带它们，历史行为不受影响。 -->
     </el-form>
     <template #footer>
       <el-button @click="$emit('update:modelValue', false)">取消</el-button>
@@ -72,7 +57,7 @@ watch(() => props.modelValue, (v) => { visible.value = v })
 const formRef = ref(null)
 const submitting = ref(false)
 
-// 表单初始值（5 必填 + 5 选填）
+// 表单初始值（5 必填 + 3 选填；两个日期项已按 2026-11 需求移除，不再进 form/payload）
 const emptyForm = () => ({
   project_name: '',
   machine_type: '',
@@ -82,8 +67,6 @@ const emptyForm = () => ({
   contract_count: null,
   monthly_plan: null,
   last_month_output: null,
-  plan_start_date: '',
-  plan_end_date: '',
 })
 const form = reactive(emptyForm())
 

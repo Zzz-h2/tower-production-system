@@ -5,7 +5,6 @@
       <div class="group-items">
         <div class="item"><span>钢塔厂家</span><b>{{ project.factory_name || 'N/A' }}</b></div>
         <div class="item"><span>交付负责人</span><b>{{ project.delivery_person || 'N/A' }}</b></div>
-        <div class="item"><span>计划开工 → 交付</span><b>{{ project.plan_start_date || '—' }} → {{ project.plan_end_date || '—' }}</b></div>
       </div>
     </div>
     <div class="info-group">

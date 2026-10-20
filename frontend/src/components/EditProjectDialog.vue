@@ -30,27 +30,10 @@
       <el-form-item label="截止上月出品" prop="last_month_output">
         <el-input v-model.number="form.last_month_output" placeholder="选填，整数" />
       </el-form-item>
-      <el-form-item label="计划开工日期" prop="plan_start_date">
-        <el-date-picker
-          v-model="form.plan_start_date"
-          type="date"
-          value-format="YYYY-MM-DD"
-          placeholder="选填"
-          style="width: 100%"
-        />
-      </el-form-item>
-      <el-form-item label="计划交付日期" prop="plan_end_date">
-        <el-date-picker
-          v-model="form.plan_end_date"
-          type="date"
-          value-format="YYYY-MM-DD"
-          placeholder="选填"
-          style="width: 100%"
-        />
-      </el-form-item>
-      <el-form-item label="备注" prop="remarks">
-        <el-input v-model="form.remarks" type="textarea" :rows="2" placeholder="选填" />
-      </el-form-item>
+      <!-- 2026-11 需求：编辑弹窗精简，移除「两个日期项 + 备注」共三个表单项（两个日期项后已全局下线）。
+           仅删前端表单项 —— 数据库列与后端 ProjectUpdateRequest 均保留，历史数据原样留存；
+           因为 form 与提交 payload 里已不含这三个 key，PUT 不会携带它们（后端 model_dump 后
+           按非 None 过滤），故不会被清空。 -->
     </el-form>
     <template #footer>
       <el-button @click="$emit('update:modelValue', false)">取消</el-button>
@@ -76,6 +59,8 @@ watch(() => props.modelValue, (v) => { visible.value = v })
 const formRef = ref(null)
 const submitting = ref(false)
 
+// 表单字段 = 弹窗当前展示的 8 项（2026-11：移除两个日期项与备注，日期项已全局下线）。
+// 这三个字段不再进入 form → 既不会被表单重置，也不会随 payload 提交（避免空值覆盖历史数据）。
 const emptyForm = () => ({
   project_name: '',
   machine_type: '',
@@ -85,13 +70,11 @@ const emptyForm = () => ({
   contract_count: null,
   monthly_plan: null,
   last_month_output: null,
-  plan_start_date: '',
-  plan_end_date: '',
-  remarks: '',
 })
 const form = reactive(emptyForm())
 
-// 打开时用当前项目行预填
+// 打开时用当前项目行预填（只回填展示中的 8 个字段；
+// 两个日期项与备注不回填 → 不参与编辑，也不会被提交覆盖）
 watch(
   () => props.project,
   (p) => {
@@ -105,9 +88,6 @@ watch(
       contract_count: p.contract_count ?? null,
       monthly_plan: p.monthly_plan ?? null,
       last_month_output: p.last_month_output ?? null,
-      plan_start_date: p.plan_start_date || '',
-      plan_end_date: p.plan_end_date || '',
-      remarks: p.remarks || '',
     })
   },
   { immediate: true },
@@ -120,6 +100,8 @@ function onClose() {
 async function submit() {
   submitting.value = true
   try {
+    // payload 只含 form 里的 8 个字段；两个日期项与备注**不带 key**（不是传 undefined/null），
+    // 后端按「提交即更新」处理其余字段，这三个字段的历史值保持不变。
     await updateProjectApi(props.project.id, { ...form })
     ElMessage.success('保存成功')
     emit('updated')
