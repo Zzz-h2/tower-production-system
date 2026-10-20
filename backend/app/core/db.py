@@ -771,6 +771,12 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
 
         # 已完成 / 剩余套数：复用上面已算好的 att_actual_qty，不新增查询
         p["completed_sets"] = att_actual_qty
+        # v7.5（2026-11）：把「整体进度」的分母一并返回，前端进度条 hover 展示
+        #   「已完成 X 套 / 本月计划 Y 套」，X/Y 与 progress_pct **同源同分母**，
+        #   保证 100% ↔ X==Y、16.7% ↔ 1/6，用户不会再看到「3/25 却是满条」的口径错位。
+        # 注意：此处必须用 att_plan_qty（附件安装计划合计），**不是** contract_count
+        #   （合同总数）也不是 monthly_plan（本月计划出品，语义不同）——三者不可互换。
+        p["att_plan_qty"] = att_plan_qty
         # 剩余口径：contract_count = 项目总数（用户口径 2026-08-31 澄清）；
         # monthly_plan 是「本月待完成套数」，语义不同，**不做回退**
         _total = int(p.get("contract_count") or 0)

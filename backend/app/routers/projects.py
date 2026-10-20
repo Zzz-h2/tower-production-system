@@ -60,6 +60,8 @@ def list_projects(
     # 兜底字段，保证前端渲染不报错
     for p in items:
         p.setdefault("progress_pct", 0)
+        # 「整体进度」hover 的分母：已完成套数 / 本月计划套数（与 progress_pct 同源）
+        p.setdefault("att_plan_qty", 0)
         p.setdefault("risk_level", "normal")
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 

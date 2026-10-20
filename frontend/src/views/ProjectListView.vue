@@ -168,19 +168,30 @@
         </el-table-column>
         <el-table-column prop="last_month_output" label="截止上月" width="100" align="center" />
         <el-table-column prop="monthly_plan" label="本月计划" width="100" align="center" />
-        <!-- 整体进度：宽度 180 → 210（原宽度下「进度条 + 百分比」溢出使 100.0% 换行） -->
+        <!-- 整体进度：宽度 180 → 210（原宽度下「进度条 + 百分比」溢出使 100.0% 换行）
+             2026-11：加 el-tooltip —— 悬停显示「已完成 X 套 / 计划 Y 套」。
+             X = completed_sets（已完成套数）；Y = monthly_plan（列表「本月计划」列同源，用户指定口径）。
+             注意 Y 是调度令口径、与进度百分比分母（att_plan_qty 附件安装工序口径）不同源，
+             X/Y 可能 ≠ 进度百分比 —— 用户知情选择，详见 progressTip() 注释，勿当 bug 改回。 -->
         <el-table-column label="整体进度" width="210" align="center">
           <template #default="{ row }">
-            <div class="progress-cell">
-              <el-progress
-                :percentage="Number(row.progress_pct || 0)"
-                :stroke-width="10"
-                :show-text="false"
-                :color="progressColor"
-                class="list-progress"
-              />
-              <span class="progress-text">{{ Number(row.progress_pct || 0).toFixed(1) }}%</span>
-            </div>
+            <el-tooltip
+              :content="progressTip(row)"
+              placement="top"
+              effect="dark"
+              :show-after="150"
+            >
+              <div class="progress-cell">
+                <el-progress
+                  :percentage="Number(row.progress_pct || 0)"
+                  :stroke-width="10"
+                  :show-text="false"
+                  :color="progressColor"
+                  class="list-progress"
+                />
+                <span class="progress-text">{{ Number(row.progress_pct || 0).toFixed(1) }}%</span>
+              </div>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column prop="delivery_person" label="交付负责人" width="120" align="center" />
@@ -194,14 +205,17 @@
             <span class="status-pill" :style="riskStyle(row.risk_level)">{{ riskLabel(row.risk_level) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="remarks" label="备注" min-width="160" align="center" show-overflow-tooltip>
+        <!-- 2026-11 需求：去掉「备注」列表格列（原列内容全是「—」）。
+             仅删展示列：row.remarks 数据仍在（列表接口照常返回），
+             导出 Excel 的报表口径不含备注列，无需同步调整。 -->
+        <!-- 操作列（2026-11 交互调整）：与排产总览「未上传排产计划」表同款 ——
+             ① 表头「操作」居中于按钮组正上方（列宽收敛到按钮组实际宽度 + align="center"）；
+             ② 按钮组贴住右边框（td.op-col .cell 改 flex + flex-end，**只作用于 td**，
+                class-name 会同时落在 th 上，写成 .op-col .cell 会把表头也推到右边）；
+             ③ 浅色小框包住按钮组（.op-group，边 #e2e8f0 / 底 #f8fafc，与页面色板一致）。 -->
+        <el-table-column label="操作" width="190" align="center" fixed="right" class-name="op-col">
           <template #default="{ row }">
-            <span class="remark-cell">{{ row.remarks || '—' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="230" fixed="right">
-          <template #default="{ row }">
-            <div class="op-btns">
+            <div class="op-group">
               <el-button size="small" type="primary" @click="goDetail(row)">详细</el-button>
               <el-button size="small" type="warning" plain :disabled="!auth.canEdit" @click="onEdit(row)">编辑</el-button>
               <el-button size="small" type="danger" plain :disabled="!auth.canEdit" @click="onDelete(row)">删除</el-button>
@@ -425,6 +439,31 @@ const progressColor = [
   { color: '#f6ad55', percentage: 20 },
   { color: '#e53e3e', percentage: 0 },
 ]
+
+/**
+ * 「整体进度」单元格 hover 文案：`已完成 X 套 / 计划 Y 套`。
+ *
+ * ⚠️ 口径说明（用户 2026-11 指定，勿"修正"回去）：
+ *   - X = row.completed_sets —— 已完成套数（后端列表聚合 att_actual_qty 原值）；
+ *   - Y = row.monthly_plan —— **列表「本月计划」列的值**（调度令口径）。
+ *     用户明确要求 Y 必须与「本月计划」列一致，因此 X/Y 与进度百分比的分母
+ *     （att_plan_qty，附件安装工序口径）**不同源**，可能出现 X/Y ≠ 进度百分比
+ *     （如 id=170：已完成 1 / 计划 4 = 25%，但进度条按 1/6 附件安装口径显示 16.7%）。
+ *     这是用户知情选择的口径，不是 bug。
+ *   - 后端 att_plan_qty 字段仍照常返回（db.py 聚合处未删），只是本 tooltip 不再使用。
+ *
+ * ⚠️ 禁止用 `progress_pct × 任意总量` 反算 X/Y：progress_pct 已四舍五入到 0.1，反算必失真。
+ *
+ * @param {object} row 项目列表行
+ * @returns {string} tooltip 文案；本月计划为 0/NULL（调度令未填）时降级为只显示已完成套数
+ */
+function progressTip(row) {
+  const done = Number(row?.completed_sets ?? 0) || 0
+  // 计划套数 = 「本月计划」列（monthly_plan）。0 / null / 缺失 → 降级只报已完成套数，
+  // 避免「/ 计划 0 套」让用户误以为数据异常。
+  const planQty = Number(row?.monthly_plan ?? 0) || 0
+  return planQty > 0 ? `已完成 ${done} 套 / 计划 ${planQty} 套` : `已完成 ${done} 套`
+}
 
 // 筛选变化 → 重置页码为 1 并加载
 function onFilterChange() {
@@ -717,6 +756,7 @@ onMounted(async () => {
   gap: 8px;              /* 12→8：与百分比拉开但不浪费横向空间 */
   justify-content: center;
   white-space: nowrap;   /* 整块不换行（关键：原 100.0% 被挤成两行） */
+  cursor: help;          /* 提示「悬停可看已完成套数」（el-tooltip 触发区 = 整个单元格内容） */
 }
 .list-progress {
   width: 108px;          /* 120→108：给百分比留出安全宽度 */
@@ -733,23 +773,26 @@ onMounted(async () => {
   flex: 0 0 auto;
 }
 
-/* 操作列：三个按钮强制同一行 */
-.op-btns {
+/* 操作列（2026-11）：与 SchedulePlanOverview「未上传排产计划」表同款按钮组样式。
+   两组件 scoped 样式各自持有一份（10 行小段），不提全局 theme.css —— 避免污染项目里
+   其它所有 el-table；后续若第三处也要用，再抽公共样式不迟。 */
+.page-wrap :deep(td.op-col .cell) {
   display: flex;
+  justify-content: flex-end;   /* 按钮组贴住单元格右缘（靠近表格右边框） */
+  padding-right: 4px;          /* 右内边距收窄，小框贴近边框又不顶死 */
+}
+.op-group {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: nowrap;      /* 强制三个按钮同一行 */
-  white-space: nowrap;
+  gap: 6px;                    /* 间距交给 gap，覆盖 el-button 相邻默认 12px 左边距 */
+  padding: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
 }
-.op-btns .el-button {
-  margin-left: 0;          /* 去掉 el-button 默认左边距，防止换行 */
-}
-/* 备注列：次要文字色弱化显示 */
-.remark-cell {
-  color: var(--color-sub);
-  font-size: 13px;
-}
-/* 大区负责人列：次要文字色弱化显示（与备注同色系） */
+.op-group .el-button + .el-button { margin-left: 0; }
+/* 备注列已移除（2026-11）→ 原 .remark-cell 样式一并清理，避免死代码 */
+/* 大区负责人列：次要文字色弱化显示 */
 .region-cell {
   color: var(--color-sub);
   font-size: 13px;
