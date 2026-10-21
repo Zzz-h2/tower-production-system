@@ -10,6 +10,9 @@ from ..schemas import SaveNodeProgressRequest, SaveSegmentRequest
 from ..services.business_logic import (
     validate_today_quota, validate_today_quota_nodes, split_node_groups, build_time_rules,
 )
+# 异常锚点：与展示端（node_service.build_process_detail）复用同一读取函数，
+# 保证「保存校验的分组」与「弹窗展示的分组」口径完全一致（含查询失败 → {} 的兜底）。
+from ..services.node_service import load_exception_anchors
 from ..core.config import GROUP_LABELS, INDEPENDENT_PROCESS_NAMES
 
 router = APIRouter(prefix="/api/projects", tags=["nodes"])
@@ -58,9 +61,22 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
     plans = db.get_node_plans(pid, mgr, mth)
     actuals = db.get_node_actuals(pid)
     durations = db.get_project_process_durations(pid, mgr, mth)
-    # 分组与前端展示口径一致：闸门开（该套已实际下料）的制造链节点按「重算后的计划日期」归组，
-    # 否则会出现「前端显示在未来计划、后端却按旧日期归到逾期组」的 NODE_NOT_IN_GROUP 错位。
-    rules = build_time_rules(plans, actuals, durations)
+
+    # 「今天」用业务时区（Asia/Shanghai）单一来源，不依赖运行环境时区，
+    # 避免容器 UTC 与用户东八区在 00:00–08:00 出现跨天窗口错位。
+    # 提前到分组计算之前取：异常锚点（active/expired）需要同一「今天」。
+    today = business_today()
+
+    # 🔴 分组口径必须与展示端（node_service.build_process_detail）**完全相同**，否则
+    #    「界面上在 A 组、保存时后端认为在 B 组」→ 400 NODE_NOT_IN_GROUP / 分组为空。
+    #    2026-11 线上 bug：此前这里调 build_time_rules 时**没传异常锚点**，而展示端传了。
+    #    异常「生效中」时因暂停/重算对同组影响小；一旦**关闭异常**，展示端按关闭时间重算
+    #    计划日（该行移入未来计划/已完成），保存端仍按无异常口径判为逾期 → 用户点保存必失败，
+    #    且「分组为空」那条 400 的 detail 是字符串，前端只能显示 UNKNOWN「请求失败」。
+    #    修法：复用展示端同一个带兜底的读取函数 load_exception_anchors（查询失败 → {} 不阻塞），
+    #    判定内核 build_time_rules / split_node_groups 一行未改。
+    exc_anchors = load_exception_anchors(pid, durations, plans, today=today)
+    rules = build_time_rules(plans, actuals, durations, exc_anchors, today=today)
     plans_for_group = [
         ({**p, "plan_date": rules[p["id"]]["eff_plan_date"]}
          if rules.get(p["id"], {}).get("eff_plan_date") else p)
@@ -69,7 +85,11 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
     proc_nodes = [p for p in plans_for_group if p["process_name"] == process_name]
     if not proc_nodes:
         tip = f"（负责人：{mgr}）" if mgr else ""
-        raise HTTPException(status_code=404, detail=f"工序「{process_name}」无节点{tip}")
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NO_NODES",
+                    "message": f"工序「{process_name}」在当月没有可填报的节点{tip}，请刷新后重试"},
+        )
 
     plan_qty_by_id = {p["id"]: int(p["plan_qty"] or 0) for p in proc_nodes}
     # 写入时的负责人以节点计划行自身的值为准（权威来源），避免前端传错导致串档
@@ -77,13 +97,22 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
 
     is_independent = process_name in INDEPENDENT_PROCESS_NAMES  # 独立工序：不设日期、不限 qty 上限
 
-    # 「今天」用业务时区（Asia/Shanghai）单一来源，不依赖运行环境时区，
-    # 避免容器 UTC 与用户东八区在 00:00–08:00 出现跨天窗口错位。
-    today = business_today()
+    # today 已在分组计算之前取好（异常锚点与分组必须共用同一个「今天」），此处不再重复取
     groups = split_node_groups(proc_nodes, actuals, today)
     target_ids = {p["id"] for p in groups[req.group]}
     if not target_ids:
-        raise HTTPException(status_code=400, detail=f"当前分组「{GROUP_LABELS[req.group]}」没有可保存的节点。")
+        # 🔴 必须是 {code, message} 对象：此前这里是字符串 detail，前端 code 取不到 → 显示
+        #    UNKNOWN「未分类错误: 请求失败」，线上问题因此无从定位（2026-11）。
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "GROUP_EMPTY",
+                "message": (
+                    f"当前分组「{GROUP_LABELS[req.group]}」已没有可保存的节点"
+                    f"（可能因异常关闭/日期重算被移入其它分组），请关闭弹窗重新打开后重试"
+                ),
+            },
+        )
 
     # 校验：提交的节点必须属于当前分组；数量非负（schema ge=0）且不超过计划数
     input_values = {}

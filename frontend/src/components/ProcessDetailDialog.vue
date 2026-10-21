@@ -757,9 +757,20 @@ const excTableRefreshKey = ref(0)
 const excFormOpen = ref([])
 
 // 异常提报/关闭后触发全局刷新（复用节点保存事件总线）
-function onExceptionChanged() {
+// 🔴 2026-11 修复：**必须同时重拉本弹窗的 detail**。分组/计划日是按异常口径算出来的
+//    （生效中暂停、已关闭按关闭时间重算计划日），关闭一条异常后本工序的节点可能整体
+//    换到另一个分组（如「逾期未完成」→「未来计划」）。若只刷全局时间戳、不刷弹窗，
+//    用户看到的还是旧分组 → 再点保存提交的分组与后端判定不一致 → 报错（线上反馈：
+//    "关掉异常后保存失败"）。重拉后行会出现在正确的分组里，用户接着填即可。
+async function onExceptionChanged() {
   store.lastNodeSavedAt = Date.now()          // 预警列表（AlertList）刷新
   store.lastExceptionChangedAt = Date.now()   // 工序卡片刷新「存在异常」标签与预警态
+  // 保持当前页签不动，仅刷新数据（load 内部会重建 groups / inputValues / reportDates）
+  try {
+    await load()
+  } catch (e) {
+    // load 失败已由 axios 拦截器提示；保留旧数据不影响用户继续查看
+  }
 }
 
 // 提报成功：除上面的全局刷新外，还要让「异常记录」表格重新拉取（令牌 +1）
@@ -797,15 +808,66 @@ const CODE_FRIENDLY = {
   REPORT_DATE_OUT_OF_RANGE: '📅 填报日期超出允许范围：仅可回填最近 7 天内的日期（含今天）',
   NODE_NOT_IN_GROUP: '⚠️ 节点与所选分组不匹配',
   UNKNOWN_GROUP: '⚠️ 未知分组',
+  // 2026-11：分组口径与展示不一致时的明确提示（异常关闭后计划日重算会把节点移组）
+  GROUP_EMPTY: '🔄 当前分组已没有可保存的节点（可能因异常关闭/日期重算移入其它分组），请关闭弹窗重开',
+  NO_NODES: '🔄 该工序当月没有可填报的节点，请刷新后重试',
 }
 // HTML 转义，防 XSS
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 }
+
+/**
+ * 从 axios 失败原因里提取「可读的错误信息 + code」。
+ *
+ * 2026-11：此前只认 `detail.message`，遇到 500（detail 是字符串 "Internal Server Error"）、
+ * 422（detail 是数组）或网络层失败（无 response）时，code 一律退化成 UNKNOWN、文案一律
+ * 「请求失败」——线上问题因此完全无法定位。现在按响应形态分类兜底：
+ *   - detail 为 {code,message}（业务校验）→ 直接用；
+ *   - detail 为字符串（多数 500 / 少数手写 4xx）→ 直接显示该字符串；
+ *   - detail 为数组（FastAPI 422 参数校验）→ 拼出 `字段: 原因`；
+ *   - 无 response（超时/断网/服务未启动）→ 显示网络层原因；
+ *   - 其它 → HTTP status + statusText。
+ *
+ * @param {any} reason Promise.allSettled 的 rejected reason（axios 错误）
+ * @returns {{code: string, message: string, status: number|string}}
+ */
+function parseErrorReason(reason) {
+  const resp = reason?.response
+  if (!resp) {
+    const netMsg = reason?.code === 'ECONNABORTED'
+      ? '请求超时，请重试'
+      : (reason?.message || '网络异常（请求未到达服务器）')
+    return { code: 'NETWORK', message: netMsg, status: '-' }
+  }
+  const detail = resp.data?.detail
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    return { code: detail.code || `HTTP_${resp.status}`, message: detail.message || '请求失败', status: resp.status }
+  }
+  if (typeof detail === 'string' && detail.trim()) {
+    // 500 常见 "Internal Server Error"；也兼容手写的字符串 detail
+    return { code: `HTTP_${resp.status}`, message: detail.trim(), status: resp.status }
+  }
+  if (Array.isArray(detail) && detail.length) {
+    const msg = detail
+      .map((d) => {
+        const field = Array.isArray(d?.loc) ? d.loc.filter((x) => x !== 'body').join('.') : ''
+        return field ? `${field}：${d?.msg || '参数不合法'}` : (d?.msg || '参数不合法')
+      })
+      .join('；')
+    return { code: 'VALIDATION', message: msg, status: resp.status }
+  }
+  return {
+    code: `HTTP_${resp.status}`,
+    message: resp.statusText || `请求失败（HTTP ${resp.status}）`,
+    status: resp.status,
+  }
+}
+
 // 把每组的失败压缩成一行（去掉【】前缀，保留原始 message）
-function shortItem(group, detail) {
+function shortItem(group, parsed) {
   const label = groupLabelMap[group] || group
-  const clean = (detail?.message || '请求失败').replace(/^【.+?】/, '')
+  const clean = String(parsed?.message || '请求失败').replace(/^【.+?】/, '')
   return `${label}：${clean}`
 }
 
@@ -1103,14 +1165,15 @@ async function save() {
     const bad = settled.filter((r) => r.status === 'rejected')
     const totalSaved = ok.reduce((s, r) => s + ((r.value?.saved) ?? 0), 0)
     if (bad.length) {
-      // 仅取失败（rejected）分组，按 code 聚合压缩展示
+      // 仅取失败（rejected）分组，按 code 聚合压缩展示。
+      // parseErrorReason 负责把 500 字符串 detail / 422 数组 / 网络失败 都翻译成可读文案，
+      // 不再统一退化成「UNKNOWN / 请求失败」（那样线上问题无从定位）。
       const items = groupsToSave
         .map(([g], i) => ({ g, result: settled[i] }))
         .filter(({ result }) => result?.status === 'rejected')
         .map(({ g, result }) => {
-          const detail = result.reason?.response?.data?.detail
-          const code = (detail && typeof detail === 'object') ? detail.code : 'UNKNOWN'
-          return { group: g, code, short: shortItem(g, detail) }
+          const parsed = parseErrorReason(result.reason)
+          return { group: g, code: parsed.code, short: shortItem(g, parsed) }
         })
       const buckets = {}
       items.forEach(({ code, short }) => {
@@ -1132,6 +1195,11 @@ async function save() {
         duration: 6000,
         showClose: true,
       })
+      // 分组口径不一致类失败（节点已被异常/日期重算移出当前分组）：立刻重拉明细，
+      // 让行出现在它现在的分组里，用户不用关弹窗就能接着填，也避免重复踩同一个错。
+      if (items.some((it) => it.code === 'NODE_NOT_IN_GROUP' || it.code === 'GROUP_EMPTY')) {
+        try { await load() } catch (e) { /* 已由拦截器提示 */ }
+      }
     }
     if (totalSaved > 0) {
       ElMessage.success(`已保存 ${totalSaved} 条节点进度`)
