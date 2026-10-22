@@ -746,6 +746,20 @@ const datePickerOpen = ref({})
 const originalValues = ref({})
 
 const detail = ref(null)
+/**
+ * 节点索引（2026-10 性能修复）：把「按 id 找节点」从 O(n) 线性查找降为 O(1)。
+ *
+ * 背景：statusOf / labelOf / excOf 原先各写一次 `detail.nodes.find(x => x.id === node.id)`，
+ * 而模板里每个 fill-row 会调用它们约 10 次（excOf 3 次 + hasOpenExc/hasActiveExc 各 2 次
+ * 内部又各调一次 excOf + statusOf 2 次 + labelOf 1 次）。默认渲染 20 行 = 每次渲染
+ * 200 次 × 60 项响应式 Proxy 遍历 —— 切换分组 / 输入数量时的卡顿主因。
+ * 改为一次性建 Map 后，每行查找变成 hash 命中；detail 变化时才重建（computed 缓存）。
+ */
+const nodeById = computed(() => {
+  const map = new Map()
+  for (const n of detail.value?.nodes || []) map.set(n.id, n)
+  return map
+})
 const innerMode = ref('detail')
 const activeGroup = ref('today')
 const inputValues = ref({})
@@ -935,19 +949,13 @@ const statusBgs = {
 }
 const colorOf = (s) => statusColors[s] || '#718096'
 const pillStyle = (s) => ({ background: statusBgs[s] || '#f7fafc', color: statusColors[s] || '#718096' })
-const statusOf = (node) => {
-  const n = detail.value?.nodes?.find((x) => x.id === node.id)
-  return n ? n.status : 'pending'
-}
-const labelOf = (node) => {
-  const n = detail.value?.nodes?.find((x) => x.id === node.id)
-  return n ? n.label : '—'
-}
+const statusOf = (node) => nodeById.value.get(node.id)?.status || 'pending'
+const labelOf = (node) => nodeById.value.get(node.id)?.label || '—'
 // === 异常暂停（2026-10）：所属套标识 ===
 // 「同一套」= 后端的 set_date（该行所属套的「下料计划日」，非套号）；
 // has_open_exception / exception_processes / exception_paused 均由后端 enrich_rows 给出，
 // 前端不做任何推断，仅按字段渲染（保证与总览/排名同一口径）。
-const excOf = (node) => detail.value?.nodes?.find((x) => x.id === node.id) || {}
+const excOf = (node) => nodeById.value.get(node.id) || {}
 // 原排产计划日（重算前的值）：后端 groups / nodes 行均带 plan_date_plan；
 // 未重算的行它与 plan_date 相等 → 不显示「原 X」删除线（避免误显示）。
 const origPlanOf = (node) => node?.plan_date_plan || ''
@@ -1099,19 +1107,40 @@ const independentStatus = computed(() => {
   }
 })
 
-async function load() {
+// 模块级 detail 缓存（2026-10 性能优化）
+// 背景：生产实测 detail 接口 260~350ms（CloudRun 缩容偶发冷启动可达 500ms+），
+// 而用户真实使用是「来回切换工序/反复打开同一弹窗」——每次都重新请求，0.3~0.5s 等待
+// 就是反馈里的"切换卡顿"。缓存 30s 内的同一 (项目/工序/负责人/月份) 结果，
+// 让「切走再切回」瞬开；保存 / 异常变更 / 手动强制刷新一律走 force 绕过缓存。
+const DETAIL_CACHE = new Map()          // key -> { data, ts }
+const DETAIL_CACHE_TTL = 30_000
+
+function detailCacheKey() {
+  return [props.pid, props.processName, props.manager || '', props.month || ''].join('|')
+}
+
+async function load({ force = false } = {}) {
   if (!props.processName) return
-  // v7.4：带 month 时只取「该月导入的行 ∪ 未标注月行」，与详情页总览同一月份口径
-  const params = {}
-  if (props.manager) params.manager = props.manager
-  if (props.month) params.month = props.month
-  detail.value = await fetchProcessNodes(props.pid, props.processName, params)
+  const cacheKey = detailCacheKey()
+  const hit = DETAIL_CACHE.get(cacheKey)
+  if (!force && hit && Date.now() - hit.ts < DETAIL_CACHE_TTL) {
+    detail.value = hit.data
+  } else {
+    // v7.4：带 month 时只取「该月导入的行 ∪ 未标注月行」，与详情页总览同一月份口径
+    const params = {}
+    if (props.manager) params.manager = props.manager
+    if (props.month) params.month = props.month
+    detail.value = await fetchProcessNodes(props.pid, props.processName, params)
+    DETAIL_CACHE.set(cacheKey, { data: detail.value, ts: Date.now() })
+  }
   inputValues.value = {}
   reportDates.value = {}
   Object.keys(detail.value.groups).forEach((g) => {
     detail.value.groups[g].forEach((n) => {
       inputValues.value[n.id] = n.actual_qty
-      const nd = detail.value.nodes.find((x) => x.id === n.id)
+      // 2026-10 性能：原为 groups 内每行 find 一次 nodes（O(n²)，60 套 ≈ 3600 次比较），
+      // 改为 nodeById 索引 O(1)；nodeById 依赖 detail，赋值后首次访问自动重建。
+      const nd = nodeById.value.get(n.id)
       const saved = nd?.report_date || ''
       reportDates.value[n.id] = (n.actual_qty || 0) > 0
         ? (saved || fmtToday())   // 已填写：保留上次保存的实际填报日期
@@ -1198,7 +1227,7 @@ async function save() {
       // 分组口径不一致类失败（节点已被异常/日期重算移出当前分组）：立刻重拉明细，
       // 让行出现在它现在的分组里，用户不用关弹窗就能接着填，也避免重复踩同一个错。
       if (items.some((it) => it.code === 'NODE_NOT_IN_GROUP' || it.code === 'GROUP_EMPTY')) {
-        try { await load() } catch (e) { /* 已由拦截器提示 */ }
+        try { await load({ force: true }) } catch (e) { /* 已由拦截器提示 */ }
       }
     }
     if (totalSaved > 0) {
@@ -1210,7 +1239,7 @@ async function save() {
     // 11 道排产工序保持既有行为：saved → 父组件关闭弹窗 + 刷新。
     if (ok.length) {
       if (isIndependent.value) {
-        await load()
+        await load({ force: true })
         emit('refresh')
       } else {
         emit('saved')        // 父组件关闭弹窗 + 刷新
@@ -1297,7 +1326,7 @@ async function executeBatchReport() {
 
     // 先关弹窗 + 刷新数据，最后才弹提示：保证提示层即使出异常也不影响 UI 与数据
     batchDialogVisible.value = false
-    await load()        // 本弹窗内节点列表局部刷新（弹窗保持打开，便于继续操作）
+    await load({ force: true })        // 本弹窗内节点列表局部刷新（弹窗保持打开，便于继续操作）
     emit('refresh')     // 父级总览（工序卡片 / 时间轴 / 排名）同步刷新
     safeToast('success', {
       dangerouslyUseHTMLString: true,
@@ -1436,7 +1465,7 @@ async function cancelSegments() {
     segmentDialogVisible.value = false
     // ⚠️ ElMessage 只传单个参数（传第二参会崩）
     ElMessage.success(deleted > 0 ? '✅ 已取消按段提报，该行回到整行填报' : '该行没有按段记录，无需取消')
-    await load()      // 刷新详情（segment 字段消失 → 行不再显示「已完成 k/N 段」）
+    await load({ force: true })      // 刷新详情（segment 字段消失 → 行不再显示「已完成 k/N 段」）
     emit('refresh')   // 父级总览（工序卡片标签 / 进度）同步刷新
   } catch (e) {
     const errDetail = e?.response?.data?.detail
@@ -1467,7 +1496,7 @@ async function saveSegments() {
     // ⚠️ ElMessage 只传单个参数（传第二参会崩）
     segmentDialogVisible.value = false
     ElMessage.success('✅ 按段填报已保存')
-    await load()      // 刷新详情（各行 segment 回显）
+    await load({ force: true })      // 刷新详情（各行 segment 回显）
     emit('refresh')   // 父级总览（工序卡片「部分完成/预警/延期」标签）同步刷新
   } catch (e) {
     const errDetail = e?.response?.data?.detail
