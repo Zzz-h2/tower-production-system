@@ -70,9 +70,6 @@
           border
           size="small"
           style="width: 100%"
-          :header-cell-style="headerCellStyle"
-          :cell-style="cellStyle"
-          :row-class-name="rowClassName"
         >
           <!-- 负责人列：左固定；2026-11 需求 —— 表头与数据**居中**（仅本列，其它列不动） -->
           <el-table-column prop="manager" label="负责人" width="110" fixed="left" align="center">
@@ -225,14 +222,13 @@ const board = ref({
 
 const isAdmin = computed(() => auth.isAdmin === true)
 
-/** 表格列定义：由后端返回的 dates（'YYYY-MM-DD'）派生日号与周末标记 */
+/**
+ * 表格列定义：由后端返回的 dates（'YYYY-MM-DD'）派生日号。
+ * 2026-10 清理：原先还算了一个 `weekend` 标记，但它只服务于已被删除的
+ * :cell-style 钩子（该钩子及其函数从未定义过，永远传 undefined），全文件无其它消费方。
+ */
 const dateColumns = computed(() =>
-  (board.value.dates || []).map((ds) => {
-    const [y, m, d] = ds.split('-').map(Number)
-    // 用本地构造避免 'YYYY-MM-DD' 按 UTC 解析造成时区偏移
-    const weekday = new Date(y, m - 1, d).getDay()
-    return { date: ds, day: d, weekend: weekday === 0 || weekday === 6 }
-  })
+  (board.value.dates || []).map((ds) => ({ date: ds, day: Number(ds.slice(8, 10)) }))
 )
 
 const summary = computed(() => board.value.summary || { manager_count: 0, missed_total: 0, day_count: 0 })
