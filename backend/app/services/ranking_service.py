@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta
 
 from ..core import db
 from ..core.timeutil import business_today
-from ..services.business_logic import judge_node_status, build_time_rules
+from ..services.business_logic import judge_node_status, build_time_rules, exception_is_active
 from ..services.node_service import build_exception_anchors
 
 logger = logging.getLogger(__name__)
@@ -366,6 +366,104 @@ def save_submission_board_overrides(month: str, items: list[dict],
     return result
 
 
+def _load_submission_covered(agg: dict, big_area_person: str | None,
+                             today: date) -> tuple[dict, dict, dict]:
+    """计算「当天视为已提报」的两类覆盖（2026-11 新增口径）。
+
+    覆盖来源（任一成立即算该「单元 = 项目|工序」当天已提报）：
+      ① **已提前完成**：该计划行已有 ``actual_qty > 0`` 的填报记录
+         （report_date 可早于计划日 —— 计划日之前就填完了，当天没再填不算漏报）；
+      ② **前置工序异常暂停**：该行**行级** ``exception_paused`` 为真
+         （同套存在生效中异常且位于其上游工序）。
+         判定**完全复用** ``build_time_rules`` 的输出，不在这里重写「暂停」规则；
+         且只对「本月有计划行 且 存在生效中异常」的项目做这批计算，避免无谓开销。
+
+    Args:
+        agg: ``db.get_submission_board_aggregates`` 的返回值（用其中的 ``plan_units``）
+        big_area_person: 仅用于日志/语义对齐，本函数不做过滤（聚合层已隔离）
+        today: 业务今天（active 判定与判定层同源）
+
+    Returns:
+        (covered_all, covered_early, covered_paused)
+          - 三者均为 ``{(manager, 'YYYY-MM-DD'): set[(project_id, process_name)]}``
+          - covered_all = early ∪ paused；covered_early / covered_paused 为**互斥**拆分
+            （paused 里剔除已计入 early 的单元，便于 tooltip 分别说明）
+    """
+    units = agg.get("plan_units") or []
+    if not units:
+        return {}, {}, {}
+
+    early: dict[tuple[str, str], set] = {}
+    paused_raw: dict[tuple[str, str], set] = {}
+    project_ids: set[int] = set()
+    for r in units:
+        mgr = str(r.get("manager") or "").strip()
+        if not mgr:
+            continue
+        ds = _date_str(r.get("d"))
+        try:
+            pid = int(r.get("project_id"))
+        except (TypeError, ValueError):
+            continue
+        key = (mgr, ds)
+        unit = (pid, str(r.get("process_name") or ""))
+        project_ids.add(pid)
+        if int(r.get("has_actual") or 0) > 0:
+            early.setdefault(key, set()).add(unit)
+
+    # ---- 条件②：只对「存在生效中异常」的项目跑行级判定（复用既有能力）----
+    try:
+        exc_map = db.get_node_exceptions_batch(sorted(project_ids)) or {}
+    except Exception as e:  # noqa: BLE001 — 异常暂停为增强口径，失败不影响既有判定
+        logger.warning("get_node_exceptions_batch 失败（提报情况覆盖口径降级）：%s", e)
+        exc_map = {}
+
+    active_pids = [
+        pid for pid, rows in exc_map.items()
+        if any(exception_is_active(r, today) for r in (rows or []))
+    ]
+    if active_pids:
+        try:
+            plans_map = db.get_node_plans_batch(active_pids)
+            actuals_map = db.get_node_actuals_batch(active_pids)
+            dur_map = db.get_project_process_durations_batch(active_pids, None)
+        except Exception as e:  # noqa: BLE001 — 同上，降级为「无暂停覆盖」
+            logger.warning("提报情况覆盖口径的批量加载失败：%s", e)
+            plans_map, actuals_map, dur_map = {}, {}, {}
+
+        for pid in active_pids:
+            plans = plans_map.get(pid) or []
+            durations = dur_map.get(pid) or {}
+            if not plans or not durations:
+                continue        # 无时长数据 → 无法反推所属套，暂停口径不参与（与判定层一致）
+            anchors = build_exception_anchors(exc_map.get(pid) or [], durations, plans,
+                                              today=today)
+            rules = build_time_rules(plans, actuals_map.get(pid) or {}, durations,
+                                     anchors, today=today)
+            for r in units:
+                if int(r.get("project_id")) != pid:
+                    continue
+                rule = rules.get(r.get("node_id")) or {}
+                if not rule.get("exception_paused"):
+                    continue
+                mgr = str(r.get("manager") or "").strip()
+                if not mgr:
+                    continue
+                paused_raw.setdefault((mgr, _date_str(r.get("d"))), set()).add(
+                    (pid, str(r.get("process_name") or "")))
+
+    # 互斥拆分：paused 只保留「不是提前完成」贡献的部分，便于前端分别说明
+    covered_all: dict[tuple[str, str], set] = {}
+    covered_paused: dict[tuple[str, str], set] = {}
+    for key in set(early) | set(paused_raw):
+        e_set = early.get(key, set())
+        p_set = paused_raw.get(key, set())
+        covered_all[key] = e_set | p_set
+        if p_set - e_set:
+            covered_paused[key] = p_set - e_set
+    return covered_all, early, covered_paused
+
+
 def get_submission_board(month: str, big_area_person: str | None = None) -> dict:
     """「提报情况总览」矩阵：当月自然日 × 负责人，标记「当天有计划但完全未提报」。
 
@@ -379,7 +477,18 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
         plan_date=填报日 的行）与手动完成占位行（99）一律不参与判定
       - 「未做任何操作」：当天既无填报（``node_actual_progress.report_date = 当天``）
         也无异常（``node_exceptions.created_at`` 的日期 = 当天，**不是** plan_date）
-      - 标记 ×：有计划 且 无任何操作 且 该日 ≤ 昨天
+      - 🔴 2026-11 新口径（用户原话，**任一成立即视为当天已提报**）：
+        ① 该工序**已提前完成** —— 该计划行已有 actual_qty>0 的填报记录（report_date 可早于
+           计划日；计划日之前就填完了，当天没再填不算漏报）；
+        ② 该工序该套的**前置工序存在异常且行级 exception_paused**（同套上游有生效中异常）；
+        ③ 当天提报了异常（既有 exceptions 事实）；
+        ④ 当天有填报（既有 reports 事实）。
+        覆盖按「单元 = 项目|工序」计数（与 plan_count 同空间）：**全部单元被覆盖才留空**，
+        部分覆盖仍判未按时，但 cell 会带 ``covered_count/covered_early/covered_paused``
+        供 tooltip 说明「已覆盖 N/M」。
+        ①② 的实现见 ``_load_submission_covered``：① 由 SQL 的 EXISTS 事实给出，
+        ② 直接复用 ``build_time_rules`` 的 ``exception_paused``，**不重写判定**。
+      - 标记 ×：有计划 且 无任何操作 且 无全部覆盖 且 该日 ≤ 昨天
       - 今天与未来：一律留空（判定截止到最后一天已结束的日期）
       - 月份归属：按 ``plan_date`` 落在哪个自然月（日历口径）。这与「排产计划总览」
         「出品排名总览」的 ``plan_month``（排产归属月）口径**不同**：月初/月末可能出现
@@ -448,6 +557,10 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
         if mgr:
             exceptioned.add((mgr, _date_str(r.get("d"))))
 
+    # ---- 覆盖事实（2026-11 新口径）：已提前完成 / 前置工序异常暂停 → 当天视为已提报 ----
+    covered_all, covered_early_map, covered_paused_map = _load_submission_covered(
+        agg, big_area_person, today)
+
     # ---- 组装矩阵 ----
     rows: list[dict] = []
     missed_total = 0
@@ -461,10 +574,19 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
             has_plan = cnt > 0
             has_report = key in reported
             has_exc = key in exceptioned
+            # 覆盖：当天计划单元中「已提前完成」或「前置工序异常暂停」的个数
+            # （单元 = 项目|工序，与 plan_count 同一空间；见 _load_submission_covered）
+            cov_all = covered_all.get(key) or set()
+            cov_early = covered_early_map.get(key) or set()
+            cov_paused_only = covered_paused_map.get(key) or set()
+            covered_count = len(cov_all) if has_plan else 0
+            # 全部单元都被覆盖 → 当天视为已提报（不判未按时）
+            all_covered = bool(cnt > 0 and covered_count >= cnt)
             # 仅判定「已经完整结束的日期」：今天与未来一律留空
             judged = d <= cutoff
             editable = bool(has_plan and judged)
-            auto_missed = bool(has_plan and judged and not has_report and not has_exc)
+            auto_missed = bool(has_plan and judged and not has_report and not has_exc
+                               and not all_covered)
             # 人工覆盖只在「可编辑格」上生效（防御层）：即便库中存在陈旧记录
             # （排产重导后该日已无计划 / 该日已变为未来），也不得改变矩阵显示。
             override = override_map.get(key) if editable else None
@@ -486,6 +608,10 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
                 "processes": plan_procs.get(key, []),
                 "reported": has_report,
                 "exception": has_exc,
+                # 2026-11 覆盖口径（前端 tooltip 用；判定已在 auto_missed 里生效）
+                "covered_count": covered_count,
+                "covered_early": len(cov_early),
+                "covered_paused": len(cov_paused_only),
                 "judged": judged,
                 "editable": editable,
                 "auto_missed": auto_missed,

@@ -2310,12 +2310,15 @@ def get_user_by_id(uid: int) -> Optional[dict]:
 # ============================================================
 def get_submission_board_aggregates(month_start: str, month_end: str,
                                    big_area_person: Optional[str] = None) -> dict:
-    """「提报情况总览」矩阵所需的 3 组聚合事实（按负责人 × 日期 GROUP BY）。
+    """「提报情况总览」矩阵所需的 4 组聚合事实（按负责人 × 日期 GROUP BY）。
 
-    只读，不写任何表。**固定 3 条 SQL**（与人数/天数无关，无 N+1）：
+    只读，不写任何表。**固定 4 条 SQL**（与人数/天数无关，无 N+1）：
       ① plans      —— 该自然月内每个 (负责人, 计划日) 的节点数 + 工序名
       ② reports    —— 该自然月内每个 (负责人, 填报日) 的填报记录数
       ③ exceptions —— 该自然月内每个 (负责人, 异常创建日) 的异常条数
+      ④ plan_units —— 该自然月内每条计划行的「单元键 + node_id + 是否已有 actual>0」
+                      （2026-11 新增，供服务层算「已提前完成 / 前置异常暂停」的覆盖数；
+                       只做聚合用，不透出到接口）
 
     口径（用户 2026-10 确认）：
       - 计划：``process_node_plans``，``plan_date`` 落在 [month_start, month_end)，
@@ -2353,6 +2356,7 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
           'plans': [{'manager','d'(date),'plan_count','processes'(str),'plan_rows'}],
           'reports': [{'manager','d'(date),'cnt'}],
           'exceptions': [{'manager','d'(date),'cnt'}],
+          'plan_units': [{'manager','d'(date),'project_id','process_name','node_id','has_actual'}],
         }
     """
     conn = get_connection()
@@ -2418,7 +2422,41 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
             """, tuple(exc_args))
             exceptions = [dict(r) for r in cur.fetchall()]
 
-            return {"plans": plans, "reports": reports, "exceptions": exceptions}
+            # ④ 计划单元事实（2026-11 新增）：为「已提前完成 / 前置异常暂停」两类覆盖提供
+            #    **单元级**事实。单元 = (项目, 工序)，与 ① 的 plan_count 使用完全相同的
+            #    COUNT(DISTINCT project_id|process_name) 空间，因此 plan_count 与 covered_count
+            #    可以直接相减/比较（这是「部分覆盖」展示的前提）。
+            #    - has_actual：该计划行**已有填报记录**（report_date 可早于计划日 →
+            #      即「计划日之前就填完了」，当天没再填也算已提报）。
+            #    - 返回 node_id：上层用 build_time_rules 复用**行级 exception_paused** 判定
+            #      （条件 2），绝不在这里另写一套「暂停」规则。
+            #    ⚠️ 本组只供服务层做聚合计数，**不进入接口响应**；接口仍是固定条数的聚合结果，
+            #       没有把 per-plan 明细透给前端（保持「固定条数、无 N+1」的既有约定）。
+            unit_args: list = [month_start, month_end, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
+            if big_area_person:
+                unit_args.append(big_area_person)
+            cur.execute(f"""
+                SELECT n.manager AS manager,
+                       n.plan_date AS d,
+                       n.project_id AS project_id,
+                       n.process_name AS process_name,
+                       n.id AS node_id,
+                       EXISTS (SELECT 1 FROM node_actual_progress a
+                                WHERE a.project_id = n.project_id
+                                  AND a.node_plan_id = n.id
+                                  AND a.actual_qty > 0) AS has_actual
+                FROM process_node_plans n
+                JOIN projects p ON p.id = n.project_id
+                WHERE n.plan_date >= %s AND n.plan_date < %s
+                  AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
+                  AND n.process_order BETWEEN %s AND %s
+                  AND n.plan_qty > 0
+                  {ba_sql}
+            """, tuple(unit_args))
+            plan_units = [dict(r) for r in cur.fetchall()]
+
+            return {"plans": plans, "reports": reports, "exceptions": exceptions,
+                    "plan_units": plan_units}
     finally:
         conn.close()
 

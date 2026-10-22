@@ -74,8 +74,8 @@
           :cell-style="cellStyle"
           :row-class-name="rowClassName"
         >
-          <!-- 负责人列：左固定 -->
-          <el-table-column prop="manager" label="负责人" width="110" fixed="left">
+          <!-- 负责人列：左固定；2026-11 需求 —— 表头与数据**居中**（仅本列，其它列不动） -->
+          <el-table-column prop="manager" label="负责人" width="110" fixed="left" align="center">
             <template #default="{ row }">
               <span class="manager-cell">{{ row.manager }}</span>
             </template>
@@ -117,13 +117,23 @@
                     <div v-if="!editing && row.byDate[d.date].processes.length" class="subm-tip-line">
                       涉及工序：{{ procText(row.byDate[d.date]) }}
                     </div>
+                    <!-- 2026-11 覆盖口径：说明「为什么有×/为什么留空」背后的已覆盖节点数。
+                         全部覆盖 → 不留×；部分覆盖 → 仍判未按时，但这里标注已覆盖 N/M。 -->
+                    <div v-if="row.byDate[d.date].covered_count > 0" class="subm-tip-line">
+                      已视为已提报 {{ row.byDate[d.date].covered_count }}/{{ row.byDate[d.date].plan_count }} 个节点
+                      <span class="subm-tip-meta">
+                        （提前完成 {{ row.byDate[d.date].covered_early }}<template v-if="row.byDate[d.date].covered_paused">、前置异常暂停 {{ row.byDate[d.date].covered_paused }}</template>）
+                      </span>
+                    </div>
                     <!-- 非编辑态：已被人工覆盖的格子明确说明「改成了什么、谁改的、何时改的」 -->
                     <div v-if="!editing && row.byDate[d.date].override" class="subm-tip-line subm-tip-ovr">
                       人工调整为「{{ row.byDate[d.date].override === 'missed' ? '未按时提报（×）' : '已按时提报（留空）' }}」
                       <span v-if="overrideMeta(row.byDate[d.date])" class="subm-tip-meta">（{{ overrideMeta(row.byDate[d.date]) }}）</span>
                     </div>
                     <div v-if="!editing && row.byDate[d.date].missed" class="subm-tip-line">
-                      自动判定为未按时：当天未填报、未提报异常
+                      自动判定为未按时：{{ row.byDate[d.date].covered_count > 0
+                        ? `剩余 ${row.byDate[d.date].plan_count - row.byDate[d.date].covered_count} 个节点当天无填报、无异常提报`
+                        : '当天未填报、未提报异常' }}
                     </div>
                     <div v-if="!editing && !row.byDate[d.date].missed && row.byDate[d.date].auto_missed" class="subm-tip-line">
                       自动判定为未按时，已人工调整为已按时
