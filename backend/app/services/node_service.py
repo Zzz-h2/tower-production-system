@@ -5,7 +5,7 @@ from typing import Optional
 
 from .business_logic import (judge_node_status, judge_process_card_status, split_node_groups,
                              compute_real_overdue, build_time_rules, cutting_anchor_map,
-                             exception_is_active, exception_is_expired)
+                             exception_is_active, exception_is_expired, exception_is_warning)
 from .workday_calendar import parse_date
 from ..core.config import SCHEDULE_PROCESS_NAMES, INDEPENDENT_PROCESS_NAMES
 from ..core.timeutil import business_today
@@ -343,6 +343,10 @@ def build_exception_anchors(exc_rows: Optional[list[dict]], durations: Optional[
             # 生效中标记（唯一实现 = business_logic.exception_is_active）：
             # 🔴 判定层只认这一个字段，不再各自比较 status/日期，杜绝两套口径。
             "active": exception_is_active(
+                {"status": status, "planned_close_date": planned_close_date}, today),
+            # 预警标记（2026-10）：计划关闭日**当天**、仍未关闭 → 不暂停、恢复正常判定，
+            # 仅供展示层标「预警」；判定层一律仍只读 active，不要用本字段改判定。
+            "warning": exception_is_warning(
                 {"status": status, "planned_close_date": planned_close_date}, today),
             "set_seq": set_seq,
             "set_d0": set_d0,
@@ -1168,7 +1172,7 @@ def decorate_exception_records(rows: Optional[list[dict]], today=None) -> dict:
     """
     today_date = parse_date(today) or business_today()
     items: list[dict] = []
-    summary = {"total": 0, "active": 0, "expired": 0, "closed": 0}
+    summary = {"total": 0, "active": 0, "warning": 0, "expired": 0, "closed": 0}
     for row in rows or []:
         item = dict(row)
         status = str(item.get("status") or "pending").strip() or "pending"
@@ -1177,8 +1181,12 @@ def decorate_exception_records(rows: Optional[list[dict]], today=None) -> dict:
         item["planned_close_date"] = planned_close
         is_closed = status == "closed"
         is_expired = (not is_closed) and exception_is_expired(item, today_date)
-        is_active = (not is_closed) and (not is_expired)
-        display_status = "closed" if is_closed else ("expired" if is_expired else "active")
+        # 2026-10 预警态：计划关闭日当天、仍未关闭（与 active/expired 三者互斥）
+        is_warning = (not is_closed) and exception_is_warning(item, today_date)
+        is_active = (not is_closed) and (not is_expired) and (not is_warning)
+        display_status = ("closed" if is_closed else
+                          "expired" if is_expired else
+                          "warning" if is_warning else "active")
 
         days_to_close = None
         days_overdue = None
@@ -1200,6 +1208,7 @@ def decorate_exception_records(rows: Optional[list[dict]], today=None) -> dict:
         set_seq = _int_or_none(item.get("set_seq"))
         item["display_status"] = display_status
         item["is_active"] = is_active
+        item["is_warning"] = is_warning
         item["is_expired"] = is_expired
         item["is_closed"] = is_closed
         item["days_to_close"] = days_to_close

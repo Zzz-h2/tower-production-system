@@ -11,6 +11,9 @@
       <span class="exc-count-item exc-count-active" :class="{ 'exc-count-zero': !scopedSummary.active }">
         <span class="exc-count-key">生效</span><span class="exc-count-val">{{ scopedSummary.active }}</span>
       </span>
+      <span class="exc-count-item exc-count-warning" :class="{ 'exc-count-zero': !scopedSummary.warning }">
+        <span class="exc-count-key">预警</span><span class="exc-count-val">{{ scopedSummary.warning }}</span>
+      </span>
       <span class="exc-count-item exc-count-expired" :class="{ 'exc-count-zero': !scopedSummary.expired }">
         <span class="exc-count-key">超期</span><span class="exc-count-val">{{ scopedSummary.expired }}</span>
       </span>
@@ -28,6 +31,7 @@
       <el-select v-model="filterStatus" placeholder="状态" clearable style="width: 130px" size="small">
         <el-option label="全部状态" value="all" />
         <el-option label="生效中" value="active" />
+        <el-option label="预警（关闭日当天）" value="warning" />
         <el-option label="已超期" value="expired" />
         <el-option label="已关闭" value="closed" />
       </el-select>
@@ -304,12 +308,13 @@ const scopedItems = computed(() => {
  * 注意：display_status 由后端 decorate_exception_records 统一推断，前端只做聚合、不推断状态。
  */
 const scopedSummary = computed(() => {
-  const acc = { total: 0, active: 0, expired: 0, closed: 0 }
+  const acc = { total: 0, active: 0, warning: 0, expired: 0, closed: 0 }
   const list = scopedItems.value || []
   acc.total = list.length
   list.forEach((e) => {
     const status = e && e.display_status
     if (status === 'active') acc.active += 1
+    else if (status === 'warning') acc.warning += 1
     else if (status === 'expired') acc.expired += 1
     else if (status === 'closed') acc.closed += 1
   })
@@ -352,16 +357,19 @@ const filteredItems = computed(() =>
 //    用在异常到期上会与延期语义混淆（PRD 明确）。
 const STATUS_STYLE = {
   active: { background: '#fffaf0', color: '#dd6b20', border: '1px solid #fbd38d' },
+  // 2026-10 预警态：计划关闭日当天 —— 最后一天窗口，用预警黄（#d69e2e）与生效橙区分
+  warning: { background: '#fffff0', color: '#b7791f', border: '1px solid #f6e05e' },
   expired: { background: '#dd6b20', color: '#ffffff', border: '1px solid #dd6b20' },
   closed: { background: '#f0fff4', color: '#38a169', border: '1px solid #9ae6b4' },
 }
-const STATUS_LABEL = { active: '生效中', expired: '已超期', closed: '已关闭' }
+const STATUS_LABEL = { active: '生效中', warning: '⚠️ 预警', expired: '已超期', closed: '已关闭' }
 const statusStyle = (s) => STATUS_STYLE[s] || STATUS_STYLE.closed
 const statusLabel = (s) => STATUS_LABEL[s] || '已关闭'
 
 /** 行级浅色底：统一走橙系（超期行橙更浓一档），不再用淡红 → 与「逾期」语义彻底分开 */
 function rowClass({ row }) {
   if (row.display_status === 'expired') return 'exc-row-expired'
+  if (row.display_status === 'warning') return 'exc-row-warning'
   if (row.display_status === 'active') return 'exc-row-active'
   return ''
 }
@@ -625,6 +633,8 @@ async function onDelete() {
 .exc-count-unit { color: #a0aec0; }
 /* 生效中：浅底橙字（普通态） */
 .exc-count-active .exc-count-val { color: #dd6b20; }
+/* 预警（计划关闭日当天）：深黄字，与生效橙、超期实心橙、逾期深红都能区分 */
+.exc-count-warning .exc-count-val { color: #b7791f; font-weight: 600; }
 /* 超期：同一「异常」橙，改用**实心填充**区分（白字橙底小徽章），
    与状态列 pill 的「浅底 / 实心」两级完全一致；不换色相 → 不会与「逾期」深红混淆。 */
 .exc-count-expired .exc-count-val {
@@ -709,5 +719,6 @@ async function onDelete() {
 /* 行级浅底（:deep 穿透到 el-table 生成的 tr） */
 /* 行级底色：同为橙系，超期的橙更浓一档（不用淡红，避免读成"逾期"） */
 :deep(.exc-row-active) { background: #fffdf8; }
+:deep(.exc-row-warning) { background: #fffbea; }   /* 预警（关闭日当天）：极浅黄，比超期更淡 */
 :deep(.exc-row-expired) { background: #fff7ed; }
 </style>

@@ -24,6 +24,60 @@ router = APIRouter(prefix="/api/projects", tags=["nodes"])
 BACKFILL_DAYS = 7
 
 
+def _auto_close_resolved_exceptions(pid: int, process_name: str, node_ids: set,
+                                    today) -> list[dict]:
+    """提报进度后自动关闭该工序在本批节点上的异常（2026-10 用户口径）。
+
+    口径：「填了进度 = 异常已解决」。只在**有计划关闭日且 today <= 计划关闭日**时自动关闭：
+      · 已到期失效（today > 计划关闭日）的异常**不**自动关闭 —— 避免补录历史进度把
+        过期异常"洗白"（过期记录应留在超期列表等人工处理）；
+      · ``planned_close_date`` 为空的（历史异常，永不到期）**不**自动关闭，保持原状。
+    关闭后 ``closed_at=NOW()``（由 ``db.update_node_exception`` 统一写），下游工序会按
+    closed_at 锚点重算计划日 —— 与「手动点关闭」完全同一条链路。
+
+    Args:
+        pid: 项目 id
+        process_name: 本次保存的工序名（异常必须属于同一工序）
+        node_ids: 本次成功写入进度的节点 id 集合
+        today: 业务今天（date）
+
+    Returns:
+        list[dict]: 已关闭的异常（``id/process_name/planned_close_date``），供响应提示
+    """
+    if not node_ids:
+        return []
+    today_text = today.strftime("%Y-%m-%d")
+    closed: list[dict] = []
+    try:
+        exc_rows = db.get_node_exceptions_by_project(pid)
+    except Exception as exc:      # noqa: BLE001 — 自动关闭属增强，失败不得影响保存本身
+        print(f"[warn] 自动关闭异常：读取异常失败（跳过）：{exc}")
+        return []
+    for e in exc_rows or []:
+        if str(e.get("status") or "").strip() == "closed":
+            continue
+        if str(e.get("process_name") or "").strip() != process_name:
+            continue
+        try:
+            if int(e.get("node_id") or 0) not in node_ids:
+                continue
+        except (TypeError, ValueError):
+            continue
+        planned = str(e.get("planned_close_date") or "")[:10]
+        if not planned or today_text > planned:
+            continue
+        try:
+            if db.update_node_exception(e["id"], {"status": "closed"}):
+                closed.append({
+                    "id": e["id"],
+                    "process_name": process_name,
+                    "planned_close_date": planned,
+                })
+        except Exception as exc:   # noqa: BLE001
+            print(f"[warn] 自动关闭异常 {e.get('id')} 失败：{exc}")
+    return closed
+
+
 @router.post("/{pid}/nodes/{process_name}/save")
 def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest,
                        user: dict = Depends(get_current_user)):
@@ -196,6 +250,7 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                 )
 
     saved = 0
+    saved_ids: set[int] = set()   # 供「提报进度→自动关闭异常」精确圈定本次提交的节点
     for v in values_to_write:
         if is_independent:
             rd = v.report_date or today.strftime("%Y-%m-%d")
@@ -226,6 +281,7 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
                 db.save_independent_fill(pid, process_name, int(v.qty), rd,
                                          plan_manager_by_id.get(v.node_id))
             saved += 1
+            saved_ids.add(v.node_id)
         elif lock_date:
             # 大区账号（big_area）：日期已在写入前「整体校验」通过（见上方 pre-validation），
             # 此处直接落库。不再硬编码为今天 —— 可回填 [today − BACKFILL_DAYS, today]，
@@ -235,6 +291,7 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
             db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd,
                                   plan_manager_by_id.get(v.node_id))
             saved += 1
+            saved_ids.add(v.node_id)
         else:
             rd = v.report_date or req.report_date or today.strftime("%Y-%m-%d")
             try:
@@ -247,8 +304,16 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
             db.upsert_node_actual(pid, v.node_id, process_name, int(v.qty), rd,
                                   plan_manager_by_id.get(v.node_id))
             saved += 1
+            saved_ids.add(v.node_id)
+
+    # ---- 2026-10：提报进度 = 异常已解决 → 自动关闭（仅限计划关闭日当天或之前）----
+    # 用户口径：异常在「计划关闭日当天」转为预警态（不再暂停、按正常流程判延期），
+    # 只要当天或提前提报了该工序进度，就代表问题已解决，可自动关闭该异常。
+    auto_closed = _auto_close_resolved_exceptions(pid, process_name, saved_ids, today)
 
     message = f"✅ 已保存 {saved} 个节点进度（工序：{process_name}，{GROUP_LABELS[req.group]}）"
+    if auto_closed:
+        message += f"；已自动关闭 {len(auto_closed)} 条异常（进度已提报，视为异常解决）"
     if req.partial_ok and skipped_details:
         message += f"；跳过 {len(skipped_details)} 条（前序联动校验未通过）"
     resp = {
@@ -256,6 +321,8 @@ def save_node_progress(pid: int, process_name: str, req: SaveNodeProgressRequest
         "saved": saved,
         "group": req.group,
     }
+    if auto_closed:
+        resp["auto_closed_exceptions"] = auto_closed
     if req.partial_ok:
         resp["skipped"] = skipped_details
     return resp

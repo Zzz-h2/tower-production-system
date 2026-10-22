@@ -21,11 +21,13 @@ from ..core.timeutil import business_today
 
 
 # ============================================================
-# 异常「到期失效」判定（2026-11）：active / expired 的**唯一实现处**
+# 异常「到期失效」判定（2026-11）：active / warning / expired 的**唯一实现处**
 # ------------------------------------------------------------
 # PRD 定死口径（其他模块一律调用本节的三个纯函数，禁止各写一份）：
 #   active(e)  := e.status <> 'closed' AND (e.planned_close_date IS NULL
-#                                            OR business_today() <= e.planned_close_date)
+#                                            OR business_today() < e.planned_close_date)
+#   warning(e) := e.status <> 'closed' AND e.planned_close_date IS NOT NULL
+#                                            AND business_today() = e.planned_close_date
 #   expired(e) := e.status <> 'closed' AND e.planned_close_date IS NOT NULL
 #                                            AND business_today() > e.planned_close_date
 # 要点：
@@ -33,6 +35,10 @@ from ..core.timeutil import business_today
 #   · planned_close_date IS NULL = 永不到期（历史异常保持暂停，向后兼容）；
 #   · 🔴 expired ≠ closed：到期失效**不触发** closed_at 锚点重算，
 #     下游一律按**原** eff_plan_date 判逾期。
+#   · 🔴 2026-10 新增「预警态」（warning）：计划关闭日**当天**不再算生效中 —— 暂停失效、
+#     恢复正常工序流程（当天未提报即显示延期），给负责人最后一天窗口；
+#     当天或提前提报进度 → 由保存路径自动关闭该异常（见 routers/nodes.py）。
+#     三态互斥且覆盖全部未关闭记录：today < close / = close / > close。
 # ============================================================
 def _today_text(today=None) -> str:
     """把基准日统一成 ``'YYYY-MM-DD'`` 字符串（None → 业务时区今天；date/str 均兼容）。
@@ -66,14 +72,17 @@ def _exception_is_closed(exc: dict) -> bool:
 
 
 def exception_is_active(exc: dict, today=None) -> bool:
-    """异常是否「生效中」（未关闭 且 未到计划关闭日之后）。
+    """异常是否「生效中」（未关闭 且 **尚未到**计划关闭日）。
+
+    🔴 2026-10 口径变更：计划关闭日**当天**不再算生效中（改由 ``exception_is_warning``
+    判定为「预警」）——当天暂停失效、恢复正常逾期判定，给负责人最后一天窗口。
 
     Args:
         exc: 异常记录（dict，需含 status / planned_close_date）
         today: 基准日（None → 业务时区今天；date / 'YYYY-MM-DD' 均可）
 
     Returns:
-        bool: True = 生效中（参与暂停/异常态判定）；False = 已关闭或已到期失效
+        bool: True = 生效中（参与暂停/异常态判定）；False = 已关闭 / 当天预警 / 已到期失效
     """
     if not isinstance(exc, dict) or _exception_is_closed(exc):
         return False
@@ -81,7 +90,24 @@ def exception_is_active(exc: dict, today=None) -> bool:
     if not planned_close:
         # planned_close_date 为空 = 永不到期（历史异常：保持暂停）
         return True
-    return _today_text(today) <= planned_close
+    return _today_text(today) < planned_close
+
+
+def exception_is_warning(exc: dict, today=None) -> bool:
+    """异常是否处于「预警」态（未关闭 且 **正好是**计划关闭日当天）。
+
+    语义（2026-10 用户口径）：最后一天窗口 —— 异常不再暂停后续工序（按正常流程判延期），
+    当天或提前提报进度即视为异常已解决，由保存路径自动关闭。
+
+    Returns:
+        bool: True = 计划关闭日当天、仍未关闭
+    """
+    if not isinstance(exc, dict) or _exception_is_closed(exc):
+        return False
+    planned_close = _planned_close_text(exc)
+    if not planned_close:
+        return False
+    return _today_text(today) == planned_close
 
 
 def exception_is_expired(exc: dict, today=None) -> bool:
