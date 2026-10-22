@@ -2320,9 +2320,17 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
                       （2026-11 新增，供服务层算「已提前完成 / 前置异常暂停」的覆盖数；
                        只做聚合用，不透出到接口）
 
-    口径（用户 2026-10 确认）：
-      - 计划：``process_node_plans``，``plan_date`` 落在 [month_start, month_end)，
-        ``plan_qty > 0`` 才计为「当天有计划」。
+    口径（用户 2026-11 最新确认，**取代 2026-10 的自然月口径**）：
+      - 🔴 **当月排产计划不隔月**：一行属于「查询月 M」当且仅当 **双条件同时成立**
+          ``plan_month = M``（严格相等，``NULL`` 不匹配）
+          ``AND plan_date ∈ [M-01, 次月 01)``
+        四组聚合（plans / reports / exceptions / plan_units）**统一**按此过滤：
+          · 上月导入、日期落到本月 → **不算本月**（plan_month 不符）
+          · 本月导入、日期落在往月（含异常延期到本月的工序）→ **不算本月**（plan_date 不符）
+          · ``plan_month IS NULL`` 的历史行 → **一律不计入任何月**
+        取舍说明：用户明确「每个月都会重新上传排产计划」，故历史未标注月行不再兜底计入；
+        若将来需要兼容历史行，**必须另立口径**，不要在此处悄悄放宽（会重新出现隔月脏数据）。
+      - 计划：``process_node_plans``，``plan_qty > 0`` 才计为「当天有计划」。
       - 计划行白名单：``process_order BETWEEN 1 AND 11``（排产工序），这是排除非排产行的
         **唯一依据**——两类非排产行都必须靠它排除，不能靠「plan_date IS NULL」：
           · 独立工序（累计完成总数 90 / 累计发运总数 91）：``sync_independent_plans`` 建的
@@ -2330,20 +2338,16 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
             plan_date = 填报日期、plan_qty > 0 的 90/91 行（见 database.py save_independent_fill），
             日期区间挡不住这类行；
           · 「手动完成」占位行（process_order=99）：plan_date 是完成日期，同样有日期与数量。
-      - 填报：``node_actual_progress.report_date`` 落在该自然月；负责人取
-        ``nap.manager``，为空时回退经 ``node_plan_id`` 关联的 ``process_node_plans.manager``。
-      - 异常：``node_exceptions.created_at`` 的日期部分落在该自然月
-        （**不是 plan_date**：异常可能针对未来计划日提报）；``node_exceptions`` 无
-        manager 字段，必须 join ``process_node_plans`` 取 manager。
+      - 填报：``node_actual_progress`` 必须 **join 计划行**（``project_id`` + ``node_plan_id``）
+        后才能判断归属月——沿用上面同一套「plan_month + plan_date 区间 + 白名单」过滤，
+        否则「本月填报上月积压行」会被错算进本月。负责人取 ``nap.manager``，为空时回退
+        计划行的 ``manager``。
+      - 异常：``node_exceptions.created_at`` 的日期部分落在该自然月（**提报时间**，不是 plan_date），
+        **并且**其计划行满足同一套归属过滤（``created_at`` 区间与 plan 归属**两者都要满足**）。
+        ``node_exceptions`` 无 manager 字段，必须 join ``process_node_plans`` 取 manager；
+        计划行已不存在的历史异常无法判断归属月 → 不计入（宁可少算，不可错算）。
       - 大区隔离：``projects.big_area_person = %s``（admin 传 None 看全量）。
 
-    ⚠️ 月份维度刻意**不叠加** ``_month_scope``（plan_month 过滤）：本页是「按自然月看日历」，
-    以 ``plan_date`` 落在该自然月为准，从而让跨月边界行（例如上月导入、plan_date 落在本月
-    1~2 日的计划）归入其真实的**日历日**。
-    ⚠️ 但**不要**误以为「叠加 plan_month 就能让历史月有数据」：排产导入是整体覆盖式，且
-    ``insert_node_plans`` 的删除条件不含月份（见其 del_cond 注释：刻意不加月份作用域），
-    被重导项目的历史计划已归档进 ``process_node_plans_history``，故两种口径下历史月主表都为空；
-    若再叠加 ``plan_month = 查询月``，反而会让上述边界行在相邻两个月的页面上都消失。
     同一 (项目, 工序) 的重复行用 ``COUNT(DISTINCT project_id|process_name)`` 去重，不会虚增节点数。
 
     Args:
@@ -2363,9 +2367,16 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
     try:
         with conn.cursor() as cur:
             ba_sql = " AND p.big_area_person = %s" if big_area_person else ""
+            # 排产归属月（严格相等）。2026-11 用户口径：本页必须「当月排产计划不隔月」，
+            # 四组聚合统一叠加 `plan_month = 查询月`，与 plan_date 的自然月区间构成**双条件**：
+            #   · 上月导入、日期落到本月 → 不算本月（plan_month 不符）
+            #   · 本月导入、日期落在往月 → 不算本月（plan_date 不符）
+            #   · plan_month IS NULL 的历史行 → **一律不计入任何月**（用户明确「每月都会重传排产」，
+            #     该取舍已在 docstring 写明；如需兼容历史行，必须另立口径，不能在此放宽）
+            month_key = str(month_start)[:7]
 
             # ① 计划事实：节点数 + 工序名（plan_qty <= 0 的行只用于「该负责人本月有排产行」）
-            plan_args: list = [month_start, month_end, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
+            plan_args: list = [month_start, month_end, month_key, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
             if big_area_person:
                 plan_args.append(big_area_person)
             cur.execute(f"""
@@ -2379,6 +2390,7 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
                 FROM process_node_plans n
                 JOIN projects p ON p.id = n.project_id
                 WHERE n.plan_date >= %s AND n.plan_date < %s
+                  AND n.plan_month = %s
                   AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
                   AND n.process_order BETWEEN %s AND %s
                   {ba_sql}
@@ -2388,7 +2400,11 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
             plans = [dict(r) for r in cur.fetchall()]
 
             # ② 填报事实（report_date = 当天；manager 优先取填报行自身归属）
-            rep_args: list = [month_start, month_end]
+            # 🔴 2026-11：必须 **join 计划行**并套用与 ① 完全相同的归属过滤（plan_month + plan_date
+            #    区间 + 白名单），否则无法判断这条填报属于哪个月的排产：本月填报上月积压行、
+            #    或本月填报「下月导入」的行，都会被错误算进本月。join 条件用 (project_id, node_plan_id)。
+            rep_args: list = [month_start, month_end, month_key, month_start, month_end,
+                              SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
             if big_area_person:
                 rep_args.append(big_area_person)
             cur.execute(f"""
@@ -2397,15 +2413,26 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
                        COUNT(*) AS cnt
                 FROM node_actual_progress nap
                 JOIN projects p ON p.id = nap.project_id
-                LEFT JOIN process_node_plans n ON n.id = nap.node_plan_id
+                JOIN process_node_plans n
+                  ON n.project_id = nap.project_id AND n.id = nap.node_plan_id
                 WHERE nap.report_date >= %s AND nap.report_date < %s
+                  AND n.plan_month = %s
+                  AND n.plan_date >= %s AND n.plan_date < %s
+                  AND n.process_order BETWEEN %s AND %s
                   {ba_sql}
                 GROUP BY COALESCE(NULLIF(TRIM(nap.manager), ''), n.manager), nap.report_date
             """, tuple(rep_args))
             reports = [dict(r) for r in cur.fetchall()]
 
             # ③ 异常事实（created_at 的日期 = 当天；node_exceptions 无 manager，必须 join 计划表）
-            exc_args: list = [f"{month_start} 00:00:00", f"{month_end} 00:00:00"]
+            # 🔴 2026-11：join 计划行后同样叠加归属过滤（plan_month + plan_date 区间 + 白名单），
+            #    与 ①② 同口径；`created_at` 的自然月区间**保留**——两者必须同时满足
+            #    （即「本月提报的、且属于本月排产计划的异常」）。
+            #    ⚠️ 由 LEFT JOIN 改为 INNER JOIN：计划行已不存在的历史异常无法判断归属月，
+            #       按新口径一律不计入（宁可少算，不可错算到某个月）。
+            exc_args: list = [f"{month_start} 00:00:00", f"{month_end} 00:00:00",
+                              month_key, month_start, month_end,
+                              SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
             if big_area_person:
                 exc_args.append(big_area_person)
             cur.execute(f"""
@@ -2414,8 +2441,11 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
                        COUNT(*) AS cnt
                 FROM node_exceptions e
                 JOIN projects p ON p.id = e.project_id
-                LEFT JOIN process_node_plans n ON n.id = e.node_id
+                JOIN process_node_plans n ON n.id = e.node_id
                 WHERE e.created_at >= %s AND e.created_at < %s
+                  AND n.plan_month = %s
+                  AND n.plan_date >= %s AND n.plan_date < %s
+                  AND n.process_order BETWEEN %s AND %s
                   AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
                   {ba_sql}
                 GROUP BY n.manager, DATE(e.created_at)
@@ -2432,7 +2462,7 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
             #      （条件 2），绝不在这里另写一套「暂停」规则。
             #    ⚠️ 本组只供服务层做聚合计数，**不进入接口响应**；接口仍是固定条数的聚合结果，
             #       没有把 per-plan 明细透给前端（保持「固定条数、无 N+1」的既有约定）。
-            unit_args: list = [month_start, month_end, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
+            unit_args: list = [month_start, month_end, month_key, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
             if big_area_person:
                 unit_args.append(big_area_person)
             cur.execute(f"""
@@ -2448,6 +2478,7 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
                 FROM process_node_plans n
                 JOIN projects p ON p.id = n.project_id
                 WHERE n.plan_date >= %s AND n.plan_date < %s
+                  AND n.plan_month = %s
                   AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
                   AND n.process_order BETWEEN %s AND %s
                   AND n.plan_qty > 0
