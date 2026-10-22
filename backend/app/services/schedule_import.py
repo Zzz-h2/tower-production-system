@@ -20,7 +20,7 @@ Excel 预期格式（第一个 sheet，header=None 逐行读取）：
 - 单元格非空且可被 pd.to_datetime 解析 → 记为 (process_name, plan_date)；空跳过。
 - 【v4.1 已完成文本识别】单元格非空、无法解析为日期，但文本**包含**完成关键词
   （见 COMPLETION_KEYWORDS，匹配忽略前后/内部空白与全半角差异）→ 不报错，
-  改为累加该工序的「已完成套数」，最终产出一条 plan_date=导入当天、
+  改为累加该工序的「已完成套数」，最终产出一条 plan_date=当月 1 号、
   plan_qty=actual_qty=完成套数的计划行，表示该工序这几套已完成。
   排除词（COMPLETION_EXCLUDE_KEYWORDS，如「未完成」「待完成」）优先命中时**不**判定为完成，
   宁可漏收也不误判——误判会导致完成量虚高、出品排名失真。
@@ -230,7 +230,7 @@ def parse_schedule_excel_full(file_path: str) -> tuple[list[dict], list[str], li
             {process_name, process_order, plan_date('YYYY-MM-DD'), plan_qty}
             已按 process_order, plan_date 排序。
             由「已完成」文本识别产出的项**额外带** actual_qty（= 完成套数，与 plan_qty 相等），
-            plan_date 为导入当天；正常日期解析产出的项不带 actual_qty（下游行为不变）。
+            plan_date 为当月 1 号（2026-10 起；此前为导入当天）；正常日期解析产出的项不带 actual_qty（下游行为不变）。
         errors: list[str]，无法解析的行号/工序名提示，以及「已完成识别」信息性提示（【信息】前缀）。
     """
     errors: list[str] = []
@@ -274,7 +274,7 @@ def parse_schedule_excel_full(file_path: str) -> tuple[list[dict], list[str], li
 
     # ---- 4. 逐数据行解析（记录每个 工序×日期 出现一次 = 一套） ----
     node_items: list[tuple[str, str]] = []
-    # 「已完成」文本识别：工序名 → 完成套数（无日期语义，聚合时落到「导入当天」）
+    # 「已完成」文本识别：工序名 → 完成套数（无日期语义，聚合时落到「当月 1 号」）
     completed_counts: Counter = Counter()
     # 工序时间规则升级：按「套」记录时长/偏移（必须在聚合前算，聚合后套身份会丢失）
     durations: list[dict] = []
@@ -367,10 +367,17 @@ def parse_schedule_excel_full(file_path: str) -> tuple[list[dict], list[str], li
         })
 
     # ---- 5b. 合并「已完成」识别结果 ----
-    # 「已完成」单元格本身没有日期，plan_date 取**导入当天**（本地时区）：
-    # 语义是「这几套在导入时点已经做完了」，因此完成量落在导入当天，
-    # 既不会凭空造出一个未来/过去的计划日期，也能让当月/当日出品统计立刻看到这部分产出。
-    completion_date = business_now().strftime('%Y-%m-%d')
+    # 「已完成」单元格本身没有日期，plan_date 统一取**本月 1 号**（本地时区）。
+    #
+    # 🔴 2026-10 口径变更（用户要求）：原实现取「导入当天」，导致：
+    #    · 同一个月内不同批次导入 → 完成量散落在多个不同的「导入日」上；
+    #    · 下旬导入时，本月初就已完成的工序会被记在 20 多号，工序时间线看着像"月底才完工"；
+    #    · 提报情况总览里这些行落在导入日那一格，与"月初就完成"的事实不符。
+    #    改为当月 1 号后：已完成/已到货等工序统一锚定在本月第一天，语义变成
+    #    「这几套在本月初即已完成」，与月度排产口径一致，也不受导入批次影响。
+    #    注意：这里只影响「文本识别为完成」的行；Excel 里写了明确日期的行原样保留。
+    _now = business_now()
+    completion_date = _now.strftime('%Y-%m-01')
     plan_index = {(p["process_name"], p["plan_date"]): p for p in plans}
     for pn in SCHEDULE_PROCESS_NAMES:
         qty = int(completed_counts.get(pn, 0))
