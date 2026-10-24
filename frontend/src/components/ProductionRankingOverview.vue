@@ -6,6 +6,7 @@
         <el-date-picker
           v-model="store.filters.month"
           type="month"
+          :clearable="false"
           value-format="YYYY-MM"
           placeholder="选择调度令月份"
           style="width: 160px"
@@ -188,6 +189,7 @@ async function openDetail(row) {
 }
 
 async function load() {
+  store.ensureMonth()   // 月份必填（2026-10）：被清空时自动回补当前自然月，杜绝「全部月份」汇总口径
   loading.value = true
   store.ensureMonth()   // 共享月份非空（默认当前自然月）
   try {

@@ -6,6 +6,7 @@
         <el-date-picker
           v-model="store.filters.month"
           type="month"
+          :clearable="false"
           value-format="YYYY-MM"
           placeholder="选择月份"
           style="width: 160px"
@@ -465,6 +466,8 @@ async function load() {
 
 /** 月份切换：编辑态下先丢弃草稿（避免把 A 月的改动存到 B 月） */
 function onMonthChange() {
+  // 月份必填（2026-10）：清空后立刻回补当前月，避免退化成「全部月份」汇总
+  store.ensureMonth()
   if (editing.value) {
     const pending = changedCount.value
     draft.value = {}

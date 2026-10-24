@@ -131,6 +131,7 @@
         <el-date-picker
           v-model="store.filters.month"
           type="month"
+          :clearable="false"
           value-format="YYYY-MM"
           placeholder="选择调度令月份"
           style="width: 160px"
@@ -538,6 +539,8 @@ function onRefresh() {
 
 // 月份切换：三页联动（共享 store.filters.month）→ 列表 + KPI 同步刷新
 function onMonthChange() {
+  // 月份必填（2026-10）：清空后立刻回补当前月，避免退化成「全部月份」汇总
+  store.ensureMonth()
   store.pagination.page = 1
   store.loadProjects({ page: 1 })
   store.loadDashboard()

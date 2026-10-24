@@ -62,6 +62,7 @@
         <el-date-picker
           v-model="store.filters.month"
           type="month"
+          :clearable="false"
           value-format="YYYY-MM"
           placeholder="选择调度令月份"
           style="width: 160px"
