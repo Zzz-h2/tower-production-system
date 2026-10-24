@@ -1181,9 +1181,11 @@ def decorate_exception_records(rows: Optional[list[dict]], today=None) -> dict:
         item["planned_close_date"] = planned_close
         is_closed = status == "closed"
         is_expired = (not is_closed) and exception_is_expired(item, today_date)
-        # 2026-10 预警态：计划关闭日当天、仍未关闭（与 active/expired 三者互斥）
+        # 2026-10「预警」是**展示态**，与 active 重叠（把日志关闭日当天仍暂停/不算延期）：
+        #   当天  -> active=True + warning=True  → display_status 取 warning（提醒尽快处理）
+        #   次日  -> active=False + expired=True → display_status 取 expired（恢复逾期判定）
         is_warning = (not is_closed) and exception_is_warning(item, today_date)
-        is_active = (not is_closed) and (not is_expired) and (not is_warning)
+        is_active = (not is_closed) and (not is_expired)
         display_status = ("closed" if is_closed else
                           "expired" if is_expired else
                           "warning" if is_warning else "active")
