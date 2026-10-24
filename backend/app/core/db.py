@@ -635,7 +635,8 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
 
     # 风险等级 + 整体进度：基于 node_plans + node_actuals 实时计算（弃用 processes 表）
     from ..services.node_service import enrich_rows, build_exception_anchors
-    from ..services.business_logic import judge_project_risk, has_active_exception
+    from ..services.business_logic import (judge_project_risk, has_active_exception,
+                                           has_warning_exception)
 
     # 一次性批量查询（消除 N+1：原逻辑每项目 2 次 DB 往返 → 现在全程仅 3 次）
     # v7.4：三处批量查询统一带上当前列表月份 —— 「整体进度 / 风险等级」必须与列表的
@@ -753,11 +754,16 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         # 🔴 单源 = business_logic.judge_project_risk（与 routers/projects.py 详情页共用同一函数）
         # 项目级「生效中异常」用 **原始异常表** 判定（不依赖 durations 能否反推所属套）：
         # 无时长数据的存量项目同样能进 exception 态（PRD 明确口径）。
-        _has_active_exc = has_active_exception(_exc_rows, today_date)
-        p["has_active_exception"] = _has_active_exc
+        # 2026-10：预警期（计划关闭日当天）异常不再让项目进 exception 态 ——
+        # 项目整体转「预警」（warning），次日超期才按 exception/delayed 判。
+        _has_active_exc = has_active_exception(_exc_rows, today_date, exclude_warning=True)
+        _has_warning_exc = has_warning_exception(_exc_rows, today_date)
+        p["has_active_exception"] = _has_active_exc or _has_warning_exc   # 含预警期（前端标记用）
+        p["has_warning_exception"] = _has_warning_exc
         p["risk_level"] = judge_project_risk(
             nodes, int(p.get("monthly_plan") or 0), today_date,
             has_active_exception=_has_active_exc,
+            has_warning_exception=_has_warning_exc,
         )
 
         # 整体进度：取「附件安装」工序进度

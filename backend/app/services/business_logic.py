@@ -139,13 +139,16 @@ def exception_is_expired(exc: dict, today=None) -> bool:
     return _today_text(today) > planned_close
 
 
-def has_active_exception(rows, today=None) -> bool:
+def has_active_exception(rows, today=None, *, exclude_warning: bool = False) -> bool:
     """给定异常集合中是否存在**生效中**的异常（项目级 exception 态的判定入口）。
 
     Args:
         rows: 异常记录列表；也接受 ``{key: [异常, ...]}`` 的索引结构
               （如 ``build_node_exception_index`` 的产物），内部自动摊平
         today: 基准日（None → 业务时区今天）
+        exclude_warning: True 时**跳过预警期（计划关闭日当天）的异常** ——
+            用于项目风险等级判定：预警期异常不再让项目进 ``exception`` 态，
+            而应由 ``has_warning_exception`` 判为 ``warning``（2026-10 用户口径）。
 
     Returns:
         bool: 是否存在生效中的异常
@@ -161,7 +164,39 @@ def has_active_exception(rows, today=None) -> bool:
     elif rows:
         candidates = list(rows)
     for exc in candidates:
-        if exception_is_active(exc, today_text):
+        if not exception_is_active(exc, today_text):
+            continue
+        if exclude_warning and exception_is_warning(exc, today_text):
+            continue
+        return True
+    return False
+
+
+def has_warning_exception(rows, today=None) -> bool:
+    """给定异常集合中是否存在**预警期**（计划关闭日当天、仍未关闭）的异常。
+
+    项目风险等级的 ``warning`` 态来源之一（另一来源是「今天有计划但未完成」）。
+    语义见 ``exception_is_warning``：当天仍生效（暂停有效），只是状态提示为预警。
+
+    Args:
+        rows: 异常记录列表或索引结构（同 ``has_active_exception``）
+        today: 基准日
+
+    Returns:
+        bool: 是否存在预警期异常
+    """
+    today_text = _today_text(today)
+    candidates: list = []
+    if isinstance(rows, dict):
+        for value in rows.values():
+            if isinstance(value, (list, tuple)):
+                candidates.extend(value)
+            elif isinstance(value, dict):
+                candidates.append(value)
+    elif rows:
+        candidates = list(rows)
+    for exc in candidates:
+        if exception_is_warning(exc, today_text):
             return True
     return False
 
@@ -567,24 +602,29 @@ def compute_real_overdue(rows: list[dict], monthly_plan: int) -> list[dict]:
 
 
 def judge_project_risk(rows: list[dict], monthly_plan: int = 0, today=None, *,
-                       has_active_exception: bool = False) -> str:
+                       has_active_exception: bool = False,
+                       has_warning_exception: bool = False) -> str:
     """项目级风险等级判定（四态互斥）——**唯一实现处**（列表/KPI 与详情共用）。
 
     优先级：``exception > delayed > warning > normal``
 
-    - exception: 项目下存在**生效中**的异常（未关闭且未过计划关闭日）。
-      ⚠️ 由调用方用 ``has_active_exception`` 算出后传入（单源），本函数不自行查库；
-      无 durations 的存量项目同样成立（异常表口径，不依赖能否反推所属套）。
+    - exception: 项目下存在**生效中**的异常（未关闭且未过计划关闭日），
+      **不含预警期**（计划关闭日当天的异常改判为 warning，见下）。
+      ⚠️ 由调用方用 ``has_active_exception(..., exclude_warning=True)`` 算出后传入，
+      本函数不自行查库；无 durations 的存量项目同样成立。
     - delayed:   存在「真逾期」节点（``compute_real_overdue`` 口径）
-    - warning:   无逾期，但存在「今天计划且未完成」的 in_progress 节点
-      （未来日期的 in_progress「提前进行中」不算预警）
+    - warning:   ① 存在**预警期异常**（计划关闭日当天、仍未关闭，2026-10 用户口径：
+                 项目整体转「预警」，次日超期才转 exception/delayed）；
+                 ② 或存在「今天计划且未完成」的 in_progress 节点
+                 （未来日期的 in_progress「提前进行中」不算预警）
     - normal:    以上皆无
 
     Args:
         rows: ``enrich_rows`` 产出的节点行
         monthly_plan: 调度令本月计划数（真逾期判定阈值）
         today: 基准日（None → 业务时区今天）
-        has_active_exception: 项目是否存在生效中异常（关键字参数，语义显式）
+        has_active_exception: 项目是否存在生效中异常（**排除预警期**）
+        has_warning_exception: 项目是否存在预警期异常（关闭日当天）
 
     Returns:
         str: 'exception' | 'delayed' | 'warning' | 'normal'
@@ -594,6 +634,9 @@ def judge_project_risk(rows: list[dict], monthly_plan: int = 0, today=None, *,
     today_s = _today_text(today)
     if compute_real_overdue(rows or [], int(monthly_plan or 0)):
         return "delayed"
+    if has_warning_exception:
+        # 2026-10：预警期异常 → 项目整体转「预警」（暂停仍有效，故通常不会同时 delayed）
+        return "warning"
     has_today_unfinished = any(
         r.get("status") == "in_progress"
         and str(r.get("plan_date") or "")[:10] == today_s

@@ -11,7 +11,8 @@ from ..core.deps import get_current_user, get_scope_big_area, require_admin, req
 from ..core.timeutil import business_today
 from ..schemas import ManualCompleteRequest, ProjectUpdateRequest
 from ..services.node_service import build_overview, build_process_detail, enrich_rows
-from ..services.business_logic import judge_project_risk, has_active_exception
+from ..services.business_logic import (judge_project_risk, has_active_exception,
+                                       has_warning_exception)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -191,9 +192,14 @@ def get_project(pid: int, month: Optional[str] = None,
     # 风险等级（四态互斥：exception > delayed > warning > normal）
     # 🔴 判定单源 = business_logic.judge_project_risk（与 db.get_projects_filtered 共用）
     # 「项目级生效中异常」直接复用本请求已加载的 _exc_by_node（条目带 active，不额外查库）。
+    # 2026-10：预警期异常 → 项目转「预警」（与列表同口径，单源判定）
+    _has_active_exc = has_active_exception(_exc_by_node, today, exclude_warning=True)
+    _has_warning_exc = has_warning_exception(_exc_by_node, today)
+    project["has_warning_exception"] = _has_warning_exc
     project["risk_level"] = judge_project_risk(
         rows, int(project.get("monthly_plan") or 0), today,
-        has_active_exception=has_active_exception(_exc_by_node, today),
+        has_active_exception=_has_active_exc,
+        has_warning_exception=_has_warning_exc,
     )
 
     return project
