@@ -606,7 +606,7 @@ def judge_project_risk(rows: list[dict], monthly_plan: int = 0, today=None, *,
                        has_warning_exception: bool = False) -> str:
     """项目级风险等级判定（四态互斥）——**唯一实现处**（列表/KPI 与详情共用）。
 
-    优先级：``exception > delayed > warning > normal``
+    优先级：``exception > warning(预警期异常) > delayed > warning(今日未完成) > normal``
 
     - exception: 项目下存在**生效中**的异常（未关闭且未过计划关闭日），
       **不含预警期**（计划关闭日当天的异常改判为 warning，见下）。
@@ -631,12 +631,14 @@ def judge_project_risk(rows: list[dict], monthly_plan: int = 0, today=None, *,
     """
     if has_active_exception:
         return "exception"
+    if has_warning_exception:
+        # 2026-10（用户口径）：预警期异常 → 项目整体转「预警」，**优先于 delayed**。
+        # 理由：预警期表示「异常今天是最后一天、需要人去处理」，是最该被看到的信号；
+        # 次日异常超期后本分支不再命中，delayed/exception 会正常冒出来。
+        return "warning"
     today_s = _today_text(today)
     if compute_real_overdue(rows or [], int(monthly_plan or 0)):
         return "delayed"
-    if has_warning_exception:
-        # 2026-10：预警期异常 → 项目整体转「预警」（暂停仍有效，故通常不会同时 delayed）
-        return "warning"
     has_today_unfinished = any(
         r.get("status") == "in_progress"
         and str(r.get("plan_date") or "")[:10] == today_s
