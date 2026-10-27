@@ -844,7 +844,8 @@ def attach_set_details(rows: list[dict], set_index: Optional[dict],
 
 
 def _segment_delay_tags(tags: list, grp: list[dict],
-                        seg_map: dict[int, tuple[int, int]], today: date) -> list:
+                        seg_map: dict[int, tuple[int, int]], today: date,
+                        actuals: Optional[dict] = None) -> list:
     """按段填报标签（v7.1 行级化 + 未来计划预警门槛）：
     该工序任一节点有段记录且未填满 → 追加「部分完成」；预警/延期按计划日门槛分级：
       1) 已开始（plan_date ≤ today，无日期保守视为已开始）节点中存在 plan_date + 7 天
@@ -859,9 +860,24 @@ def _segment_delay_tags(tags: list, grp: list[dict],
        「延期」替换「预警」的现有逻辑保持不变。
     """
     # 活跃节点：该工序的行中，有段记录且 done < total 的节点
+    #
+    # 🔴 2026-10 用户口径（按段 × 按套 独立录入）：**整行已按套报满时，段记录不再产生任何标签**。
+    #   按段与按套是两条独立路径，先按段（2/5）、后按套报满（1/1）是合法数据；
+    #   但按套报满即代表该套工序已完成，此时再挂「部分完成/预警/延期」会让用户误以为
+    #   工序完成却仍有问题。段记录本身保留在 node_segment_progress，只是不再参与标签计算。
+    #   反向：整行未报满时，段进度标签照常生效（仍是有用的进行中/预警信号）。
+    _act = actuals or {}
+
+    def _row_set_done(row) -> bool:
+        plan = int(row.get("plan_qty") or 0)
+        got = int((_act.get(row.get("id")) or {}).get("actual_qty") or 0)
+        return plan > 0 and got >= plan
+
     active = [
         (r, seg_map[r["id"]]) for r in grp
-        if r.get("id") in seg_map and 0 <= seg_map[r["id"]][1] < seg_map[r["id"]][0]
+        if r.get("id") in seg_map
+        and 0 <= seg_map[r["id"]][1] < seg_map[r["id"]][0]
+        and not _row_set_done(r)
     ]
     if not active:
         return tags
@@ -953,7 +969,7 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
         )
         progress = (total_actual / total_plan * 100) if total_plan else 0
         proc_tags = _segment_delay_tags(
-            list(proc_status.get("tags", [])), grp, seg_map, today,
+            list(proc_status.get("tags", [])), grp, seg_map, today, actuals,
         )
         processes.append({
             "process_name": pn,
