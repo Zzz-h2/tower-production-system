@@ -79,8 +79,15 @@
                 <div class="row-qty-line">
                   <span class="qty-text">
                     计划 <span class="qty-num">{{ row.plan_qty }}</span> 套 / 实际 <span class="qty-num">{{ row.actual_qty }}</span> 套
-                    <!-- 按段填报（v7.1 行级化）：有段记录的行追加橙色段进度提示 -->
-                    <span v-if="row.segment_total != null" style="color:#b7791f;">&nbsp;已完成 {{ row.segment_done }}/{{ row.segment_total }} 段</span>
+                    <!-- 按段填报（v7.1 行级化）：有段记录的行追加橙色段进度提示
+                         🔴 2026-10 用户口径：**整行已按套完成时不再显示段进度** ——
+                         按段与按套是两条独立录入路径，按套报完代表该套工序已完成，
+                         此时再挂着「已完成 2/5 段」会让用户误以为还有未完成的分段问题。
+                         段记录本身保留在库里（不删数据），只是不再作为提示出现在界面。 -->
+                    <span
+                      v-if="row.segment_total != null && !isRowSetDone(row)"
+                      style="color:#b7791f;"
+                    >&nbsp;已完成 {{ row.segment_done }}/{{ row.segment_total }} 段</span>
                   </span>
                   <!-- 「第 N 套」明细开关（2026-10）：仅 has_set_detail=true 的行出现；
                        点开后在本行下方折叠出逐套子行，父行本身保持原样 -->
@@ -949,6 +956,18 @@ const statusBgs = {
 }
 const colorOf = (s) => statusColors[s] || '#718096'
 const pillStyle = (s) => ({ background: statusBgs[s] || '#f7fafc', color: statusColors[s] || '#718096' })
+/**
+ * 该行是否已「按套完成」（2026-10 用户口径）：
+ * 实际套数 ≥ 计划套数（且计划数 > 0）。
+ * 按段提报与按套提报是两条独立路径 —— 按套报满即代表该套工序完成，
+ * 此时界面不再显示「已完成 n/m 段」（数据仍在 node_segment_progress，不删除）。
+ */
+const isRowSetDone = (row) => {
+  const plan = Number(row?.plan_qty || 0)
+  const actual = Number(row?.actual_qty || 0)
+  return plan > 0 && actual >= plan
+}
+
 const statusOf = (node) => nodeById.value.get(node.id)?.status || 'pending'
 const labelOf = (node) => nodeById.value.get(node.id)?.label || '—'
 // === 异常暂停（2026-10）：所属套标识 ===
