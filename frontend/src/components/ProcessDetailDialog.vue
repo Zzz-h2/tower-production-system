@@ -1138,6 +1138,16 @@ function detailCacheKey() {
   return [props.pid, props.processName, props.manager || '', props.month || ''].join('|')
 }
 
+/**
+ * 让当前弹窗的 detail 缓存失效。
+ * 🔴 必须在实际**改变数据**之后调用（保存进度 / 按段 / 异常变更 / 手动完成…），
+ * 否则用户「改完关掉、30 秒内再打开」会命中旧缓存，看到改动前的数据
+ * （2026-10 线上反馈：已完成分组里减套数后重开，行还挂在「已完成」）。
+ */
+function invalidateDetailCache() {
+  DETAIL_CACHE.delete(detailCacheKey())
+}
+
 async function load({ force = false } = {}) {
   if (!props.processName) return
   const cacheKey = detailCacheKey()
@@ -1257,6 +1267,9 @@ async function save() {
     // 父级工序卡片通过 refresh 事件同步刷新。
     // 11 道排产工序保持既有行为：saved → 父组件关闭弹窗 + 刷新。
     if (ok.length) {
+      // ⚠️ 排产工序保存后父组件会关掉弹窗；这里必须让缓存失效，
+      //    否则 30 秒内重开同一工序会命中旧缓存（改动前的分组/数量）。
+      invalidateDetailCache()
       if (isIndependent.value) {
         await load({ force: true })
         emit('refresh')
