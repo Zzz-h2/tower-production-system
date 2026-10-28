@@ -342,12 +342,21 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
         anchor = cutting_anchor.get(d0) if d0 else None
         exc_list = (exc_map.get(d0) or []) if d0 else []
 
-        # ---- 0) 本行「自身异常」（2026-11 第 4 态）：本行 offset == 生效中异常的 offset ----
+        # ---- 0) 本行「自身异常」（2026-11 第 4 态）：本行就是**发生异常的那道工序** ----
         # 优先级 done > exception > exception_paused > waiting_material > 常规；
         # 这里只产出标记，最终优先级由 judge_node_status 统一裁决。
+        #
+        # 🔴 2026-10 修复（用户反馈「前置工序明明完成却提示异常」「所有工序都变异常」）：
+        #    原判定是 ``e.offset_days == offset`` —— **只比偏移天数，不比工序名**。
+        #    但排产数据里多道工序的 offset_days 可能相同（尤其都等于 0，与下料同日开工：
+        #    实测卷制/组对/环缝/门框焊接/黑塔/防腐/附件安装/具备验收 都存在 offset=0 的行），
+        #    于是「下料有异常」会把所有 offset=0 的工序全部误判成"异常工序本身"。
+        #    改为按 **process_name 精确匹配**：exc_list 已按套锚点 d0 过滤（同一套），
+        #    同一套 + 同一工序 = 本行自身，语义准确且不受 offset 数据质量影响。
         self_exceptions = [
             e for e in exc_list
-            if e.get("active") is True and int(e.get("offset_days") or 0) == offset
+            if e.get("active") is True
+            and str(e.get("process_name") or "").strip() == str(pn or "").strip()
         ]
         self_exception = bool(self_exceptions)
         # 展示用「计划关闭日」：多条生效中异常时取最早的（最紧迫）那一日
