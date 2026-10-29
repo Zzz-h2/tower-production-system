@@ -43,7 +43,8 @@ def _exc_active(entry: dict, today=None) -> bool:
 def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optional[dict] = None,
                 rules: Optional[dict] = None, seg_map: Optional[dict] = None,
                 exceptions: Optional[dict] = None,
-                node_exceptions: Optional[dict] = None) -> list[dict]:
+                node_exceptions: Optional[dict] = None,
+                set_index: Optional[dict] = None) -> list[dict]:
     """富化节点行：计划信息 + 实际完成 + 五态判定（含完成日期与偏差）。
 
     返回行结构与原 Streamlit 版 rows 一致（前端时间轴/卡片直接使用）。
@@ -82,6 +83,9 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
         exceptions: {该套下料计划日 d0: [{process_name, offset_days, status, closed_at}]}
         node_exceptions: {node_plan_id: [{process_name, status, closed_at}]}（纯展示兜底：
             所属套无法反推时，仍能在异常自身的行上打「⚠️ 异常」标识）
+        set_index: ``build_set_index`` 产物 ``{(工序, 原计划日): [套成员, ...]}``。
+            仅用于生成展示字段 ``set_seq_label``（「第 N 套」标识，2026-11 方案 A）；
+            为 None/缺键 → 该行 ``set_seq_label = None``（行为与改动前一致）。
 
     Returns:
         list[dict]: 富化后的节点行（每行含 status/label/level/... 及上述新增字段）
@@ -89,6 +93,7 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
     today = today or business_today()
     exc_map = exceptions or {}
     node_exc_map = node_exceptions or {}
+    set_idx = set_index or {}
     if rules is None:
         rules = build_time_rules(plans, actuals, durations, exc_map, today=today)
     seg_map = seg_map or {}
@@ -146,6 +151,18 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
                 exception_active=bool(ru.get("self_exception")),
                 exception_close_date=ru.get("self_close_date"),
             )
+        # === 套号标识（2026-11 方案 A）===
+        # 一行 = 一套语义（同日多套在库里本就是多行），每行标**自己的**套号。
+        # 🔴 匹配键必须用「覆盖前的原始排产计划日」plan_date_plan：plan_date 在
+        #    build_process_detail 里已被覆盖成 eff_plan_date，用它匹配会让「日期被重算的行」
+        #    全部匹配失败（与 attach_set_details 的教训同源，见其 docstring）。
+        # ⚠️ 门禁与 has_set_detail 完全独立：**单套行（plan_qty=1）也要输出**，
+        #    这正是本次需求的关键（同日两行被重算撞到同一天时靠它区分）。
+        plan_date_plan_val = (_date10(r.get("plan_date_plan")) or _date10(r.get("plan_date")))
+        set_seq_label = None
+        _pn = str(r.get("process_name") or "").strip()
+        if set_idx and _pn and _pn not in INDEPENDENT_PROCESS_NAMES and plan_date_plan_val:
+            set_seq_label = _format_set_seq_label(set_idx.get((_pn, plan_date_plan_val)) or [])
         rows.append({
             "id": nid,
             "project_id": r["project_id"],
@@ -156,7 +173,9 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
                           else (str(r["plan_date"])[:10] if r.get("plan_date") is not None else "")),
             # 原排产计划日：优先取上游（build_process_detail 覆盖 plan_date 前已收好的原值），
             # 否则回退 r["plan_date"]（未重算的行两者相等 → 前端不显示「原 X」删除线）
-            "plan_date_plan": (_date10(r.get("plan_date_plan")) or _date10(r.get("plan_date"))),
+            "plan_date_plan": plan_date_plan_val,
+            # 套号展示文案（'第 20 套' / '第 16-17 套' / '第 16,18 套' / None）
+            "set_seq_label": set_seq_label,
             "plan_qty": r["plan_qty"],
             "actual_qty": actual_qty,
             "report_date": str(act.get("report_date") or "")[:10] or None,
@@ -567,6 +586,39 @@ def _int_or_none(value) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _format_set_seq_label(members: Optional[list[dict]]) -> Optional[str]:
+    """把某行对应的「套成员列表」格式化成展示用套号文案（2026-11 方案 A）。
+
+    规则（用户确认）：
+      - 1 个套号           → ``第 20 套``
+      - 多个且 set_seq 连续 → ``第 16-17 套``
+      - 多个但不连续       → ``第 16,18 套``（最多列 5 个，超出以 ``,…`` 收尾）
+      - 空 / 无有效 set_seq → ``None``
+
+    ⚠️ 纯展示函数，不参与任何判定；套号来自 ``project_process_durations``（非推测时
+    ``source='import'``，历史/补录行 ``source='backfill'`` 属推定套号——但文案层不区分，
+    由既有的「（推定套号）」标识在套明细里表达）。
+
+    Args:
+        members: ``build_set_index`` 中该 (工序, 原计划日) 的成员列表
+
+    Returns:
+        str | None: 套号文案；无可用套号时 None
+    """
+    seqs = sorted({int(m.get("set_seq")) for m in (members or [])
+                   if m.get("set_seq") not in (None, "")})
+    if not seqs:
+        return None
+    if len(seqs) == 1:
+        return f"第 {seqs[0]} 套"
+    if seqs == list(range(seqs[0], seqs[-1] + 1)):
+        return f"第 {seqs[0]}-{seqs[-1]} 套"
+    shown = ",".join(str(s) for s in seqs[:5])
+    if len(seqs) > 5:
+        shown += ",…"
+    return f"第 {shown} 套"
 
 
 def _load_set_index(project_id: Optional[int], manager: Optional[str] = None,
@@ -1110,7 +1162,10 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
     seg_map = _load_node_segments(project_id) if project_id is not None else {}
     groups = split_node_groups(proc_nodes, actuals, today)
     rows = enrich_rows(proc_nodes, actuals, today, durations, rules, seg_map=seg_map,
-                       exceptions=exc_anchors, node_exceptions=exc_by_node)
+                       exceptions=exc_anchors, node_exceptions=exc_by_node,
+                       # 套号标识（2026-11）：与 attach_set_details 共用同一个 set_index，
+                       # 用原始排产计划日匹配，单套行也输出
+                       set_index=set_index)
 
     # 独立工序的 done 组按日期降序展示（最新填报在上）
     if process_name in INDEPENDENT_PROCESS_NAMES:

@@ -61,14 +61,21 @@
               <div class="row-info">
                 <div class="row-dates">
                   <div class="date-block">
+                    <!-- 套号标识（2026-11 方案 A）：一行 = 一套语义，标自己的套号。
+                         同一天因异常重算撞期时，靠它区分「第 20 套 / 第 21 套」。
+                         排版：`第 20 套 · 计划 2026-11-01（原 09-03）`（用户 2026-10 指定） -->
+                    <template v-if="row.set_seq_label">
+                      <span class="set-seq-tag">{{ row.set_seq_label }}</span>
+                      <span class="set-seq-sep">·</span>
+                    </template>
                     <span class="date-key">计划</span>
                     <span class="date-val">{{ row.plan_date }}</span>
-                    <!-- 已关闭异常把锚点后推 → 展示重算后的计划日，并标注原排产日 -->
+                    <!-- 已关闭异常把锚点后推 → 展示重算后的计划日，括号内标注原排产日（只留月-日） -->
                     <span
                       v-if="row.plan_date_plan && row.plan_date_plan !== row.plan_date"
                       class="date-orig"
                       :title="`原排产计划日 ${row.plan_date_plan}（已按异常解决时间重算为新计划日）`"
-                    >原 {{ row.plan_date_plan }}</span>
+                    >（原 {{ String(row.plan_date_plan).slice(5) }}）</span>
                   </div>
                   <div class="date-block">
                     <span class="date-key">实际</span>
@@ -486,7 +493,7 @@
                   <el-option
                     v-for="n in detail.nodes"
                     :key="n.id"
-                    :label="`${n.plan_date} · 计划 ${n.plan_qty} 套 / 实际 ${n.actual_qty} 套`"
+                    :label="nodeOptionLabel(n)"
                     :value="n.id"
                   />
                 </el-select>
@@ -896,6 +903,21 @@ function parseErrorReason(reason) {
     message: resp.statusText || `请求失败（HTTP ${resp.status}）`,
     status: resp.status,
   }
+}
+
+/**
+ * 异常提报「选择节点」下拉的显示文案（2026-11 方案 A：套号标识）。
+ *
+ * 背景：同一项目的两套存储计划日本不同（如 09-03 / 09-09），异常重算后 eff 都变成同一天，
+ * 下拉里会出现两条完全一样的「2026-11-01 · 计划 1 套 / 实际 0 套」，用户无法选择。
+ * 有 set_seq_label 时前缀「第 N 套 · 」，无套号（独立工序 / 无套明细 / 历史行）时保持原文案。
+ *
+ * @param {object} n 节点行（含 plan_date/plan_qty/actual_qty/set_seq_label）
+ * @returns {string} 下拉项文案
+ */
+function nodeOptionLabel(n) {
+  const base = `${n.plan_date} · 计划 ${n.plan_qty} 套 / 实际 ${n.actual_qty} 套`
+  return n.set_seq_label ? `${n.set_seq_label} · ${base}` : base
 }
 
 // 把每组的失败压缩成一行（去掉【】前缀，保留原始 message）
@@ -1767,9 +1789,19 @@ async function saveSegments() {
 .date-empty { color: #a0aec0; font-style: italic; font-weight: 400; }
 /* 异常解决后重算的计划日：附带「原 X」对照，弱化显示避免抢主日期 */
 .date-orig {
-  font-size: 11px; color: #a0aec0; font-weight: 400;
-  text-decoration: line-through; white-space: nowrap;
+  /* 2026-10 排版调整：改为括号灰字（原 09-03），不再用删除线 ——
+     删除线在「第 20 套 · 计划 2026-11-01（原 09-03）」这种并排布局里显得杂乱。 */
+  font-size: 11px; color: #a0aec0; font-weight: 400; white-space: nowrap;
 }
+
+/* === 套号标识（2026-11 方案 A）===
+   小号灰字，放在计划日期之前：`第 20 套 2026-11-07 原 2026-09-03`。
+   刻意不用 line-through / 不加底色 —— 它只是行的身份标识，不是「作废值」。 */
+.set-seq-tag {
+  font-size: 12px; color: #718096; font-weight: 400; white-space: nowrap;
+}
+/* 套号与「计划」之间的分隔点 */
+.set-seq-sep { color: #cbd5e0; margin: 0 5px; }
 
 /* === 异常暂停（2026-10）：所属套标识 === */
 /* 行级醒目标识：红框 + 淡红底 + 柔和外发光（与「存在异常」工序卡片同视觉语言） */
