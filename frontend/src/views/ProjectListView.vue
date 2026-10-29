@@ -316,8 +316,8 @@ function handleViewSwitch(index) {
 // ------------------------------------------------------------
 // · 收起后侧栏 200px → 64px，主内容区（flex:1）自动吃掉多出来的宽度
 // · 状态持久化到 localStorage —— 刷新 / 切换视图后保持一致
-// · 窄屏（< 768px）默认收起，避免小屏下内容区被挤成一条缝；
-//   用户手动切换后以手动选择为准（同一次会话内）
+// · **默认收起**（用户 2026-10 要求）：首次进入 / 清缓存后侧栏为收起态，把宽度让给数据区；
+//   用户手动展开过则以 localStorage 记录为准，不会被强制改回收起
 // ============================================================
 const SIDEBAR_KEY = 'tower_sidebar_collapsed'
 function readSidebarCollapsed() {
@@ -326,7 +326,7 @@ function readSidebarCollapsed() {
     if (saved === '1') return true
     if (saved === '0') return false
   } catch { /* 隐私模式禁用 localStorage 时忽略 */ }
-  return typeof window !== 'undefined' && window.innerWidth < 768
+  return true   // 默认收起（首次访问 / 无记录时）；有记录则以用户上次选择为准
 }
 const sidebarCollapsed = ref(readSidebarCollapsed())
 // 🔴 收起/展开**只切换一个布尔值**，由 CSS 同步驱动三层过渡（宽度 / 文字宽度 / 文字透明度）。
