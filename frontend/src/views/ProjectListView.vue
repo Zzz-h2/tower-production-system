@@ -1,26 +1,40 @@
 <template>
   <div class="page-wrap">
-    <!-- ① 左侧一级视图切换栏 -->
+    <!-- ① 左侧一级视图切换栏（可收起/展开：收起后数据区获得更大可视宽度） -->
     <div class="page-layout">
-      <div class="side-menu">
-        <el-menu :default-active="activeView" class="view-switch-menu" @select="handleViewSwitch">
-          <el-menu-item index="production">
+      <div class="side-menu" :class="{ 'is-collapsed': sidebarCollapsed }">
+        <el-menu
+          :default-active="activeView"
+          class="view-switch-menu"
+          @select="handleViewSwitch"
+        >
+          <el-menu-item index="production" :title="sidebarCollapsed ? '生产进度总览' : ''">
             <el-icon><TrendCharts /></el-icon>
-            <span>生产进度总览</span>
+            <template #title><span class="menu-label">生产进度总览</span></template>
           </el-menu-item>
-          <el-menu-item index="schedule">
+          <el-menu-item index="schedule" :title="sidebarCollapsed ? '排产计划总览' : ''">
             <el-icon><DocumentChecked /></el-icon>
-            <span>排产计划总览</span>
+            <template #title><span class="menu-label">排产计划总览</span></template>
           </el-menu-item>
-          <el-menu-item index="ranking">
+          <el-menu-item index="ranking" :title="sidebarCollapsed ? '出品排名总览' : ''">
             <el-icon><Trophy /></el-icon>
-            <span>出品排名总览</span>
+            <template #title><span class="menu-label">出品排名总览</span></template>
           </el-menu-item>
-          <el-menu-item index="submission">
+          <el-menu-item index="submission" :title="sidebarCollapsed ? '提报情况总览' : ''">
             <el-icon><Calendar /></el-icon>
-            <span>提报情况总览</span>
+            <template #title><span class="menu-label">提报情况总览</span></template>
           </el-menu-item>
         </el-menu>
+        <!-- 收起/展开按钮：始终可见（移动端也保留），点击切换并记忆到 localStorage -->
+        <button
+          class="collapse-toggle"
+          type="button"
+          :title="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+          :aria-label="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
+          @click="toggleSidebar"
+        >
+          <el-icon><component :is="sidebarCollapsed ? Expand : Fold" /></el-icon>
+        </button>
       </div>
 
       <div class="main-content">
@@ -268,7 +282,7 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy, Calendar, Download } from '@element-plus/icons-vue'
+import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy, Calendar, Download, Fold, Expand } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as XLSX from 'xlsx'
 import { saveAs } from 'file-saver'
@@ -290,7 +304,44 @@ const exporting = ref(false)  // 导出中状态
 // 左侧一级视图切换：production 生产进度总览 / schedule 排产计划总览
 const activeView = ref('production')
 function handleViewSwitch(index) {
-  activeView.value = index
+  activeView.value = index   // 收起/展开只改宽度，不影响当前选中视图
+  // 窄屏下展开态是浮层：选完视图自动收起，避免挡住内容
+  if (typeof window !== 'undefined' && window.innerWidth < 768 && !sidebarCollapsed.value) {
+    applyCollapse(true)
+  }
+}
+
+// ============================================================
+// 侧边栏收起 / 展开（2026-10）
+// ------------------------------------------------------------
+// · 收起后侧栏 200px → 64px，主内容区（flex:1）自动吃掉多出来的宽度
+// · 状态持久化到 localStorage —— 刷新 / 切换视图后保持一致
+// · 窄屏（< 768px）默认收起，避免小屏下内容区被挤成一条缝；
+//   用户手动切换后以手动选择为准（同一次会话内）
+// ============================================================
+const SIDEBAR_KEY = 'tower_sidebar_collapsed'
+function readSidebarCollapsed() {
+  try {
+    const saved = localStorage.getItem(SIDEBAR_KEY)
+    if (saved === '1') return true
+    if (saved === '0') return false
+  } catch { /* 隐私模式禁用 localStorage 时忽略 */ }
+  return typeof window !== 'undefined' && window.innerWidth < 768
+}
+const sidebarCollapsed = ref(readSidebarCollapsed())
+// 🔴 收起/展开**只切换一个布尔值**，由 CSS 同步驱动三层过渡（宽度 / 文字宽度 / 文字透明度）。
+//    不再走「延迟切换 el-menu 的 collapse」—— 实测 el-menu 收起时文字 DOM 并不卸载，
+//    延迟切换只会让文字先闪一下再淡入（比原来更糟）。
+//    现在的时序：容器宽度与文字 max-width 用同一条 .2s 曲线同步推进，
+//    文字 opacity 在展开时同步淡入、收起时提前 20ms 淡出 —— 三者同源，不会脱节。
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  try { localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0') } catch { /* 忽略 */ }
+}
+function applyCollapse(next) {
+  if (sidebarCollapsed.value === next) return
+  sidebarCollapsed.value = next
+  try { localStorage.setItem(SIDEBAR_KEY, next ? '1' : '0') } catch { /* 忽略 */ }
 }
 
 // ============================================================
@@ -687,14 +738,61 @@ onMounted(async () => {
 .side-menu {
   width: 200px; flex-shrink: 0; background: #fff;
   border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px;
+  display: flex; flex-direction: column;
+  /* 收起/展开：宽度与内边距一起过渡，避免图标在动画中途跳动 */
+  transition: width .2s cubic-bezier(.4, 0, .2, 1), padding .2s cubic-bezier(.4, 0, .2, 1);
 }
-.side-menu :deep(.el-menu) { border-right: none; }
+/* 收起态：把 Element Plus 的 collapse 宽度改小一点，保证 72px 侧栏内不溢出 */
+.side-menu.is-collapsed { width: 72px; padding: 8px 4px; --el-menu-collapse-width: 60px; }
+.side-menu :deep(.el-menu) { border-right: none; width: 100%; }
+.side-menu :deep(.el-menu--collapse) { width: 100%; }
 .side-menu :deep(.el-menu-item) { border-radius: 8px; margin-bottom: 4px; }
+.side-menu.is-collapsed :deep(.el-menu-item) {
+  padding-left: 0 !important; padding-right: 0 !important; justify-content: center;
+}
+.side-menu.is-collapsed :deep(.el-menu-item .el-icon) { margin-right: 0; }
 .side-menu :deep(.el-menu-item.is-active) {
   background: #1a365d; color: #fff; font-weight: 500;
 }
 .side-menu :deep(.el-menu-item:not(.is-active):hover) { background: #f4f6f9; }
 .side-menu :deep(.el-menu-item .el-icon) { margin-right: 8px; }
+
+/* 文字显隐：与容器宽度同源过渡（不再依赖 el-menu 的 collapse / DOM 重建）。
+   展开：max-width 与容器同步变宽，文字随之淡入 —— 视觉上"文字被容器推出来"，不会先于背景出现。
+   收起：文字先淡出（.1s），随后宽度收缩，避免文字被硬裁。 */
+.side-menu :deep(.menu-label) {
+  display: inline-block; overflow: hidden; white-space: nowrap;
+  max-width: 160px; opacity: 1;
+  transition: max-width .2s cubic-bezier(.4, 0, .2, 1), opacity .14s ease;
+}
+.side-menu.is-collapsed :deep(.menu-label) {
+  max-width: 0; opacity: 0;
+  transition: max-width .2s cubic-bezier(.4, 0, .2, 1), opacity .1s ease;
+}
+
+/* 收起/展开按钮：贴侧栏底部，视觉语言与菜单项一致 */
+.collapse-toggle {
+  margin-top: 8px; width: 100%; height: 34px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: transparent; border-radius: 8px;
+  color: #718096; cursor: pointer; font-size: 16px;
+  transition: background .18s ease, color .18s ease;
+}
+.collapse-toggle:hover { background: #f4f6f9; color: #1a365d; }
+.collapse-toggle:focus-visible { outline: 2px solid #3182ce; outline-offset: -2px; }
+
+/* 窄屏：压缩间距（初始收起状态由 JS 按 window.innerWidth 决定） */
+@media (max-width: 768px) {
+  .page-layout { gap: 10px; }
+  .side-menu { padding: 6px; border-radius: 10px; }
+  .side-menu.is-collapsed { width: 60px; padding: 6px 2px; --el-menu-collapse-width: 56px; }
+  /* 展开态：改为浮层覆盖 —— 390px 屏宽下若仍走 flex 占位，内容区只剩 130px 无法使用 */
+  .side-menu:not(.is-collapsed) {
+    position: fixed; top: 8px; left: 8px; bottom: 8px; z-index: 2100;
+    width: 200px; padding: 8px; border-radius: 12px;
+    box-shadow: 0 10px 28px rgba(26, 54, 93, .18);
+  }
+}
 .main-content { flex: 1; min-width: 0; }
 .page-title { margin-bottom: 16px; }
 .kpi-row {
