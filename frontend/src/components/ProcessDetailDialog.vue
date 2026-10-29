@@ -787,8 +787,10 @@ async function onExceptionChanged() {
   store.lastNodeSavedAt = Date.now()          // 预警列表（AlertList）刷新
   store.lastExceptionChangedAt = Date.now()   // 工序卡片刷新「存在异常」标签与预警态
   // 保持当前页签不动，仅刷新数据（load 内部会重建 groups / inputValues / reportDates）
+  // 🔴 2026-10：异常变更后必须 force —— 新建/关闭异常会改变该套的「异常暂停」与下游计划日，
+  //    走缓存会看到旧状态（与下料填完后待下料不解除是同一类问题）。
   try {
-    await load()
+    await load({ force: true })
   } catch (e) {
     // load 失败已由 axios 拦截器提示；保留旧数据不影响用户继续查看
   }
@@ -796,6 +798,17 @@ async function onExceptionChanged() {
 
 // 提报成功：除上面的全局刷新外，还要让「异常记录」表格重新拉取（令牌 +1）
 function onReportChanged() {
+  // 🔴 2026-10 用户口径：**提交成功后收起整个提报表单，只保留上面已填报的记录列表**。
+  //    原因：原先只弹顶部 toast、表单原样留着（甚至红框校验痕迹还在），用户会以为没提交成功。
+  //    顺序（关键）：子组件 ExceptionReportTab.onSubmit 里是「先 ElMessage.success，再 emit('changed')」，
+  //    所以到这里时成功提示已经开始展示 → 立刻收起，视觉上是"提示先出、表单随即收走"，衔接自然。
+  //    关闭方式用**双重保证**：
+  //      ① excFormOpen = []  → el-collapse 收起（折叠动画）
+  //      ② selectedNodeId = null → ExceptionReportTab 的 v-if 不成立，组件直接销毁（表单彻底不可见，
+  //         不是"清空了数据但还摆在那儿"）
+  excFormOpen.value = []
+  selectedNodeId.value = null
+  selectedSetSeq.value = null
   onExceptionChanged()
   excTableRefreshKey.value += 1
 }
@@ -1145,11 +1158,22 @@ function detailCacheKey() {
  * （2026-10 线上反馈：已完成分组里减套数后重开，行还挂在「已完成」）。
  */
 function invalidateDetailCache() {
-  DETAIL_CACHE.delete(detailCacheKey())
+  // 🔴 2026-10 修复（用户反馈：下料填完后，后续工序仍显示「待下料」，要等一会儿才刷新）：
+  //    缓存的 key 是 pid|工序|负责人|月份，原先只失效**当前工序**那一份。
+  //    但工序之间存在联动 —— 下料一到位，该套所有后续工序的 waiting_material（待下料）
+  //    会由后端解除、计划日也会按闸门重算。只清当前工序，其它工序的旧快照仍会命中缓存。
+  //    因此写操作后按 **projectId 前缀**把该项目所有工序的缓存一并清掉。
+  const prefix = `${props.pid}|`
+  for (const key of [...DETAIL_CACHE.keys()]) {
+    if (key.startsWith(prefix)) DETAIL_CACHE.delete(key)
+  }
 }
 
 async function load({ force = false } = {}) {
   if (!props.processName) return
+  // force 语义 = 「数据已变更」：此时同项目**所有工序**的缓存都可能过期
+  // （下料填完会解除后续工序的待下料、异常关闭会重算下游计划日），统一作废后再请求。
+  if (force) invalidateDetailCache()
   const cacheKey = detailCacheKey()
   const hit = DETAIL_CACHE.get(cacheKey)
   if (!force && hit && Date.now() - hit.ts < DETAIL_CACHE_TTL) {
