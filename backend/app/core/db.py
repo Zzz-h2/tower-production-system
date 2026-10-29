@@ -247,6 +247,15 @@ def get_project_process_durations_batch(project_ids: list[int],
     return getattr(_fn, "__wrapped__", _fn)(project_ids, month)
 
 
+def get_plans_and_actuals_batch(project_ids: list[int]) -> tuple[dict, dict]:
+    """批量取「项目全部计划行 + 实际进度」（一次往返）：→ (plans_by_pid, actuals_by_pid)。
+
+    提报情况总览算 eff_plan_date 用；合并成一条 UNION ALL 查询以控制 SQL 条数。
+    """
+    from database import get_plans_and_actuals_batch as _fn
+    return getattr(_fn, "__wrapped__", _fn)(project_ids)
+
+
 def get_actuals_rich_by_node_ids(node_ids: list[int]) -> dict:
     """批量取节点实际进度（含 report_date）：{node_plan_id: {actual_qty, report_date}}。"""
     from database import get_actuals_rich_by_node_ids as _fn
