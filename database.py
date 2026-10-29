@@ -1028,6 +1028,71 @@ def get_project_process_durations_batch(project_ids: list[int],
     return {pid: _merge_duration_rows(rws) for pid, rws in by_pid.items()}
 
 
+def get_plans_and_actuals_batch(project_ids: list[int]) -> tuple[dict, dict]:
+    """批量取「项目全部计划行 + 实际进度」，**一次数据库往返**（提报总览 eff 计算专用）。
+
+    背景：`get_submission_board_aggregates` 改为只出原始事实后，服务层要用
+    ``build_time_rules`` 算每行的 eff_plan_date，这需要「项目的全部计划行（找下料闸门行）」
+    与「这些行的实际进度」。原本分两条批量查询，合并成一条 UNION ALL 可少一次往返
+    （提报总览 SQL 条数红线 ≤6）。
+
+    列对齐（UNION ALL 两支列数/类型必须一致）：
+      kind='P' → node_plan_id / project_id / process_name / plan_date / plan_qty
+      kind='A' → node_plan_id / project_id / actual_qty / report_date
+
+    Args:
+        project_ids: 项目 ID 列表（内部按 400 分片，避免单语句占位符过多）
+
+    Returns:
+        (plans_by_pid, actuals_by_pid)
+          plans_by_pid:   {pid: [{'id','process_name','plan_date','plan_qty'}, ...]}
+          actuals_by_pid: {pid: {node_plan_id: {'actual_qty','report_date'}}}
+    """
+    if not project_ids:
+        return {}, {}
+    plans_by_pid: dict[int, list[dict]] = {}
+    actuals_by_pid: dict[int, dict[int, dict]] = {}
+    ids = [int(p) for p in project_ids]
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            for i in range(0, len(ids), 400):
+                chunk = ids[i:i + 400]
+                fmt = ",".join(["%s"] * len(chunk))
+                cur.execute(
+                    f"""
+                    SELECT 'P' AS kind, n.id AS node_plan_id, n.project_id AS project_id,
+                           n.process_name AS process_name, n.plan_date AS plan_date,
+                           n.plan_qty AS plan_qty, NULL AS actual_qty, NULL AS report_date
+                    FROM process_node_plans n WHERE n.project_id IN ({fmt})
+                    UNION ALL
+                    SELECT 'A' AS kind, a.node_plan_id AS node_plan_id, a.project_id AS project_id,
+                           NULL AS process_name, NULL AS plan_date, NULL AS plan_qty,
+                           a.actual_qty AS actual_qty, a.report_date AS report_date
+                    FROM node_actual_progress a WHERE a.project_id IN ({fmt})
+                    """,
+                    tuple(chunk) + tuple(chunk),
+                )
+                for row in cur.fetchall():
+                    pid = int(row["project_id"])
+                    if row["kind"] == "P":
+                        plans_by_pid.setdefault(pid, []).append({
+                            "id": int(row["node_plan_id"]),
+                            "project_id": pid,
+                            "process_name": row["process_name"],
+                            "plan_date": row["plan_date"],
+                            "plan_qty": int(row["plan_qty"] or 0),
+                        })
+                    else:
+                        actuals_by_pid.setdefault(pid, {})[int(row["node_plan_id"])] = {
+                            "actual_qty": int(row["actual_qty"] or 0),
+                            "report_date": row["report_date"],
+                        }
+    finally:
+        conn.close()
+    return plans_by_pid, actuals_by_pid
+
+
 def get_actuals_rich_by_node_ids(node_ids: list[int]) -> dict:
     """批量取节点实际进度（含日期）：{node_plan_id: {"actual_qty": int, "report_date": str|None}}。
 
@@ -2310,26 +2375,29 @@ def get_user_by_id(uid: int) -> Optional[dict]:
 # ============================================================
 def get_submission_board_aggregates(month_start: str, month_end: str,
                                    big_area_person: Optional[str] = None) -> dict:
-    """「提报情况总览」矩阵所需的 4 组聚合事实（按负责人 × 日期 GROUP BY）。
+    """「提报情况总览」矩阵所需的**原始事实**（2026-11 起不再在 SQL 侧按计划日聚合）。
 
-    只读，不写任何表。**固定 4 条 SQL**（与人数/天数无关，无 N+1）：
-      ① plans      —— 该自然月内每个 (负责人, 计划日) 的节点数 + 工序名
-      ② reports    —— 该自然月内每个 (负责人, 填报日) 的填报记录数
-      ③ exceptions —— 该自然月内每个 (负责人, 异常创建日) 的异常条数
-      ④ plan_units —— 该自然月内每条计划行的「单元键 + node_id + 是否已有 actual>0」
-                      （2026-11 新增，供服务层算「已提前完成 / 前置异常暂停」的覆盖数；
-                       只做聚合用，不透出到接口）
+    只读，不写任何表。**固定 3 条 SQL**（与人数/天数无关，无 N+1）：
+      ① plan_rows      —— 该月排产行明细（含 node_id / plan_qty / 是否已有 actual>0）
+      ② reports        —— 该月每个 (负责人, 填报日) 的填报记录数（聚合）
+      ③ exception_rows —— 本批项目的**全部**异常原始行（供计数 + 有效计划日锚点共用）
 
-    口径（用户 2026-11 最新确认，**取代 2026-10 的自然月口径**）：
+    🔴 为什么不再在 SQL 里聚合计划：用户 2026-11 要求「按异常重算后的**有效计划日**
+    eff_plan_date 判定」，eff 由 ``build_time_rules``（闸门 + 异常锚点）算出，SQL 无法表达 →
+    由 ``ranking_service`` 计算 eff 后再聚合。原 ① plans / ④ plan_units 已合并为 plan_rows。
+
+    口径（用户 2026-11 确认，**取代 2026-10 的自然月口径**）：
       - 🔴 **当月排产计划不隔月**：一行属于「查询月 M」当且仅当 **双条件同时成立**
           ``plan_month = M``（严格相等，``NULL`` 不匹配）
           ``AND plan_date ∈ [M-01, 次月 01)``
-        四组聚合（plans / reports / exceptions / plan_units）**统一**按此过滤：
+        四组事实（plan_rows / reports / exceptions / 覆盖计算）**统一**按此过滤：
           · 上月导入、日期落到本月 → **不算本月**（plan_month 不符）
           · 本月导入、日期落在往月（含异常延期到本月的工序）→ **不算本月**（plan_date 不符）
           · ``plan_month IS NULL`` 的历史行 → **一律不计入任何月**
         取舍说明：用户明确「每个月都会重新上传排产计划」，故历史未标注月行不再兜底计入；
         若将来需要兼容历史行，**必须另立口径**，不要在此处悄悄放宽（会重新出现隔月脏数据）。
+        ⚠️ plan_rows 的日期区间过滤用的是**排产原始 plan_date**（用于圈定「本月排产行」）；
+        真正的**格子归属日**由服务层用 eff_plan_date 决定（eff 跑到月外的行不落入本月任何格子）。
       - 计划：``process_node_plans``，``plan_qty > 0`` 才计为「当天有计划」。
       - 计划行白名单：``process_order BETWEEN 1 AND 11``（排产工序），这是排除非排产行的
         **唯一依据**——两类非排产行都必须靠它排除，不能靠「plan_date IS NULL」：
@@ -2357,11 +2425,15 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
 
     Returns:
         dict: {
-          'plans': [{'manager','d'(date),'plan_count','processes'(str),'plan_rows'}],
+          'plan_rows': [{'manager','project_id','process_name','node_id','plan_date','plan_qty','has_actual'}],
           'reports': [{'manager','d'(date),'cnt'}],
-          'exceptions': [{'manager','d'(date),'cnt'}],
-          'plan_units': [{'manager','d'(date),'project_id','process_name','node_id','has_actual'}],
+          'exception_rows': [{'id','project_id','node_id','process_name','plan_date','status',
+                              'closed_at','planned_close_date','created_at'}],
         }
+        ⚠️ 2026-11：**不再在 SQL 侧按 plan_date 聚合**。用户要求「按异常重算后的有效计划日
+        （eff_plan_date）判定」，而 eff 依赖闸门/异常锚点（build_time_rules），SQL 算不出来。
+        故本函数只提供**原始事实**，由 ``ranking_service`` 计算 eff 并聚合（plans / plan_units
+        两组聚合已合并为 plan_rows；异常也改为返回原始行，供计数与锚点共用，避免重复查询）。
     """
     conn = get_connection()
     try:
@@ -2375,18 +2447,27 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
             #     该取舍已在 docstring 写明；如需兼容历史行，必须另立口径，不能在此放宽）
             month_key = str(month_start)[:7]
 
-            # ① 计划事实：节点数 + 工序名（plan_qty <= 0 的行只用于「该负责人本月有排产行」）
+            # ① 计划行事实（2026-11 重构：**不再按 plan_date 在 SQL 里聚合**）
+            #    用户口径：提报总览必须按「异常重算后的有效计划日 eff_plan_date」判定，
+            #    与工序详情（node_service.enrich_rows 用 eff_plan_date、原值留在 plan_date_plan）一致。
+            #    eff_plan_date 依赖闸门/异常锚点（build_time_rules），SQL 算不出来 →
+            #    这里只取**原始行**，由服务层（ranking_service）替换日期后再聚合。
+            #    过滤条件与旧版一致（plan_month 严格相等 + 自然月区间 + 白名单 + 负责人非空 + 大区），
+            #    **刻意不再过滤 plan_qty**：plan_qty<=0 的行仍用于「该负责人本月有排产行」。
             plan_args: list = [month_start, month_end, month_key, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
             if big_area_person:
                 plan_args.append(big_area_person)
             cur.execute(f"""
                 SELECT n.manager AS manager,
-                       n.plan_date AS d,
-                       COUNT(DISTINCT CASE WHEN n.plan_qty > 0
-                             THEN CONCAT(n.project_id, '|', n.process_name) END) AS plan_count,
-                       GROUP_CONCAT(DISTINCT CASE WHEN n.plan_qty > 0
-                                    THEN n.process_name END SEPARATOR '、') AS processes,
-                       COUNT(*) AS plan_rows
+                       n.project_id AS project_id,
+                       n.process_name AS process_name,
+                       n.id AS node_id,
+                       n.plan_date AS plan_date,
+                       n.plan_qty AS plan_qty,
+                       EXISTS (SELECT 1 FROM node_actual_progress a
+                                WHERE a.project_id = n.project_id
+                                  AND a.node_plan_id = n.id
+                                  AND a.actual_qty > 0) AS has_actual
                 FROM process_node_plans n
                 JOIN projects p ON p.id = n.project_id
                 WHERE n.plan_date >= %s AND n.plan_date < %s
@@ -2394,15 +2475,15 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
                   AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
                   AND n.process_order BETWEEN %s AND %s
                   {ba_sql}
-                GROUP BY n.manager, n.plan_date
-                ORDER BY CONVERT(n.manager USING gbk), n.plan_date
+                ORDER BY CONVERT(n.manager USING gbk), n.plan_date, n.id
             """, tuple(plan_args))
-            plans = [dict(r) for r in cur.fetchall()]
+            plan_rows = [dict(r) for r in cur.fetchall()]
 
             # ② 填报事实（report_date = 当天；manager 优先取填报行自身归属）
-            # 🔴 2026-11：必须 **join 计划行**并套用与 ① 完全相同的归属过滤（plan_month + plan_date
+            # 🔴 2026-11：必须 **join 计划行**并套用同一套归属过滤（plan_month + plan_date
             #    区间 + 白名单），否则无法判断这条填报属于哪个月的排产：本月填报上月积压行、
             #    或本月填报「下月导入」的行，都会被错误算进本月。join 条件用 (project_id, node_plan_id)。
+            #    ⚠️ 本组**不随 eff_plan_date 改动**：填报看的是「操作发生日」，只决定它落在哪天格子。
             rep_args: list = [month_start, month_end, month_key, month_start, month_end,
                               SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
             if big_area_person:
@@ -2424,70 +2505,31 @@ def get_submission_board_aggregates(month_start: str, month_end: str,
             """, tuple(rep_args))
             reports = [dict(r) for r in cur.fetchall()]
 
-            # ③ 异常事实（created_at 的日期 = 当天；node_exceptions 无 manager，必须 join 计划表）
-            # 🔴 2026-11：join 计划行后同样叠加归属过滤（plan_month + plan_date 区间 + 白名单），
-            #    与 ①② 同口径；`created_at` 的自然月区间**保留**——两者必须同时满足
-            #    （即「本月提报的、且属于本月排产计划的异常」）。
-            #    ⚠️ 由 LEFT JOIN 改为 INNER JOIN：计划行已不存在的历史异常无法判断归属月，
-            #       按新口径一律不计入（宁可少算，不可错算到某个月）。
-            exc_args: list = [f"{month_start} 00:00:00", f"{month_end} 00:00:00",
-                              month_key, month_start, month_end,
-                              SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
-            if big_area_person:
-                exc_args.append(big_area_person)
-            cur.execute(f"""
-                SELECT n.manager AS manager,
-                       DATE(e.created_at) AS d,
-                       COUNT(*) AS cnt
-                FROM node_exceptions e
-                JOIN projects p ON p.id = e.project_id
-                JOIN process_node_plans n ON n.id = e.node_id
-                WHERE e.created_at >= %s AND e.created_at < %s
-                  AND n.plan_month = %s
-                  AND n.plan_date >= %s AND n.plan_date < %s
-                  AND n.process_order BETWEEN %s AND %s
-                  AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
-                  {ba_sql}
-                GROUP BY n.manager, DATE(e.created_at)
-            """, tuple(exc_args))
-            exceptions = [dict(r) for r in cur.fetchall()]
+            # ③ 异常原始行（2026-11 重构）：一次性取回**本批项目**的全部异常行，
+            #    供服务层同时用于两件事，避免重复查询：
+            #      (a) 「当天有异常提报」计数（按 created_at 日期，join 计划行取 manager）；
+            #      (b) 有效计划日 eff_plan_date 的异常锚点（build_exception_anchors）。
+            #    ⚠️ 这里**不加 created_at 月份过滤**（锚点需要历史全量异常），
+            #       月份/归属过滤由服务层按 (a) 的口径施加。
+            project_ids = sorted({int(r["project_id"]) for r in plan_rows})
+            exception_rows: list = []
+            if project_ids:
+                for i in range(0, len(project_ids), 500):
+                    chunk = project_ids[i:i + 500]
+                    fmt = ",".join(["%s"] * len(chunk))
+                    cur.execute(f"""
+                        SELECT e.id AS id, e.project_id AS project_id, e.node_id AS node_id,
+                               e.process_name AS process_name, e.plan_date AS plan_date,
+                               e.status AS status, e.closed_at AS closed_at,
+                               e.planned_close_date AS planned_close_date,
+                               e.created_at AS created_at
+                        FROM node_exceptions e
+                        WHERE e.project_id IN ({fmt})
+                    """, tuple(chunk))
+                    exception_rows.extend(dict(r) for r in cur.fetchall())
 
-            # ④ 计划单元事实（2026-11 新增）：为「已提前完成 / 前置异常暂停」两类覆盖提供
-            #    **单元级**事实。单元 = (项目, 工序)，与 ① 的 plan_count 使用完全相同的
-            #    COUNT(DISTINCT project_id|process_name) 空间，因此 plan_count 与 covered_count
-            #    可以直接相减/比较（这是「部分覆盖」展示的前提）。
-            #    - has_actual：该计划行**已有填报记录**（report_date 可早于计划日 →
-            #      即「计划日之前就填完了」，当天没再填也算已提报）。
-            #    - 返回 node_id：上层用 build_time_rules 复用**行级 exception_paused** 判定
-            #      （条件 2），绝不在这里另写一套「暂停」规则。
-            #    ⚠️ 本组只供服务层做聚合计数，**不进入接口响应**；接口仍是固定条数的聚合结果，
-            #       没有把 per-plan 明细透给前端（保持「固定条数、无 N+1」的既有约定）。
-            unit_args: list = [month_start, month_end, month_key, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
-            if big_area_person:
-                unit_args.append(big_area_person)
-            cur.execute(f"""
-                SELECT n.manager AS manager,
-                       n.plan_date AS d,
-                       n.project_id AS project_id,
-                       n.process_name AS process_name,
-                       n.id AS node_id,
-                       EXISTS (SELECT 1 FROM node_actual_progress a
-                                WHERE a.project_id = n.project_id
-                                  AND a.node_plan_id = n.id
-                                  AND a.actual_qty > 0) AS has_actual
-                FROM process_node_plans n
-                JOIN projects p ON p.id = n.project_id
-                WHERE n.plan_date >= %s AND n.plan_date < %s
-                  AND n.plan_month = %s
-                  AND n.manager IS NOT NULL AND TRIM(n.manager) <> ''
-                  AND n.process_order BETWEEN %s AND %s
-                  AND n.plan_qty > 0
-                  {ba_sql}
-            """, tuple(unit_args))
-            plan_units = [dict(r) for r in cur.fetchall()]
-
-            return {"plans": plans, "reports": reports, "exceptions": exceptions,
-                    "plan_units": plan_units}
+            return {"plan_rows": plan_rows, "reports": reports,
+                    "exception_rows": exception_rows}
     finally:
         conn.close()
 

@@ -207,6 +207,11 @@ SUBMISSION_BOARD_CAVEAT = (
     "同一节点事后改期会覆盖先前记录，历史个别已真实提报的日期可能被反标为 ×。"
     "另：排产计划为整体覆盖式导入，重新导入后历史月份的计划可能已被归档，"
     "该月矩阵可能出现空白（≠ 全部按时提报）。"
+    # 2026-10：本页已改用「有效计划日」（异常/前置暂停顺延后的新计划日）判定，
+    # 顺延出本月的工序不会出现在本月，也不会出现在顺延后所属月份（该月未导入它的计划），
+    # 这类行属"剔除"而非"漏统计"，故在此明示，避免被反复当成漏报。
+    "注：因异常或前置工序暂停而顺延到其它月份的工序，按顺延后的新计划日归属，"
+    "不计入本月未提报统计（可在工序详情中查看「新计划日 / 原排产日」对照）。"
 )
 
 
@@ -366,93 +371,182 @@ def save_submission_board_overrides(month: str, items: list[dict],
     return result
 
 
-def _load_submission_covered(agg: dict, big_area_person: str | None,
-                             today: date) -> tuple[dict, dict, dict]:
-    """计算「当天视为已提报」的两类覆盖（2026-11 新增口径）。
+def _load_effective_plan_dates(plan_rows: list[dict], exception_rows: list[dict],
+                               today: date) -> tuple[dict, set, dict]:
+    """算出每行「有效计划日 eff_plan_date」与「行级异常暂停」标记（2026-11 新增）。
+
+    背景（用户 2026-11）：提报总览必须按**异常重算后的有效计划日**判定，与工序详情
+    （``node_service.enrich_rows`` 用 ``eff_plan_date``、原值留在 ``plan_date_plan``）一致；
+    此前总览直接用排产原始 ``plan_date``，导致「已因异常顺延到下月的工序」在原计划日被判未提报。
+
+    实现：**完全复用** ``build_time_rules``（闸门 + 异常锚点），不重写任何判定：
+      - 按 project_id 分组，每组一次 ``build_time_rules(该项目的全部计划行, actuals, durations,
+        build_exception_anchors(该项目异常), today)``；
+      - 取 ``eff_plan_date``（None → 不写 map，调用方回退原始 plan_date）；
+      - 顺带取 ``exception_paused``（供覆盖口径的条件②，避免再跑一遍规则）。
+
+    Args:
+        plan_rows: ``db.get_submission_board_aggregates`` 的 ``plan_rows``（本批项目 × 本月）
+        exception_rows: 同次返回的 ``exception_rows``（**本批项目的全部异常**，含已关闭）
+        today: 业务今天（active 判定与判定层同源）
+
+    Returns:
+        (eff_map, paused_nodes, plans_by_id)
+          - eff_map: ``{(project_id, node_id): 'YYYY-MM-DD'}``
+          - paused_nodes: ``set[(project_id, node_id)]``（行级 exception_paused）
+          - plans_by_id: ``{node_id: 计划行}``（供异常计数反查 manager/归属，INNER 语义）
+    """
+    plans_by_id: dict[int, dict] = {}
+    project_ids: set[int] = set()
+    for r in plan_rows:
+        try:
+            pid = int(r.get("project_id"))
+            nid = int(r.get("node_id"))
+        except (TypeError, ValueError):
+            continue
+        project_ids.add(pid)
+        plans_by_id[nid] = r
+
+    if not project_ids:
+        return {}, set(), plans_by_id
+
+    # 异常按项目分组（本批项目的全部异常，一次查询已由 db 层取回，不再重复查库）
+    exc_by_pid: dict[int, list[dict]] = {}
+    for e in exception_rows:
+        try:
+            exc_by_pid.setdefault(int(e.get("project_id")), []).append(e)
+        except (TypeError, ValueError):
+            continue
+
+    try:
+        plans_map = db.get_node_plans_batch(sorted(project_ids))
+        actuals_map = db.get_node_actuals_batch(sorted(project_ids))
+        dur_map = db.get_project_process_durations_batch(sorted(project_ids), None)
+    except Exception as e:  # noqa: BLE001 — 有效计划日为增强口径，失败则回退原始 plan_date
+        logger.warning("提报情况：批量加载 plans/actuals/durations 失败，回退原始计划日：%s", e)
+        return {}, set(), plans_by_id
+
+    eff_map: dict[tuple[int, int], str] = {}
+    paused_nodes: set[tuple[int, int]] = set()
+    for pid in sorted(project_ids):
+        plans = plans_map.get(pid) or []
+        durations = dur_map.get(pid) or {}
+        if not plans:
+            continue
+        if durations:
+            anchors = build_exception_anchors(exc_by_pid.get(pid) or [], durations, plans,
+                                              today=today)
+            rules = build_time_rules(plans, actuals_map.get(pid) or {}, durations,
+                                     anchors, today=today)
+        else:
+            # 无时长数据（存量项目/未重导）→ 规则回退：不做闸门抑制、不重算日期
+            # （与 build_time_rules 的 fallback 分支等价，此处直接跳过以免空跑）
+            rules = {}
+        for nid, rule in rules.items():
+            eff = rule.get("eff_plan_date")
+            if eff:
+                eff_map[(pid, int(nid))] = str(eff)[:10]
+            if rule.get("exception_paused"):
+                paused_nodes.add((pid, int(nid)))
+    return eff_map, paused_nodes, plans_by_id
+
+
+def _build_plan_facts(plan_rows: list[dict], eff_map: dict,
+                      month_start: str, month_end: str) -> tuple[list, dict, dict, list]:
+    """把计划行按**有效计划日**聚合成矩阵所需的 (负责人, 日期) 事实（2026-11 改用 eff）。
+
+    - 格子日期 = ``eff_map[(project_id, node_id)]``，缺失则回退原始 ``plan_date``；
+    - **eff 落在查询月之外的行直接丢弃**（用户口径：延期到下月的工序不计入本月）；
+    - ``plan_count`` / ``processes`` 的统计口径与旧 SQL 完全一致：
+      ``COUNT(DISTINCT 项目|工序)`` 且仅 ``plan_qty > 0`` 才计入；
+    - 负责人顺序沿用 SQL 的 gbk 拼音序（plan_rows 已按该顺序返回，去重保序）。
+
+    Returns:
+        (managers, plan_count, plan_procs, units)
+          - units: [{'manager','d','project_id','process_name','node_id','has_actual'}]
+            仅含 ``plan_qty > 0`` 的行（覆盖判定与 plan_count 同空间）
+    """
+    managers: list[str] = []
+    seen: set[str] = set()
+    plan_count: dict[tuple[str, str], int] = {}
+    plan_procs: dict[tuple[str, str], set] = {}
+    units: list[dict] = []
+    unit_seen: dict[tuple[str, str], set] = {}
+
+    for r in plan_rows:
+        mgr = str(r.get("manager") or "").strip()
+        if not mgr:
+            continue
+        try:
+            pid = int(r.get("project_id"))
+            nid = int(r.get("node_id"))
+        except (TypeError, ValueError):
+            continue
+        ds = eff_map.get((pid, nid)) or _date_str(r.get("plan_date"))
+        if not ds or ds < month_start or ds >= month_end:
+            # eff 跑到月外（如 10-20 → 11-07）→ 本月不显示（用户明确要求）
+            continue
+        if mgr not in seen:
+            seen.add(mgr)
+            managers.append(mgr)
+        key = (mgr, ds)
+        qty = int(r.get("plan_qty") or 0)
+        if qty > 0:
+            unit = (pid, str(r.get("process_name") or ""))
+            bucket = unit_seen.setdefault(key, set())
+            if unit not in bucket:
+                bucket.add(unit)
+                plan_count[key] = plan_count.get(key, 0) + 1
+            plan_procs.setdefault(key, set()).add(unit[1])
+            units.append({
+                "manager": mgr, "d": ds, "project_id": pid,
+                "process_name": unit[1], "node_id": nid,
+                "has_actual": r.get("has_actual"),
+            })
+        else:
+            # plan_qty<=0：只用于「该负责人本月有排产行」（与旧口径一致，不计入格子）
+            plan_count.setdefault(key, 0)
+
+    procs = {k: sorted(v) for k, v in plan_procs.items()}
+    return managers, plan_count, procs, units
+
+
+def _load_submission_covered(units: list[dict], paused_nodes: set) -> tuple[dict, dict, dict]:
+    """计算「当天视为已提报」的两类覆盖（2026-11 口径）。
 
     覆盖来源（任一成立即算该「单元 = 项目|工序」当天已提报）：
       ① **已提前完成**：该计划行已有 ``actual_qty > 0`` 的填报记录
          （report_date 可早于计划日 —— 计划日之前就填完了，当天没再填不算漏报）；
       ② **前置工序异常暂停**：该行**行级** ``exception_paused`` 为真
          （同套存在生效中异常且位于其上游工序）。
-         判定**完全复用** ``build_time_rules`` 的输出，不在这里重写「暂停」规则；
-         且只对「本月有计划行 且 存在生效中异常」的项目做这批计算，避免无谓开销。
 
     Args:
-        agg: ``db.get_submission_board_aggregates`` 的返回值（用其中的 ``plan_units``）
-        big_area_person: 仅用于日志/语义对齐，本函数不做过滤（聚合层已隔离）
-        today: 业务今天（active 判定与判定层同源）
+        units: ``_build_plan_facts`` 的 units（日期已是 eff_plan_date）
+        paused_nodes: ``_load_effective_plan_dates`` 的 ``paused_nodes``
 
     Returns:
-        (covered_all, covered_early, covered_paused)
-          - 三者均为 ``{(manager, 'YYYY-MM-DD'): set[(project_id, process_name)]}``
-          - covered_all = early ∪ paused；covered_early / covered_paused 为**互斥**拆分
-            （paused 里剔除已计入 early 的单元，便于 tooltip 分别说明）
+        (covered_all, covered_early, covered_paused)，均为
+        ``{(manager, 'YYYY-MM-DD'): set[(project_id, process_name)]}``；
+        covered_early / covered_paused 为**互斥**拆分，便于 tooltip 分别说明。
     """
-    units = agg.get("plan_units") or []
-    if not units:
-        return {}, {}, {}
-
     early: dict[tuple[str, str], set] = {}
     paused_raw: dict[tuple[str, str], set] = {}
-    project_ids: set[int] = set()
     for r in units:
         mgr = str(r.get("manager") or "").strip()
         if not mgr:
             continue
-        ds = _date_str(r.get("d"))
         try:
             pid = int(r.get("project_id"))
+            nid = int(r.get("node_id"))
         except (TypeError, ValueError):
             continue
-        key = (mgr, ds)
+        key = (mgr, _date_str(r.get("d")))
         unit = (pid, str(r.get("process_name") or ""))
-        project_ids.add(pid)
         if int(r.get("has_actual") or 0) > 0:
             early.setdefault(key, set()).add(unit)
+        if (pid, nid) in paused_nodes:
+            paused_raw.setdefault(key, set()).add(unit)
 
-    # ---- 条件②：只对「存在生效中异常」的项目跑行级判定（复用既有能力）----
-    try:
-        exc_map = db.get_node_exceptions_batch(sorted(project_ids)) or {}
-    except Exception as e:  # noqa: BLE001 — 异常暂停为增强口径，失败不影响既有判定
-        logger.warning("get_node_exceptions_batch 失败（提报情况覆盖口径降级）：%s", e)
-        exc_map = {}
-
-    active_pids = [
-        pid for pid, rows in exc_map.items()
-        if any(exception_is_active(r, today) for r in (rows or []))
-    ]
-    if active_pids:
-        try:
-            plans_map = db.get_node_plans_batch(active_pids)
-            actuals_map = db.get_node_actuals_batch(active_pids)
-            dur_map = db.get_project_process_durations_batch(active_pids, None)
-        except Exception as e:  # noqa: BLE001 — 同上，降级为「无暂停覆盖」
-            logger.warning("提报情况覆盖口径的批量加载失败：%s", e)
-            plans_map, actuals_map, dur_map = {}, {}, {}
-
-        for pid in active_pids:
-            plans = plans_map.get(pid) or []
-            durations = dur_map.get(pid) or {}
-            if not plans or not durations:
-                continue        # 无时长数据 → 无法反推所属套，暂停口径不参与（与判定层一致）
-            anchors = build_exception_anchors(exc_map.get(pid) or [], durations, plans,
-                                              today=today)
-            rules = build_time_rules(plans, actuals_map.get(pid) or {}, durations,
-                                     anchors, today=today)
-            for r in units:
-                if int(r.get("project_id")) != pid:
-                    continue
-                rule = rules.get(r.get("node_id")) or {}
-                if not rule.get("exception_paused"):
-                    continue
-                mgr = str(r.get("manager") or "").strip()
-                if not mgr:
-                    continue
-                paused_raw.setdefault((mgr, _date_str(r.get("d"))), set()).add(
-                    (pid, str(r.get("process_name") or "")))
-
-    # 互斥拆分：paused 只保留「不是提前完成」贡献的部分，便于前端分别说明
     covered_all: dict[tuple[str, str], set] = {}
     covered_paused: dict[tuple[str, str], set] = {}
     for key in set(early) | set(paused_raw):
@@ -528,41 +622,44 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
     agg = db.get_submission_board_aggregates(ns, ne, big_area_person)
     override_map, override_meta = _load_submission_overrides(ns, ne)
 
-    # ---- 计划事实（负责人顺序即 SQL 的 gbk 拼音序，去重保序）----
-    managers: list[str] = []
-    seen_managers: set[str] = set()
-    plan_count: dict[tuple[str, str], int] = {}
-    plan_procs: dict[tuple[str, str], list[str]] = {}
-    for r in agg.get("plans", []):
-        mgr = str(r.get("manager") or "").strip()
-        if not mgr:
-            continue
-        if mgr not in seen_managers:
-            seen_managers.add(mgr)
-            managers.append(mgr)
-        ds = _date_str(r.get("d"))
-        key = (mgr, ds)
-        plan_count[key] = int(r.get("plan_count") or 0)
-        # GROUP_CONCAT('、') → 去重排序（同一工序在多个项目出现只列一次）
-        names = [p.strip() for p in str(r.get("processes") or "").split("、") if p.strip()]
-        plan_procs[key] = sorted(set(names))
+    # ---- 有效计划日（2026-11）：用异常重算后的 eff_plan_date 决定格子归属 ----
+    # 与工序详情（node_service.enrich_rows）同源：build_time_rules + build_exception_anchors
+    plan_rows = agg.get("plan_rows") or []
+    exception_rows = agg.get("exception_rows") or []
+    eff_map, paused_nodes, plans_by_id = _load_effective_plan_dates(plan_rows, exception_rows, today)
 
-    # ---- 填报 / 异常事实（集合查找 O(1)）----
+    # ---- 计划事实（按 eff 日期聚合；eff 落到月外的行不进入本月任何格子）----
+    managers, plan_count, plan_procs, units = _build_plan_facts(plan_rows, eff_map, ns, ne)
+
+    # ---- 填报事实（report_date = 操作日，不随 eff 改动）----
     reported: set[tuple[str, str]] = set()
     for r in agg.get("reports", []):
         mgr = str(r.get("manager") or "").strip()
         if mgr:
             reported.add((mgr, _date_str(r.get("d"))))
 
+    # ---- 异常事实（created_at = 提报日；归属沿用「本月排产行」口径）----
+    # exception_rows 是本批项目的**全部**异常（含历史），这里按旧口径过滤：
+    #   · 该异常的计划行必须属于本月排产集合（plans_by_id 已按 plan_month/日期/白名单/负责人过滤）
+    #   · created_at 的日期落在查询月
     exceptioned: set[tuple[str, str]] = set()
-    for r in agg.get("exceptions", []):
-        mgr = str(r.get("manager") or "").strip()
-        if mgr:
-            exceptioned.add((mgr, _date_str(r.get("d"))))
+    for e in exception_rows:
+        try:
+            nid = int(e.get("node_id"))
+        except (TypeError, ValueError):
+            continue
+        plan = plans_by_id.get(nid)
+        if not plan:
+            continue                     # 计划行不在本月集合 → 不计入（等价旧 INNER JOIN）
+        mgr = str(plan.get("manager") or "").strip()
+        if not mgr:
+            continue
+        ds = _date_str(e.get("created_at"))
+        if ds and ns <= ds < ne:
+            exceptioned.add((mgr, ds))
 
     # ---- 覆盖事实（2026-11 新口径）：已提前完成 / 前置工序异常暂停 → 当天视为已提报 ----
-    covered_all, covered_early_map, covered_paused_map = _load_submission_covered(
-        agg, big_area_person, today)
+    covered_all, covered_early_map, covered_paused_map = _load_submission_covered(units, paused_nodes)
 
     # ---- 组装矩阵 ----
     rows: list[dict] = []
