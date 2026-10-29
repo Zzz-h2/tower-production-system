@@ -419,8 +419,9 @@ def _load_effective_plan_dates(plan_rows: list[dict], exception_rows: list[dict]
             continue
 
     try:
-        plans_map = db.get_node_plans_batch(sorted(project_ids))
-        actuals_map = db.get_node_actuals_batch(sorted(project_ids))
+        # 🔴 一次往返取「全部计划行 + 实际进度」（SQL 条数红线 ≤6）：
+        #    原先分 get_node_plans_batch / get_node_actuals_batch 两条，合并后省一次往返。
+        plans_map, actuals_map = db.get_plans_and_actuals_batch(sorted(project_ids))
         dur_map = db.get_project_process_durations_batch(sorted(project_ids), None)
     except Exception as e:  # noqa: BLE001 — 有效计划日为增强口径，失败则回退原始 plan_date
         logger.warning("提报情况：批量加载 plans/actuals/durations 失败，回退原始计划日：%s", e)
