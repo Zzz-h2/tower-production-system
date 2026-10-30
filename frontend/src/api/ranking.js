@@ -53,3 +53,29 @@ export const addExtraCompletion = (payload) =>
  */
 export const fetchExtraCompletions = (month, manager) =>
   http.get('/ranking/extra/list', { params: { month, manager } })
+
+/**
+ * 出品排名：修改一条已填报的「计划外完成」套数（**仅管理员**，后端非 admin 返回 403）。
+ *
+ * 只改 qty，不改负责人/月份归属；month 必须与记录原月份一致，否则后端返回 404。
+ * 修改后排名、完成率、两张 KPI 卡在下次拉取时自动重算。
+ *
+ * @param {number} id 记录 id
+ * @param {{month: string, qty: number}} payload
+ * @returns {Promise<{id: number, extra_total: number}>}
+ */
+export const updateExtraCompletion = (id, payload) =>
+  http.put(`/ranking/extra/${id}`, payload)
+
+/**
+ * 出品排名：删除一条已填报的「计划外完成」（**仅管理员**，后端非 admin 返回 403）。
+ *
+ * month 走查询参数（DELETE 不带 body），必须与记录原月份一致，否则后端返回 404。
+ * 删除后该负责人累计完成 / 完成率 / 排名顺序 / KPI 在下次拉取时自动回退。
+ *
+ * @param {number} id 记录 id
+ * @param {string} month 'YYYY-MM'
+ * @returns {Promise<{id: number, deleted: boolean, extra_total: number}>}
+ */
+export const deleteExtraCompletion = (id, month) =>
+  http.delete(`/ranking/extra/${id}`, { params: { month } })

@@ -31,15 +31,16 @@
         <div class="kpi-value" style="color:#38a169;">{{ fmtQty(stats.totalActual) }}</div>
         <div class="kpi-label">累计完成套数</div>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-value" style="color:#3182ce;">{{ stats.avgRate }}</div>
-        <div class="kpi-label">整体完成率</div>
-      </div>
       <!-- 2026-11 新增：计划外完成（非本月调度令、人工录入）—— 数值取接口 extra_total，
            与各行 extra_qty 之和一致；已计入上方「累计完成套数」与完成率分子。 -->
       <div class="kpi-card">
         <div class="kpi-value" style="color:#805ad5;">{{ fmtQty(extraTotal) }}</div>
         <div class="kpi-label">计划外完成套数</div>
+      </div>
+      <!-- 2026-10-30：按要求「整体完成率」与「计划外完成套数」互换位序，整体完成率固定在最右侧 -->
+      <div class="kpi-card">
+        <div class="kpi-value" style="color:#3182ce;">{{ stats.avgRate }}</div>
+        <div class="kpi-label">整体完成率</div>
       </div>
     </div>
 
@@ -91,14 +92,15 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="130" align="center" fixed="right">
+        <el-table-column label="操作" width="170" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button type="primary" link size="small" @click="openDetail(row)">详情</el-button>
+            <!-- 2026-10-30：按用户要求，「详情 / 额外」由纯链接改为描边按钮（可见边框） -->
+            <el-button type="primary" plain size="small" @click="openDetail(row)">详情</el-button>
             <!-- 2026-11：计划外完成录入入口（仅管理员；后端同样 require_admin） -->
             <el-button
               v-if="auth.isAdmin"
               type="success"
-              link
+              plain
               size="small"
               @click="openExtra(row)"
             >额外</el-button>
@@ -173,17 +175,19 @@
       </div>
     </el-dialog>
 
-    <!-- ⑤ 计划外完成录入弹窗（2026-11，仅管理员） -->
+    <!-- ⑤ 计划外完成弹窗（2026-11，仅管理员）：上半新增录入 / 下半已填报记录可改套数 -->
     <el-dialog
       v-model="extraVisible"
-      :title="`录入计划外完成（${store.filters.month}）`"
-      width="480px"
+      :title="`计划外完成（${store.filters.month}）`"
+      width="780px"
       append-to-body
       :close-on-click-modal="false"
     >
+      <!-- ① 新增录入（原有模块，样式与字段未改） -->
+      <div class="extra-section-title">新增录入</div>
       <el-form label-width="110px" label-position="right">
         <el-form-item label="负责人" required>
-          <el-select v-model="extraForm.manager" placeholder="选择负责人" style="width: 100%">
+          <el-select v-model="extraForm.manager" placeholder="选择负责人" style="width: 100%" @change="loadExtraEdit">
             <el-option v-for="m in managerOptions" :key="m" :label="m" :value="m" />
           </el-select>
         </el-form-item>
@@ -198,8 +202,73 @@
           <span class="extra-hint">计入 {{ store.filters.month }} 该负责人的累计完成（不改计划分母）</span>
         </el-form-item>
       </el-form>
+
+      <!-- ② 已填报记录（2026-10-30 新增）：查看 / 直接在表内改套数并保存 -->
+      <el-divider content-position="left">已填报记录（可调整套数）</el-divider>
+      <div class="extra-edit-block">
+        <div class="extra-edit-head">
+          <span class="extra-edit-summary">
+            当前负责人本月共 <b>{{ extraEditRows.length }}</b> 条，合计
+            <b>{{ fmtQty(extraEditTotal) }}</b> 套
+          </span>
+          <el-button size="small" :icon="Refresh" :loading="extraEditLoading" @click="loadExtraEdit">刷新</el-button>
+        </div>
+        <el-table
+          v-loading="extraEditLoading"
+          :data="extraEditRows"
+          border
+          size="small"
+          style="width: 100%"
+          max-height="260"
+          :row-style="{ height: '40px' }"
+          :header-cell-style="{ whiteSpace: 'nowrap', background: '#f7fafc', color: '#1a365d' }"
+        >
+          <el-table-column label="项目" prop="project_name" min-width="150" show-overflow-tooltip />
+          <el-table-column label="机型" width="100" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.machine_type || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="套数" width="140" align="center">
+            <template #default="{ row }">
+              <el-input-number
+                v-model="row.editQty"
+                :min="1"
+                :step="1"
+                :precision="0"
+                size="small"
+                controls-position="right"
+                style="width: 110px"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="录入时间" prop="created_at" width="140" align="center" />
+          <el-table-column label="操作" width="168" align="center">
+            <template #default="{ row }">
+              <el-button
+                type="primary"
+                plain
+                size="small"
+                :loading="row.saving"
+                :disabled="!isExtraDirty(row)"
+                @click="saveExtraRow(row)"
+              >保存</el-button>
+              <!-- 2026-10-30：删除已生成记录（二次确认；同样只看 admin，后端 require_admin 兜底） -->
+              <el-button
+                type="danger"
+                plain
+                size="small"
+                :disabled="row.saving"
+                @click="removeExtraRow(row)"
+              >删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="!extraEditLoading && !extraEditRows.length" class="extra-edit-empty">
+          该负责人本月暂无计划外完成记录
+        </div>
+      </div>
+
       <template #footer>
-        <el-button @click="extraVisible = false">取消</el-button>
+        <el-button @click="extraVisible = false">关闭</el-button>
         <el-button type="primary" :loading="extraSaving" @click="submitExtra">确认录入</el-button>
       </template>
     </el-dialog>
@@ -208,7 +277,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
@@ -217,6 +286,8 @@ import {
   fetchProductionRankingDetail,
   addExtraCompletion,
   fetchExtraCompletions,
+  updateExtraCompletion,
+  deleteExtraCompletion,
 } from '../api/ranking'
 
 const store = useProjectStore()   // 共享调度令月份（三页联动）
@@ -322,6 +393,92 @@ const extraForm = ref({ manager: '', project_name: '', machine_type: '', qty: 1 
 // 负责人候选 = 当前排名的负责人（自由文本口径下，前端只让选已有负责人，避免录到无人认领的 name）
 const managerOptions = computed(() => rows.value.map((r) => r.manager).filter(Boolean))
 
+// ── 已填报记录（2026-10-30 新增）：查看 / 原地改套数 / 保存 ──
+// 数据源与「详情弹窗」同一个 GET /ranking/extra/list（month + manager），不新增接口口径。
+const extraEditRows = ref([])
+const extraEditLoading = ref(false)
+const extraEditTotal = computed(() =>
+  extraEditRows.value.reduce((s, r) => s + Number(r.editQty || 0), 0))
+
+// 后端 detail 既可能是字符串也可能是 {code, message} 对象，统一取人话文案
+const errMsg = (e, fallback) => {
+  const d = e?.response?.data?.detail
+  if (typeof d === 'string' && d) return d
+  if (d && typeof d === 'object' && d.message) return d.message
+  return fallback
+}
+
+async function loadExtraEdit() {
+  const mgr = extraForm.value.manager
+  if (!extraVisible.value || !mgr) { extraEditRows.value = []; return }
+  extraEditLoading.value = true
+  try {
+    const res = await fetchExtraCompletions(store.filters.month, mgr)
+    // editQty = 编辑中的值（与 qty 原值比对判断是否有改动）；saving = 单行保存态
+    extraEditRows.value = (res?.items || []).map((it) => ({
+      ...it,
+      editQty: Number(it.qty || 0),
+      saving: false,
+    }))
+  } catch (e) {
+    extraEditRows.value = []
+    ElMessage.error(errMsg(e, '加载已填报记录失败'))
+  } finally {
+    extraEditLoading.value = false
+  }
+}
+
+// 值没变就禁用保存，避免无意义的 PUT（也防手抖重复点）
+const isExtraDirty = (row) => Number(row.editQty) !== Number(row.qty)
+
+async function saveExtraRow(row) {
+  const qty = Number(row.editQty)
+  if (!Number.isFinite(qty) || qty <= 0) { ElMessage.warning('额外完成套数必须大于 0'); return }
+  if (!isExtraDirty(row)) { ElMessage.info('套数未改动'); return }
+  row.saving = true
+  try {
+    await updateExtraCompletion(row.id, { month: store.filters.month, qty: Math.trunc(qty) })
+    ElMessage.success('已更新该条计划外完成')
+    // 保存后两件事同时做：刷新列表（回显新值）+ 刷新排名与 KPI（完成率/顺序跟着变）
+    await Promise.all([loadExtraEdit(), load()])
+  } catch (e) {
+    ElMessage.error(errMsg(e, '更新失败'))
+  } finally {
+    row.saving = false
+  }
+}
+
+// 删除已生成记录：二次确认 → DELETE → 列表与排名一起回退
+async function removeExtraRow(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除「${row.project_name}」的 ${row.qty} 套计划外完成？删除后该负责人的累计完成与完成率会同步回退。`,
+      '删除确认',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return   // 取消 / 关闭弹窗 → 什么都不做（ElMessageBox 取消是 reject，必须吞掉）
+  }
+  row.saving = true
+  try {
+    await deleteExtraCompletion(row.id, store.filters.month)
+    ElMessage.success('已删除该条计划外完成')
+    // 与保存同样两路刷新：列表少一行 + 排名/KPI 回退
+    await Promise.all([loadExtraEdit(), load()])
+  } catch (e) {
+    ElMessage.error(errMsg(e, '删除失败'))
+  } finally {
+    row.saving = false
+  }
+}
+
+// 切换负责人由 el-select 的 @change 触发 loadExtraEdit（不用 watch：
+// 重新打开同一负责人时 watch 不会触发，会导致编辑区停留在上一个人的数据）
 function openExtra(row) {
   if (!auth.isAdmin) return
   extraForm.value = {
@@ -330,7 +487,9 @@ function openExtra(row) {
     machine_type: '',
     qty: 1,
   }
+  extraEditRows.value = []
   extraVisible.value = true
+  loadExtraEdit()
 }
 
 async function submitExtra() {
@@ -350,10 +509,14 @@ async function submitExtra() {
     })
     // ⚠️ ElMessage 只传一个参数（本项目踩过坑）
     ElMessage.success(`已录入额外完成 ${Math.trunc(qty)} 套`)
-    extraVisible.value = false
-    await load()   // 刷新排名（含额外后重排）与 KPI
+    // 2026-10-30：录入后不再关闭弹窗 —— 下方「已填报记录」就地刷新，可立刻核对/修正；
+    // 表单只清空本次输入（负责人保留，方便同一个人连续补录）。
+    f.project_name = ''
+    f.machine_type = ''
+    f.qty = 1
+    await Promise.all([loadExtraEdit(), load()])
   } catch (e) {
-    ElMessage.error(e?.response?.data?.detail || '录入失败')
+    ElMessage.error(errMsg(e, '录入失败'))
   } finally {
     extraSaving.value = false
   }
@@ -377,6 +540,23 @@ onMounted(load)
    样式一并移除（无其它引用）。 */
 /* 2026-10-30：`.extra-tag`（+N 内联标签）已删除 —— 内联元素会把数字挤偏，改为当天 ↑ 标识。 */
 .extra-hint { margin-left: 10px; font-size: 11px; color: #a0aec0; }
+/* 2026-10-30：计划外完成弹窗内的「新增录入 / 已填报记录」两段分区
+   风格与详情弹窗一致：左竖条标题 + #f7fafc 表头，禁用花哨描边。 */
+.extra-section-title {
+  font-size: 13px; font-weight: 600; color: #1a365d;
+  margin-bottom: 12px; padding-left: 8px; border-left: 3px solid #3182ce;
+}
+.extra-edit-block { margin-top: 4px; }
+.extra-edit-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 8px;
+}
+/* 数字用等宽数字，条数/合计变化时行宽不跳 */
+.extra-edit-summary { font-size: 12px; color: #718096; font-variant-numeric: tabular-nums; }
+.extra-edit-summary b { color: #1a365d; font-weight: 600; }
+.extra-edit-empty {
+  margin-top: 8px; font-size: 12px; color: #a0aec0; text-align: center; padding: 10px 0;
+}
 /* 2026-10-30：详情弹窗内的「计划外完成明细」区块 */
 .extra-detail-block { margin-top: 16px; }
 .extra-detail-title {
