@@ -2363,6 +2363,64 @@ def add_extra_completion(month: str, manager: str, project_name: str,
         conn.close()
 
 
+def update_extra_completion(extra_id: int, month: str, qty: int) -> bool:
+    """修改一条「计划外完成」的套数 → 是否命中并更新。
+
+    🔴 必须同时传 month，且与记录自身 month 一致才更新：
+       防止前端月份被切走后误改到别的月的数据（跨月误改会污染两个月的排名/KPI）。
+       月份不一致时 ``rowcount = 0``，调用方据此返回 404。
+
+    Args:
+        extra_id: 记录主键 id
+        month: 归属月 'YYYY-MM'（调用方已规范化）
+        qty: 修正后的套数（调用方保证 > 0；DB 层不做业务校验）
+
+    Returns:
+        bool: True = 命中并成功更新；False = id 不存在或月份不匹配
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE extra_completions SET qty = %s WHERE id = %s AND month = %s",
+                (int(qty), int(extra_id), str(month)),
+            )
+            affected = cur.rowcount
+        conn.commit()
+        # ⚠️ 与 add_extra_completion 同理：排名/KPI 每次请求现算（无缓存），不需失效缓存。
+        return int(affected or 0) > 0
+    finally:
+        conn.close()
+
+
+def delete_extra_completion(extra_id: int, month: str) -> bool:
+    """删除一条「计划外完成」记录 → 是否命中并删除。
+
+    🔴 同样带 month 双条件（与 update 同一道防线）：月份不匹配 → 不删，
+       返回 False 让调用方回 404，防止前端月份被切走后误删别的月的记录。
+
+    Args:
+        extra_id: 记录主键 id
+        month: 归属月 'YYYY-MM'（调用方已规范化）
+
+    Returns:
+        bool: True = 命中并删除；False = id 不存在或月份不匹配
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM extra_completions WHERE id = %s AND month = %s",
+                (int(extra_id), str(month)),
+            )
+            affected = cur.rowcount
+        conn.commit()
+        # 与 add/update 同理：排名与 KPI 每次请求现算，无缓存需失效。
+        return int(affected or 0) > 0
+    finally:
+        conn.close()
+
+
 def list_extra_completions(month: str, manager: Optional[str] = None) -> list[dict]:
     """当月「计划外完成」记录（按录入时间倒序；供详情弹窗明细 / 管理追溯）。
 

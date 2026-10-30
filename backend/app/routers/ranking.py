@@ -214,6 +214,76 @@ def api_add_extra_completion(payload: ExtraCompletionRequest,
     return {"id": new_id, "extra_total": db.get_extra_qty_total(month)}
 
 
+class ExtraCompletionUpdateRequest(BaseModel):
+    """修改计划外完成的请求体。
+
+    🔴 只允许改 ``qty``（用户需求：调整已填报的套数）。
+    ``month`` 必须与记录原月份一致，否则视为不存在（404），杜绝跨月误改。
+    """
+    month: str = Field(..., description="归属月 YYYY-MM（必须与记录原月份一致）")
+    qty: int = Field(..., gt=0, le=100000, description="修正后的套数（必须 > 0）")
+
+
+@router.put("/ranking/extra/{extra_id}")
+def api_update_extra_completion(extra_id: int, payload: ExtraCompletionUpdateRequest,
+                                user: dict = Depends(require_admin)):
+    """修改一条「计划外完成」的套数（**仅管理员**，非 admin → 403）。
+
+    - 只改 ``qty``，不改 manager / 项目归属，因此不会影响该记录的月份归属；
+    - ``id`` 与 ``month`` 双条件命中才更新：月份不匹配 → 404（防跨月误改）；
+    - 返回 ``{id, extra_total}``：``extra_total`` = 该月最新合计，前端可直接刷新 KPI。
+
+    影响面：排名行的 ``total_actual`` / 完成率分子 / 排名顺序 / 两张 KPI 卡随下一次
+    ``GET /ranking/production`` 自动重算，后端无缓存需要失效。
+    """
+    month = _valid_month(payload.month)
+    try:
+        ok = db.update_extra_completion(extra_id, month, int(payload.qty))
+    except Exception as exc:  # noqa: BLE001 — 表缺失等部署问题给 503（而非 500）
+        raise HTTPException(status_code=503, detail=f"计划外完成更新失败：{exc}")
+
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "EXTRA_NOT_FOUND",
+                "message": f"未找到 id={extra_id} 且归属月为 {month} 的计划外完成记录",
+            },
+        )
+
+    return {"id": extra_id, "extra_total": db.get_extra_qty_total(month)}
+
+
+@router.delete("/ranking/extra/{extra_id}")
+def api_delete_extra_completion(extra_id: int, month: str,
+                                user: dict = Depends(require_admin)):
+    """删除一条「计划外完成」（**仅管理员**，非 admin → 403）。
+
+    - ``month`` 走**查询参数**（DELETE 不带 body 更稳），必填且须与记录原月份一致；
+    - ``id`` 与 ``month`` 双条件命中才删除：月份不匹配 → 404（防跨月误删）；
+    - 返回 ``{id, deleted, extra_total}``：``extra_total`` = 该月剩余合计，前端可直接刷新 KPI。
+
+    影响面：该负责人的 ``total_actual`` / 完成率分子 / 排名顺序 / 两张 KPI 卡随下一次
+    ``GET /ranking/production`` 自动回退，后端无缓存需要失效。
+    """
+    month_v = _valid_month(month)
+    try:
+        ok = db.delete_extra_completion(extra_id, month_v)
+    except Exception as exc:  # noqa: BLE001 — 表缺失等部署问题给 503（而非 500）
+        raise HTTPException(status_code=503, detail=f"计划外完成删除失败：{exc}")
+
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "EXTRA_NOT_FOUND",
+                "message": f"未找到 id={extra_id} 且归属月为 {month_v} 的计划外完成记录",
+            },
+        )
+
+    return {"id": extra_id, "deleted": True, "extra_total": db.get_extra_qty_total(month_v)}
+
+
 @router.get("/ranking/extra/list")
 def api_list_extra_completions(month: str = None, manager: str = None,
                               user: dict = Depends(get_current_user)):

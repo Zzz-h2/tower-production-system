@@ -431,6 +431,18 @@ def add_extra_completion(month: str, manager: str, project_name: str,
                                             machine_type, qty, created_by)
 
 
+def update_extra_completion(extra_id: int, month: str, qty: int) -> bool:
+    """修改「计划外完成」套数 → 是否命中（id + month 双条件，跨月误改返回 False）。"""
+    from database import update_extra_completion as _fn
+    return getattr(_fn, "__wrapped__", _fn)(extra_id, month, qty)
+
+
+def delete_extra_completion(extra_id: int, month: str) -> bool:
+    """删除「计划外完成」记录 → 是否命中（id + month 双条件，跨月误删返回 False）。"""
+    from database import delete_extra_completion as _fn
+    return getattr(_fn, "__wrapped__", _fn)(extra_id, month)
+
+
 def list_extra_completions(month: str, manager: str | None = None) -> list[dict]:
     """当月「计划外完成」记录（倒序；manager 非空时按负责人过滤）。"""
     from database import list_extra_completions as _fn
