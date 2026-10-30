@@ -49,16 +49,22 @@ def _today_str(today: date | str | None = None) -> str:
 
 
 def get_production_ranking(month: str, big_area_person: str | None = None,
-                           today: date | str | None = None) -> list[dict]:
-    """返回按完成率降序的负责人排名列表（v6.0 多负责人：每位负责人独立一行）。
+                           today: date | str | None = None) -> dict:
+    """按完成率降序的负责人排名 + 当月「计划外完成」合计（v7.9）。
 
     month 形如 '2026-08'。
 
     口径（与「生产进度总览」页面联动一致）：
-    - 数据源切换为 db.get_ranking_manager_rows_by_month：先按 (项目 × 负责人) 拆分，
+    - 数据源：db.get_ranking_manager_rows_by_month 先按 (项目 × 负责人) 拆分，
       再在本函数按『负责人』聚合（同一负责人名下多个项目汇总），
       使「张三/李四」这类多负责人在出品排名中各占一行、分别排名。
     - total_plan / total_actual 已按负责人归属（见 get_ranking_manager_rows_by_month 口径）。
+    - 🔴 2026-11 新增「计划外完成」（extra_completions，用户确认口径）：
+        行 ``total_actual`` = 原实绩 + ``SUM(qty WHERE month=查询月 AND manager=该负责人)``；
+        ``completion_rate`` = (原实绩 + 额外) ÷ 累计计划 —— **只加分子、不动分母**（可 >100%）；
+        排名按含额外后的完成率**重排**；行内新增 ``extra_qty`` 字段（0 表示无）。
+        额外聚合只读 **一次** GROUP BY（``get_extra_qty_by_manager``），不按负责人循环查。
+        大区隔离：只对已按 big_area_person 过滤出来的负责人叠加，不额外放宽范围。
     - 完成率 = 累计完成套数 / 累计计划套数 × 100%；分母为 0 → None（前端显示 —）。
     - project_count = 该负责人当月涉及的项目数（去重）。
     排名：完成率降序（None 排最后）→ 计划套数降序 → 负责人升序。
@@ -66,12 +72,27 @@ def get_production_ranking(month: str, big_area_person: str | None = None,
     today: 业务日（'YYYY-MM-DD' 或 date）；None → 取 business_today()。
        仅用于计算展示字段 today_increment，**不参与**任何计划/完成/完成率的计算。
 
-    返回字段：manager / delivery_person(=manager 兼容别名) / total_plan / total_actual /
-              completion_rate / project_count / rank /
-              today_increment（今日新增完成套数，v7.8）/ today（业务日 'YYYY-MM-DD'）。
+    Returns:
+        dict: {
+          'rows': [每行 manager / delivery_person / total_plan / total_actual /
+                   extra_qty（当月额外合计）/ extra_today_qty（**今天**录入的额外，仅供 ↑ 标识）/
+                   completion_rate / project_count / rank /
+                   today_increment / today],
+          'extra_total': int,   # 当月计划外完成合计（KPI 用，= SUM(qty WHERE month)）
+        }
+        ⚠️ 返回结构自 v7.9 起由 list 改为 dict（新增 extra_total）；调用方为 routers/ranking.py。
     """
     today_s = _today_str(today)
     manager_rows = db.get_ranking_manager_rows_by_month(month, big_area_person, today_s)
+    # 当月计划外完成：一次 GROUP BY → {manager: qty}
+    extra_by_mgr: dict[str, int] = {}
+    # 当月**今天录入**的额外完成 → {manager: qty}（只用于「当天 ↑」标识，次日自动消失）
+    extra_today_by_mgr: dict[str, int] = {}
+    try:
+        extra_by_mgr = db.get_extra_qty_by_manager(month) or {}
+        extra_today_by_mgr = db.get_extra_qty_today_by_manager(month, today_s) or {}
+    except Exception as e:  # noqa: BLE001 — 额外完成为增强口径，失败不影响既有排名
+        logger.warning("读取计划外完成失败（%s），按无额外完成处理：%s", month, e)
 
     # 按负责人聚合：同一负责人名下跨多个项目汇总
     agg: dict[str, dict] = {}
@@ -94,13 +115,19 @@ def get_production_ranking(month: str, big_area_person: str | None = None,
     rows = []
     for mgr, b in agg.items():
         plan = b["total_plan"]
-        actual = b["total_actual"]
+        # 额外完成只作用于「查询月 + 该负责人」；未出现在排名行里的负责人不会被叠加
+        extra = int(extra_by_mgr.get(mgr) or 0)
+        actual = b["total_actual"] + extra
         rate = round(actual / plan * 100, 1) if plan else None
         rows.append({
             "manager": mgr,
             "delivery_person": mgr,   # 兼容前端旧字段名
             "total_plan": plan,
             "total_actual": actual,
+            # v7.9：该负责人当月「计划外完成」套数（0 = 无），前端据此显示 +N 小标签
+            "extra_qty": extra,
+            # 2026-10-30：**今天**录入的额外完成（用于「当天 ↑」标识，次日自动归零）
+            "extra_today_qty": int(extra_today_by_mgr.get(mgr) or 0),
             "completion_rate": rate,   # None 表示分母为零
             "project_count": len(b["project_ids"]),
             # v7.8：今日新增（仅展示用，>0 时前端在「累计完成套数」旁显示 ↑）
@@ -117,7 +144,13 @@ def get_production_ranking(month: str, big_area_person: str | None = None,
     for i, r in enumerate(rows, 1):
         r["rank"] = i
         r.pop("project_ids", None)
-    return rows
+    # 🔴 KPI 口径（用户确认）：`extra_total` = 当月 **SUM(qty)**，取自已读到的
+    #    `{manager: qty}` 映射（无需再查库）。它等于「各行 extra_qty 之和」的前提是
+    #    所有额外记录的负责人都出现在本月排名里（前端下拉只给排名内负责人）。
+    #    若有人绕过前端写入「本月无排产的负责人」，两者会有差额——此时以 SUM 为准
+    #    （KPI 反映"当月实际录入了多少计划外完成"），差额不会凭空计入某个人的完成数。
+    extra_total = sum(int(v) for v in extra_by_mgr.values())
+    return {"rows": rows, "extra_total": extra_total}
 
 
 def get_production_ranking_detail(month: str, person: str, big_area_person: str | None = None) -> list[dict]:

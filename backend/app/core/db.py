@@ -422,6 +422,39 @@ def list_project_managers(project_id: int, month: str | None = None) -> list[dic
     return getattr(_fn, "__wrapped__", _fn)(project_id, month)
 
 
+def add_extra_completion(month: str, manager: str, project_name: str,
+                         machine_type: str | None, qty: int,
+                         created_by: str | None = None) -> int:
+    """新增「计划外完成」记录 → 新行 id（桥接根目录 database.py 同名函数）。"""
+    from database import add_extra_completion as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month, manager, project_name,
+                                            machine_type, qty, created_by)
+
+
+def list_extra_completions(month: str, manager: str | None = None) -> list[dict]:
+    """当月「计划外完成」记录（倒序；manager 非空时按负责人过滤）。"""
+    from database import list_extra_completions as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month, manager)
+
+
+def get_extra_qty_by_manager(month: str) -> dict[str, int]:
+    """当月「计划外完成」按负责人汇总 → {manager: qty}（一次 GROUP BY）。"""
+    from database import get_extra_qty_by_manager as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month)
+
+
+def get_extra_qty_today_by_manager(month: str, today: str) -> dict[str, int]:
+    """当月「计划外完成」中**录入日 = today** 的按负责人汇总（排名「当天 ↑」标识用）。"""
+    from database import get_extra_qty_today_by_manager as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month, today)
+
+
+def get_extra_qty_total(month: str) -> int:
+    """当月「计划外完成」合计套数。"""
+    from database import get_extra_qty_total as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month)
+
+
 def get_ranking_manager_rows_by_month(month: str,
                                       big_area_person: str | None = None,
                                       today: str | None = None) -> list[dict]:

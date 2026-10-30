@@ -419,3 +419,22 @@ CREATE TABLE IF NOT EXISTS submission_board_overrides (
 -- ============================================================
 CREATE INDEX idx_pnp_project ON process_node_plans(project_id);
 CREATE INDEX idx_nap_project ON node_actual_progress(project_id);
+
+-- ============================================================
+-- 表：extra_completions（计划外完成，2026-10 新增）
+-- ------------------------------------------------------------
+-- 「出品排名」页的「额外」录入：非本月调度令范围内的完成套数（如跨月遗留、调度令外增补）。
+-- 只加进「完成」一侧、不动「计划」分母 —— 因此完成率可能超过 100%。
+-- 按月归属：只影响 month 对应月份的排名与 KPI。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS extra_completions (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    month         CHAR(7)      NOT NULL COMMENT '归属月 YYYY-MM（只影响该月排名）',
+    manager       VARCHAR(64)  NOT NULL COMMENT '负责人',
+    project_name  VARCHAR(255) NOT NULL COMMENT '项目（自由填写，可能不在 projects 表）',
+    machine_type  VARCHAR(128) NULL COMMENT '机型（自由填写）',
+    qty           INT          NOT NULL COMMENT '额外完成套数（计入该负责人当月累计完成）',
+    created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    created_by    VARCHAR(64)  NULL,
+    KEY idx_extra_month_mgr (month, manager)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='计划外完成（非本月调度令）录入表';

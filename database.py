@@ -2317,6 +2317,143 @@ def get_ranking_summary_by_month(month: str, big_area_person: str | None = None)
 
 
 # ============================================================
+# 计划外完成（v7.9）：非本月调度令、人工录入的额外完成套数
+# ------------------------------------------------------------
+# 表 extra_completions：id / month CHAR(7) / manager / project_name /
+#                      machine_type / qty / created_at / created_by
+# 口径（用户 2026-11 确认，不得自由发挥）：
+#   · month = 录入时选中的月份，**只影响该月**的排名与 KPI；
+#   · 行的 total_actual = 原实绩 + SUM(qty WHERE month=查询月 AND manager=该负责人)；
+#   · completion_rate = (原实绩 + 额外) ÷ 累计计划 —— **只加分子、不动分母**（可能 >100%）；
+#   · 排名按含额外后的完成率重排；KPI「累计完成套数」与「计划外完成套数」同步含额外。
+# ============================================================
+def add_extra_completion(month: str, manager: str, project_name: str,
+                         machine_type: Optional[str], qty: int,
+                         created_by: Optional[str] = None) -> int:
+    """新增一条「计划外完成」记录 → 返回新行 id。
+
+    Args:
+        month: 归属月 'YYYY-MM'（只影响该月的排名/KPI）
+        manager: 负责人（自由文本，须与排名行一致才会计入）
+        project_name: 项目名称（自由填写，允许不在 projects 表）
+        machine_type: 机型（可为 None）
+        qty: 额外完成套数（调用方保证 > 0；DB 层不做业务校验）
+        created_by: 操作人用户名
+
+    Returns:
+        int: 新记录主键 id
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO extra_completions "
+                "(month, manager, project_name, machine_type, qty, created_by) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (str(month), str(manager).strip(), str(project_name).strip(),
+                 (str(machine_type).strip() if machine_type else None),
+                 int(qty), created_by),
+            )
+            new_id = cur.lastrowid
+        conn.commit()
+        # ⚠️ 不做 dashboard KPI 缓存失效：排序/完成率是每次请求现算（无缓存），
+        #    首页 KPI 也不含计划外完成口径（extra 只影响「出品排名」页）。
+        return int(new_id)
+    finally:
+        conn.close()
+
+
+def list_extra_completions(month: str, manager: Optional[str] = None) -> list[dict]:
+    """当月「计划外完成」记录（按录入时间倒序；供详情弹窗明细 / 管理追溯）。
+
+    Args:
+        month: 'YYYY-MM'
+        manager: 可选，按负责人过滤（详情弹窗只看某位负责人）；None = 当月全部
+
+    Returns:
+        list[dict]: [{id, month, manager, project_name, machine_type, qty, created_at, created_by}]
+    """
+    sql = ("SELECT id, month, manager, project_name, machine_type, qty, "
+           "created_at, created_by FROM extra_completions WHERE month = %s")
+    args: list = [str(month)]
+    mgr = (str(manager).strip() if manager is not None else "")
+    if mgr:
+        sql += " AND manager = %s"
+        args.append(mgr)
+    sql += " ORDER BY created_at DESC, id DESC"
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(args))
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_extra_qty_by_manager(month: str) -> dict[str, int]:
+    """当月「计划外完成」按负责人汇总 → ``{manager: total_qty}``（**一次 GROUP BY**）。
+
+    ⚠️ 刻意不按负责人逐条查（那是 N+1）；调用方（排名）只读一次。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT manager, SUM(qty) AS qty FROM extra_completions "
+                "WHERE month = %s GROUP BY manager",
+                (str(month),),
+            )
+            return {str(r["manager"]).strip(): int(r["qty"] or 0) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_extra_qty_today_by_manager(month: str, today: str) -> dict[str, int]:
+    """当月「计划外完成」中**录入日期 = today** 的按负责人汇总 → ``{manager: qty}``。
+
+    用途（2026-10-30 用户要求）：出品排名的「当天 ↑ 增长标识」——
+    **判据是 ``DATE(created_at) = today``**，次日自动消失；**不是**当月累计量。
+    （数字本身仍含当月全部额外，只有这个标识按天判断。）
+
+    一次 GROUP BY，不随负责人数增加查询；``month`` 与 ``today`` 都走参数绑定，
+    不用 ``CURDATE()``（业务时区与库时区可能不一致）。
+
+    Args:
+        month: 'YYYY-MM'
+        today: 'YYYY-MM-DD'（业务今天，由调用方传入）
+
+    Returns:
+        dict[str, int]: 录入日为 today 的额外完成套数；无记录返回空 dict
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT manager, SUM(qty) AS qty FROM extra_completions "
+                "WHERE month = %s AND DATE(created_at) = %s GROUP BY manager",
+                (str(month), str(today)[:10]),
+            )
+            return {str(r["manager"]).strip(): int(r["qty"] or 0) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_extra_qty_total(month: str) -> int:
+    """当月「计划外完成」合计套数（KPI 用；与各行 extra_qty 之和一致）。"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(qty), 0) AS q FROM extra_completions WHERE month = %s",
+                (str(month),),
+            )
+            row = cur.fetchone()
+            return int((row or {}).get("q") or 0)
+    finally:
+        conn.close()
+
+
+# ============================================================
 # 用户表（v5.0：大区行级数据隔离）
 # users.username = 大区名（与 Excel 严格一致）；admin 的 big_area_name 为空
 # ============================================================

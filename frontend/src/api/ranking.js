@@ -27,3 +27,29 @@ export const fetchSubmissionBoard = (month) =>
  */
 export const saveSubmissionOverrides = (month, items) =>
   http.post('/ranking/submission-board/overrides', { month, items })
+
+/**
+ * 出品排名：录入一条「计划外完成」（**仅管理员**，后端非 admin 返回 403）。
+ *
+ * 口径：month 只影响该月的排名与 KPI；行的累计完成 = 原实绩 + 该月该负责人额外合计；
+ * 完成率只加分子不动分母（可能 >100%）；排名按含额外后重排。
+ *
+ * @param {{month: string, manager: string, project_name: string,
+ *          machine_type?: string|null, qty: number}} payload
+ * @returns {Promise<{id: number, extra_total: number}>} extra_total = 该月最新合计（KPI 用）
+ */
+export const addExtraCompletion = (payload) =>
+  http.post('/ranking/extra', payload)
+
+/**
+ * 出品排名：某负责人当月的「计划外完成」登记明细（详情弹窗用，按录入时间倒序）。
+ *
+ * 权限：admin 可查任意负责人；大区账号仅能查本大区可见负责人（越权返回 403）。
+ *
+ * @param {string} month 'YYYY-MM'
+ * @param {string} manager 负责人姓名
+ * @returns {Promise<{items: Array<{id:number, manager:string, project_name:string,
+ *          machine_type:string|null, qty:number, created_at:string}>}>}
+ */
+export const fetchExtraCompletions = (month, manager) =>
+  http.get('/ranking/extra/list', { params: { month, manager } })

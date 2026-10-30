@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from ..core import db
 from ..core.deps import get_current_user, get_scope_big_area, require_admin
 from ..core.timeutil import business_today
 from ..services.ranking_service import (
@@ -142,3 +143,120 @@ def api_save_submission_overrides(payload: SubmissionOverridesRequest,
         "deleted": result["deleted"],
         "board": board,
     }
+
+
+# ============================================================
+# 计划外完成（v7.9）：非本月调度令、人工录入的额外完成套数
+# ------------------------------------------------------------
+# 口径（用户确认）：month 只影响该月排名/KPI；行的 total_actual = 原实绩 + 该月该负责人 SUM(qty)；
+# completion_rate 只加分子不动分母（可 >100%）；排名按含额外后重排。
+# 权限：**仅 admin**（大区账号 403）——这是人工兜底录入，不给大区自助改数。
+# ============================================================
+class ExtraCompletionRequest(BaseModel):
+    """新增计划外完成的请求体。
+
+    qty 必须为正整数（``gt=0``）；month 由 ``_valid_month`` 规范化；
+    manager / project_name 必填（自由文本，允许不在 projects 表里）。
+    """
+    month: str = Field(..., description="归属月 YYYY-MM（只影响该月排名/KPI）")
+    manager: str = Field(..., min_length=1, max_length=64, description="负责人")
+    project_name: str = Field(..., min_length=1, max_length=255, description="项目名称")
+    machine_type: str | None = Field(None, max_length=128, description="机型（选填）")
+    qty: int = Field(..., gt=0, le=100000, description="额外完成套数（必须 > 0）")
+
+
+@router.post("/ranking/extra")
+def api_add_extra_completion(payload: ExtraCompletionRequest,
+                             user: dict = Depends(require_admin)):
+    """录入一条「计划外完成」（**仅管理员**，非 admin → 403）。
+
+    - ``qty`` 由 schema 校验（``gt=0``，0/负数 → 422；非整数 → 422）；
+    - ``created_by`` 取当前登录用户名；
+    - 返回 ``{id, extra_total}``：``extra_total`` = 该月**最新**合计，前端可直接用于 KPI。
+
+    影响面：只叠加到 ``get_production_ranking`` 的该负责人 ``total_actual`` 与 KPI，
+    **不改**任何计划行、不改完成率分母、不影响「排产计划总览 / 提报情况总览」。
+    """
+    month = _valid_month(payload.month)
+    mgr = payload.manager.strip()
+    # 🔴 数据一致性校验（2026-10）：负责人必须存在于**当月排名行**内。
+    #    原因：KPI 的 extra_total = SUM(qty WHERE month=查询月)，若录入的负责人不在排名里，
+    #    这笔量会进 KPI 却不会加到任何一行 → 顶部「计划外完成套数」> 各行「+N」之和，看起来像算错。
+    #    前端下拉本就只提供排名内负责人，此校验只拦「绕过页面直连 API」的情形。
+    #    查询失败时跳过校验（宁可漏校验，也不让录入被误拒）。
+    try:
+        _ranking = get_production_ranking(month, big_area_person=get_scope_big_area(user),
+                                          today=business_today())
+        _valid = {str(r.get("manager") or "").strip() for r in (_ranking.get("rows") or [])}
+    except Exception:  # noqa: BLE001
+        _valid = set()
+    if _valid and mgr not in _valid:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "MANAGER_NOT_IN_RANKING",
+                "message": f"负责人「{mgr}」在 {month} 没有排名记录，"
+                           f"请确认该月是否有该负责人的完成数据，或检查月份是否选错",
+            },
+        )
+    try:
+        new_id = db.add_extra_completion(
+            month,
+            mgr,
+            payload.project_name.strip(),
+            (payload.machine_type.strip() if payload.machine_type else None),
+            int(payload.qty),
+            created_by=str(user.get("username") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 — 表缺失等部署问题给出明确 503（而非 500）
+        raise HTTPException(status_code=503, detail=f"计划外完成写入失败：{exc}")
+
+    return {"id": new_id, "extra_total": db.get_extra_qty_total(month)}
+
+
+@router.get("/ranking/extra/list")
+def api_list_extra_completions(month: str = None, manager: str = None,
+                              user: dict = Depends(get_current_user)):
+    """当月「计划外完成」明细（详情弹窗用），按录入时间倒序。
+
+    权限：管理员可查任意负责人；大区账号只能查**本大区可见的负责人**
+    （口径与排名列表一致：先用 ``get_ranking_manager_rows_by_month`` 取该大区当月负责人集合，
+    manager 不在其中 → 403，避免越权读取其它大区的登记数据）。
+    ``manager`` 为空时：管理员返回当月全部；大区账号返回其可见负责人的全部。
+
+    Returns:
+        dict: ``{items: [{id, manager, project_name, machine_type, qty, created_at}]}``
+    """
+    month_v = _valid_month(month)
+    scope = get_scope_big_area(user)          # admin / 全区哨兵 → None
+    mgr = (manager or "").strip() or None
+
+    if scope:
+        # 大区可见负责人集合（1 条查询；与排名同一数据源，不会放宽口径）
+        visible = {str(r.get("manager") or "").strip()
+                   for r in (db.get_ranking_manager_rows_by_month(
+                       month_v, scope, business_today().strftime("%Y-%m-%d")) or [])}
+        visible.discard("")
+        if mgr and mgr not in visible:
+            raise HTTPException(status_code=403, detail="无权查看该负责人的计划外完成登记")
+
+    try:
+        rows = db.list_extra_completions(month_v, mgr)
+    except Exception as exc:  # noqa: BLE001 — 表缺失等部署问题给 503（而非 500）
+        raise HTTPException(status_code=503, detail=f"读取计划外完成失败：{exc}")
+
+    if scope and not mgr:
+        # 未指定负责人：大区账号只看可见负责人的记录（演示/兜底，正常流程都会带 manager）
+        rows = [r for r in rows if str(r.get("manager") or "").strip() in visible]
+
+    items = [{
+        "id": r.get("id"),
+        "manager": r.get("manager"),
+        "project_name": r.get("project_name"),
+        "machine_type": r.get("machine_type"),
+        "qty": int(r.get("qty") or 0),
+        "created_at": (r.get("created_at").strftime("%Y-%m-%d %H:%M")
+                       if hasattr(r.get("created_at"), "strftime")
+                       else str(r.get("created_at") or "")[:16]),
+    } for r in rows]
+    return {"items": items}
