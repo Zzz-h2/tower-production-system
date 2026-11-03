@@ -142,12 +142,18 @@ def create_project(payload: ProjectCreate, user: dict = Depends(require_admin)):
 
 
 @router.get("/persons")
-def list_persons(user: dict = Depends(get_current_user)):
-    """返回所有交付负责人（去重排序，供主页面下拉框使用；与筛选结果隔离）。
+def list_persons(month: Optional[str] = None, user: dict = Depends(get_current_user)):
+    """交付负责人下拉（统一口径，2026-11）。
+
+    - ``month`` 非空 → 只返回**该排产归属月内有排产计划**的负责人
+      （上月有、当月无的人不再出现；排产白名单 process_order 1..11）；
+    - ``month`` 为空 → 兼容旧行为（projects 全量交付负责人）；
+    - 排序：拼音升序（``CONVERT(... USING gbk)``），与其它下拉一致。
 
     行级隔离：big_area 用户仅返回本大区的负责人；admin 返回全量。
     """
-    return {"items": db.get_all_persons(big_area_person=get_scope_big_area(user))}
+    return {"items": db.get_all_persons(big_area_person=get_scope_big_area(user),
+                                        month=month)}
 
 
 @router.get("/big-area-persons")

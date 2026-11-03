@@ -492,23 +492,60 @@ def get_all_projects(status_filter=None, big_area_person: str | None = None) -> 
 def get_project_by_id(project_id: int) -> dict | None:
     from database import get_project_by_id as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_id)
-def get_all_persons(big_area_person: str | None = None) -> list[str]:
-    """获取所有项目的交付负责人（去重、非空、排序）。
+def get_all_persons(big_area_person: str | None = None,
+                    month: str | None = None) -> list[str]:
+    """交付负责人下拉的取数（2026-11 统一口径：**只展示查询月内有排产计划的负责人**）。
 
-    big_area_person 非 None 时仅返回该大区下的负责人（大区行级隔离）。
+    背景：用户反馈各页面下拉口径不一致——首页按拼音排序但取的是「所有历史负责人」，
+    导致「上月有、当月已无计划」的人仍出现在下拉里；排产计划总览更是连拼音排序都没有。
+
+    口径（用户确认，全部页面统一）：
+      - ``month`` 非空 → 从**排产计划表**取该排产归属月内有计划的负责人：
+        ``process_node_plans.manager``，白名单 ``process_order BETWEEN 1 AND 11``
+        （🔴 必须用 process_order，不能用「工序名不在 90/91」判，否则手动完成占位行 99 会漏进来）；
+        只认 ``plan_month = month``（严格相等），因此「上月导入本月日期的行」不会把人也带进本月。
+      - ``month`` 为空 → **保持历史行为**（``projects.delivery_person`` 全量），向后兼容既有调用方。
+      - 排序统一 ``CONVERT(x USING gbk)`` 拼音升序，与 ``/managers``、``/node-plans`` 口径一致。
+      - ``big_area_person`` 语义不变：非 None 时只返回该大区下的负责人（行级隔离）。
+
+    Args:
+        big_area_person: 大区负责人（None = 全量，admin）
+        month: 'YYYY-MM'；None = 全量历史负责人（旧行为）
+
+    Returns:
+        list[str]: 负责人姓名（去重、非空、拼音升序）
     """
     conn = get_connection()
     try:
-        sql = (
-            "SELECT DISTINCT delivery_person FROM projects "
-            "WHERE delivery_person IS NOT NULL AND delivery_person != ''"
-        )
-        params = []
-        if big_area_person:
-            sql += " AND big_area_person = %s"
-            params.append(big_area_person)
-        sql += " ORDER BY delivery_person"
+        month_key = (str(month).strip()[:7] if month else "")
         with conn.cursor() as cur:
+            if month_key:
+                # 当月有排产计划的负责人（含大区隔离 + 排产白名单）
+                sql = (
+                    "SELECT DISTINCT n.manager AS manager FROM process_node_plans n "
+                    "JOIN projects p ON p.id = n.project_id "
+                    "WHERE n.manager IS NOT NULL AND TRIM(n.manager) <> '' "
+                    "  AND n.plan_month = %s "
+                    "  AND n.process_order BETWEEN %s AND %s"
+                )
+                params: list = [month_key, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX]
+                if big_area_person:
+                    sql += " AND p.big_area_person = %s"
+                    params.append(big_area_person)
+                sql += " ORDER BY CONVERT(n.manager USING gbk)"
+                cur.execute(sql, params)
+                return [row["manager"] for row in cur.fetchall()]
+
+            # 兼容路径：无 month → 沿用 projects.delivery_person 全量（旧行为）
+            sql = (
+                "SELECT DISTINCT delivery_person FROM projects "
+                "WHERE delivery_person IS NOT NULL AND delivery_person != ''"
+            )
+            params = []
+            if big_area_person:
+                sql += " AND big_area_person = %s"
+                params.append(big_area_person)
+            sql += " ORDER BY CONVERT(delivery_person USING gbk)"
             cur.execute(sql, params)
             return [row["delivery_person"] for row in cur.fetchall()]
     finally:

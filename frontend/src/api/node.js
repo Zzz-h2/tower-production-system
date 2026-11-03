@@ -5,8 +5,13 @@ export const fetchProjects = (params = {}) =>
   http.get('/projects', { params })
 
 // 全量交付负责人（下拉框数据源，与筛选结果隔离）
-export const fetchAllPersons = () =>
-  http.get('/projects/persons')
+/**
+ * 交付负责人下拉（统一口径，2026-11）：只返回**该排产归属月内有排产计划**的负责人，
+ * 拼音升序（后端 CONVERT(... USING gbk)）。month 缺省时后端退回历史行为（projects 全量）。
+ * @param {string} [month] 'YYYY-MM'
+ */
+export const fetchAllPersons = (month) =>
+  http.get('/projects/persons', { params: month ? { month } : {} })
 
 // 全量大区负责人（下拉框数据源，与筛选结果隔离）
 export const fetchBigAreaPersons = () =>

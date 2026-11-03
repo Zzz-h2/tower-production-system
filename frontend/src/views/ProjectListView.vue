@@ -288,6 +288,7 @@ import * as XLSX from 'xlsx'
 import { saveAs } from 'file-saver'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
+import { sortByNamePinyin } from '../utils/pinyinSort'
 import { deleteProject as deleteProjectApi, fetchExportProjects } from '../api/node'
 import DispatchImport from '../components/DispatchImport.vue'
 import AddProjectDialog from '../components/AddProjectDialog.vue'
@@ -444,29 +445,8 @@ const totalPages = computed(() =>
 // 交付负责人下拉项：使用全量列表（store.allPersons），与当前筛选结果隔离
 // （旧实现基于当前表格行推导，会被筛选结果污染，已移除）
 //
-// 2026-10：下拉选项按**姓名拼音首字母 A→Z** 排序。
-// 后端返回的是插入/字典序（按 UTF-16 码点，中文实际等同于无意义顺序），
-// 故在前端用 Intl.Collator('zh-CN') 做拼音比较——浏览器原生支持，无需引入拼音库。
-// 用 Intl.Collator 而非每次调用 localeCompare：Collator 实例会缓存排序规则，列表较长时更快。
-const zhNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
-
-// 多音姓氏修正：ICU 拼音库对多音字只取**常用读音**，与姓氏读音不一致（会排错位置）。
-// 做法是把首字换成**同音常用字**再交给 collator 比较——只影响排序 key，绝不改变显示文本。
-// 典型：曾(céng→zēng，否则排到 C)、乐(lè→yuè，姓氏读岳)、单(shàn)、解(xiè)、查(zhā)…
-// 未列出的姓氏走 collator 默认读音，通常正确。
-const SURNAME_HOMOPHONE = {
-  曾: '增', 乐: '岳', 单: '山', 解: '谢', 查: '扎', 仇: '求', 区: '欧',
-  朴: '瓢', 翟: '宅', 覃: '秦', 缪: '妙', 盖: '葛', 员: '云', 种: '崇',
-  折: '舌', 召: '邵', 秘: '必', 尉: '玉', 祭: '债', 阚: '看',
-}
-function nameSortKey(name) {
-  const s = String(name ?? '')
-  if (!s) return s
-  const mapped = SURNAME_HOMOPHONE[s.charAt(0)]
-  return mapped ? mapped + s.slice(1) : s
-}
-const sortByNamePinyin = (arr) =>
-  [...(arr || [])].sort((a, b) => zhNameCollator.compare(nameSortKey(a), nameSortKey(b)))
+// 2026-10 起：下拉选项按**姓名拼音 A→Z**排序；2026-11 把排序实现抽到
+// `utils/pinyinSort.js`，与「排产计划总览」共用同一份规则（含多音姓氏修正）。
 const sortedPersons = computed(() => sortByNamePinyin(store.allPersons))
 const sortedBigAreaPersons = computed(() => sortByNamePinyin(store.allBigAreaPersons))
 
@@ -595,6 +575,8 @@ function onMonthChange() {
   store.pagination.page = 1
   store.loadProjects({ page: 1 })
   store.loadDashboard()
+  // 2026-11：交付负责人下拉只展示「当月有排产计划」的人 → 换月必须重拉选项
+  store.loadAllPersons()
 }
 
 // 导出当前共享月份的计划完成情况（前端本地生成 xlsx）

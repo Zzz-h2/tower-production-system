@@ -44,7 +44,7 @@
           @change="applyFilter"
           @clear="applyFilter"
         >
-          <el-option v-for="p in store.allPersons" :key="p" :label="p" :value="p" />
+          <el-option v-for="p in sortedPersons" :key="p" :label="p" :value="p" />
         </el-select>
         <el-select
           v-model="filters.uploadStatus"
@@ -66,7 +66,7 @@
           value-format="YYYY-MM"
           placeholder="选择调度令月份"
           style="width: 160px"
-          @change="load"
+          @change="onMonthChange"
         />
         <el-button type="primary" :icon="Refresh" @click="load">刷新</el-button>
       </div>
@@ -276,6 +276,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import { fetchProjects, fetchProjectManagers } from '../api/node'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
+import { sortByNamePinyin } from '../utils/pinyinSort'
 import ScheduleImport from './ScheduleImport.vue'
 import ManualCompleteDialog from './ManualCompleteDialog.vue'
 import MultiManagerDialog from './MultiManagerDialog.vue'
@@ -286,6 +287,11 @@ const auth = useAuthStore()   // 普通账号仅可查看排产总览，导入/�
 
 const allItems = ref([])
 const filters = ref({ keyword: '', person: '', uploadStatus: 'all' })
+
+// 2026-11：交付负责人下拉按**姓名拼音升序**（与首页「生产进度总览」同一份实现，
+// 见 utils/pinyinSort.js）。数据源仍是 store.allPersons，但后端已改为
+// 「只返回查询月内有排产计划的人」，故本页与首页的选项集合/顺序完全一致。
+const sortedPersons = computed(() => sortByNamePinyin(store.allPersons))
 
 // 月份文案：KPI / 表头统一带月份，避免用户把「本月未上传」误读成「从来没传过」
 const monthLabel = computed(() => {
@@ -393,6 +399,17 @@ async function load() {
     month: store.filters.month || undefined,
   })
   allItems.value = res.items || []
+}
+
+/**
+ * 月份切换：刷新列表 + 重拉「交付负责人」下拉选项。
+ *
+ * 2026-11 统一口径：下拉只展示**当月有排产计划**的负责人（上月有、当月无的人不再出现），
+ * 因此换月必须重拉，否则会出现「切到 11 月仍能看到只排了 10 月的人」。
+ */
+async function onMonthChange() {
+  await load()
+  await store.loadAllPersons()
 }
 
 /**

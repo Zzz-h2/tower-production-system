@@ -121,7 +121,8 @@ export const useProjectStore = defineStore('project', {
      */
     async loadAllPersons() {
       try {
-        const res = await fetchAllPersons()
+        // 2026-11：随共享月份取「当月有排产计划」的负责人（换月需重拉）
+        const res = await fetchAllPersons(this.filters.month || undefined)
         this.allPersons = res.items || []
         this.personsLoaded = true
         return true
