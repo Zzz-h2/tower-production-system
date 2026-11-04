@@ -329,25 +329,33 @@ def parse_schedule_excel_full(file_path: str) -> tuple[list[dict], list[str], li
             node_items.append((pn, ds))
             set_dates[pn] = ds
 
-        # ---- 4b. 本套工序时长/偏移（需同时存在「下料」与「具备验收」计划日）----
+        # ---- 4b. 本套工序时长/偏移 ----
+        # 🔴 2026-11 修复「部分行没有第几套」：
+        #    原实现「必须同时存在『下料』与『具备验收』计划日」才写入 durations。
+        #    结果批次里老套（历史日期已被清空 / 标为已完成）整套被跳过 →
+        #    project_process_durations 只有本次新套的 11 条 →
+        #    build_set_index 反推不到那些行的套号 → 详情页出现「有的行有第 N 套、有的没有」。
+        #    现在改为：**只要能定位到套序号，就把 (set_seq, 工序, 计划日) 记下来**；
+        #    duration_days / offset_days 仅在同时有 d0+de 时计算，缺失存 NULL
+        #    （判定层对缺失 offset 已有回退原计划日的处理，不会因此算错日期）。
         d0 = set_dates.get(SCHEDULE_PROCESS_NAMES[2])    # 下料
         de = set_dates.get(SCHEDULE_PROCESS_NAMES[-1])   # 具备验收
+        b0 = be = None
         if d0 and de:
             try:
                 b0 = datetime.strptime(d0, '%Y-%m-%d').date()
                 be = datetime.strptime(de, '%Y-%m-%d').date()
             except ValueError:
                 b0 = be = None
-            if b0 and be:
-                for pn, d in set_dates.items():
-                    bd = datetime.strptime(d, '%Y-%m-%d').date()
-                    durations.append({
-                        "set_seq": set_seq,
-                        "process_name": pn,
-                        "plan_date": d,
-                        "duration_days": (be - bd).days + 1,   # 含首尾
-                        "offset_days": (bd - b0).days,         # 相对下料
-                    })
+        for pn, d in set_dates.items():
+            bd = datetime.strptime(d, '%Y-%m-%d').date()
+            durations.append({
+                "set_seq": set_seq,
+                "process_name": pn,
+                "plan_date": d,
+                "duration_days": ((be - bd).days + 1) if (b0 and be) else None,  # 含首尾
+                "offset_days": ((bd - b0).days) if b0 else None,                 # 相对下料
+            })
 
     if not node_items and not completed_counts:
         return [], ["未解析到任何有效节点计划：请检查套序号列与工序日期列格式"], []
