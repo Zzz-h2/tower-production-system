@@ -167,6 +167,10 @@ def enrich_rows(plans: list[dict], actuals: dict, today=None, durations: Optiona
             "id": nid,
             "project_id": r["project_id"],
             "process_name": r["process_name"],
+            # 工序序号（1..11 排产 / 90 累计完成 / 91 累计发运 / 99 手动完成登记）。
+            # 2026-11 新增：卡片聚合需要它把「手动完成登记行」与同名的第 10 道「附件安装」区分开
+            # （两者 process_name 相同，仅凭名字无法分辨）。
+            "process_order": int(r.get("process_order") or 0),
             # 闸门开（已实际下料）的制造链工序：对外展示/分组的计划日期 = 重算后的 effective 日期
             # （原排产计划日期保留在 plan_date_plan 供对照）
             "plan_date": (str(ru.get("eff_plan_date"))[:10] if ru.get("eff_plan_date")
@@ -991,7 +995,18 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
                        exceptions=exc_anchors, node_exceptions=exc_by_node)
 
     proc_groups: dict[str, list[dict]] = {}
+    from ..core import db as _db   # 延迟导入：MANUAL_COMPLETE_ORDER 常量定义在 core/db.py
     for r in rows:
+        # 🔴 2026-11 修复「一边置灰待下料、一边显示 100%」：
+        #    手动完成登记行（process_order=99）的 process_name 也是「附件安装」，
+        #    但它与第 10 道「附件安装」排产行**语义完全不同** ——
+        #    99 行是"整项目已完成的套数"记账（plan_month 恒 NULL、无闸门语义），
+        #    排产行才是真实施工节点。原先两者被 setdefault 合进同一组 →
+        #    套数/进度把它们相加（显示 8/8 = 100%），而状态判定走排产行的前置闸门
+        #    （下料未到位 → 待下料），于是同一张卡片同时出现「待下料」和「100%」。
+        #    修法：99 行不参与任何工序卡片聚合；它的完成量仍由「累计完成总数」(order=90) 体现。
+        if int(r.get("process_order") or 0) == _db.MANUAL_COMPLETE_ORDER:
+            continue
         proc_groups.setdefault(r["process_name"], []).append(r)
 
     per_proc_sets = {pn: sum(r["plan_qty"] for r in grp) for pn, grp in proc_groups.items()}
