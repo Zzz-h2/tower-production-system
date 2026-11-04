@@ -1009,7 +1009,17 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
             continue
         proc_groups.setdefault(r["process_name"], []).append(r)
 
-    per_proc_sets = {pn: sum(r["plan_qty"] for r in grp) for pn, grp in proc_groups.items()}
+    # 🔴 2026-11 修复「总套数显示 42，而项目本月只有 3 套」：
+    #    per_proc_sets 原先把 proc_groups 的**全部键**都算进去，其中包含独立工序
+    #    「累计完成总数」(order=90) / 「累计发运总数」(91) —— 它们的 plan_qty 存的是
+    #    **历史累计套数**（如 42），不是本月排产套数。
+    #    取 max 之后总套数被顶成 42，与本月实际 3 套完全不符。
+    #    总套数只应取 11 道调度工序（SCHEDULE_PROCESS_NAMES）的横向最大值。
+    per_proc_sets = {
+        pn: sum(r["plan_qty"] for r in grp)
+        for pn, grp in proc_groups.items()
+        if pn in SCHEDULE_PROCESS_NAMES
+    }
     total_sets = max(per_proc_sets.values()) if per_proc_sets else 0
     done_count = sum(1 for r in rows if r["status"] == "done")
     overdue_count = len(compute_real_overdue(rows, monthly_plan))

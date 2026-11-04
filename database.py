@@ -1755,10 +1755,21 @@ def save_independent_fill(project_id: int, process_name: str,
                     (project_id, node_plan_id, process_name, actual_qty, report_date, manager)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
-                    actual_qty = VALUES(actual_qty),
+                    actual_qty = actual_qty + VALUES(actual_qty),
                     report_date = VALUES(report_date),
                     manager = VALUES(manager)
             """, (project_id, node_plan_id, process_name, int(fill_qty), report_date, mgr_val))
+            # 同日重复填报 = **累加**（用户 2026-11 反馈：填 14 后再填 4 变成只剩 4）。
+            # 🔴 原先是 `actual_qty = VALUES(actual_qty)`（覆盖），与界面文案
+            #    「每次填写本次新增套数（不是累计总数）」矛盾。
+            #    现在 actual_qty 累加；同日 node_plan.plan_qty 同步累加，保持「该日新增合计」口径一致。
+            #    需要「改写某日数量」时走 move_independent_fill_date(new_qty=...)，
+            #    该入口是绝对赋值、不是累加。
+            cursor.execute("""
+                UPDATE process_node_plans
+                   SET plan_qty = plan_qty + %s
+                 WHERE id = %s
+            """, (int(fill_qty), node_plan_id))
             conn.commit()
             return node_plan_id
     finally:
