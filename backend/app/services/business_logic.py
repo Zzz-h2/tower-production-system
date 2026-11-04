@@ -330,10 +330,16 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
             rules[nid] = _rule(False, None, pn == steel_name)
             continue
         info = (durations or {}).get((pn, pd))
-        if not info:
-            # 无时长数据（存量项目/未重新导入）→ 回退现规则（异常也无从定位所属套）
-            # ⚠️ 项目级 exception 仍由 raw 异常表判定（见 db.get_projects_filtered），
-            #    工序级无法定位所属套 → 不标异常（PRD 明确口径）。
+        # 🔴 2026-11 修复「明明已完工却显示待下料」：
+        #    offset_days 现在**可能为 NULL** —— 导入时该套若缺「下料」或「具备验收」日期
+        #    （Excel 里填的是"已完成"文本或留空），时长算不出来，但计划日仍会记入 durations
+        #    （见 schedule_import 的 durations 构建）。
+        #    旧代码 `int(info.get("offset_days") or 0)` 把 None 当 0 →
+        #    d0 = 本行 plan_date − 0 = 自身计划日，与下料行的 plan_date 不相等 →
+        #    cutting_anchor 永远查不到 → 闸门恒关 → 该工序明明 actual 已满仍判「待下料」。
+        #    数据不全时保守回退：不启用闸门（waiting=False），按原计划日正常判逾期/完成。
+        if not info or info.get("offset_days") is None:
+            # 无（可用的）时长数据 → 回退现规则（异常也无从定位所属套）
             rules[nid] = _rule(False, None, True)
             continue
         offset = int(info.get("offset_days") or 0)
