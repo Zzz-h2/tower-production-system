@@ -15,7 +15,8 @@
       <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="login-err" />
       <div class="login-tip">
         普通用户登陆请使用：大区负责人姓名+dq@123456<br />
-        例如：张三+dq@123456<br />
+        用户名：张三<br />
+        密码：dq@123456<br />
         有任何问题请联系：张恒-15353262798
       </div>
     </el-card>
