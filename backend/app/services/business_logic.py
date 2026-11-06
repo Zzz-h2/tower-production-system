@@ -257,6 +257,23 @@ def cutting_anchor_map(plans_all: list[dict], actuals: dict) -> dict[str, str]:
     return anchor
 
 
+def _exc_process_done(done_map: dict, d0: Optional[str], entry: dict) -> bool:
+    """该条异常所在工序，在本套（同一 d0）是否已完工（2026-11 解除暂停的判据）。
+
+    Args:
+        done_map: ``{(d0, 工序名): bool}``（``build_time_rules`` 预计算的完工表）
+        d0: 当前行所属套锚点（下料计划日）；None → 无法定位，按未完成处理
+        entry: 异常条目（含 process_name）
+
+    Returns:
+        bool: True = 该异常工序已完成 → 不再暂停其下游；查不到一律 False（保守仍暂停）
+    """
+    if not d0:
+        return False
+    key = (str(d0), str(entry.get("process_name") or "").strip())
+    return bool((done_map or {}).get(key, False))
+
+
 def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[dict] = None,
                      exceptions: Optional[dict] = None, today=None) -> dict:
     """按「每一套（每个计划行）」计算闸门与 effective 计划日期（工序时间/延期判定规则升级核心）。
@@ -270,6 +287,10 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
         · 该套存在**生效中**（未关闭且未过计划关闭日）异常工序 → 其后序工序（offset 更大）
           exception_paused=True（⏸ 异常暂停，灰），暂停**优先于**等待下料，
           不计入逾期/风险/排名。
+        · 🔴 2026-11 新增解除路径（用户口径「前 1 套异常工序完成后，其它套解除暂停」）：
+          该套的异常工序**实际完工**（actual_qty >= plan_qty 且 > 0）→ 视同「异常已解决」，
+          其下游**不再暂停**、立即恢复常规判定（闸门开则按 实际下料日 + offset 重算）。
+          只做一部分 / 无 actual 行 / 计划行已被重导删除 → 仍暂停（保守）。
         · 该套存在**已关闭**异常 → 以「异常解决时间」为新锚点重算后续工序计划日：
           eff_plan_date = max(下料实际日, max_i(closed_at_i − offset_i)) + 该行 offset。
         · 🔴 该套存在**已到期失效**（未关闭但已过计划关闭日）异常 → 暂停失效，
@@ -310,6 +331,34 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
     # ⚠️ 等价重构（2026-10）：原内联循环已提取为模块级纯函数 cutting_anchor_map，
     #    供展示层复用同一锚点；此处调用结果与改造前逐项一致（顺序/取最小值口径不变）。
     cutting_anchor: dict[str, str] = cutting_anchor_map(plans_all, actuals)
+
+    # ---- 异常工序完工表（2026-11）：{(d0, 工序名): 该套该工序是否已完工} ----
+    # 用途：用户口径「前 1 套异常工序做完了，其它套就解除暂停」——异常工序实际完工
+    # 视同「异常已解决」，其下游工序立即恢复（不必等人工关闭异常记录）。
+    # 🔴 键必须与异常锚点同构：(d0, process_name)。d0 复用**与下方循环完全相同的算法**
+    #    （plan_date − offset_days），否则与 exc_map / cutting_anchor 对不上。
+    # 🔴 offset 为 None 的行**跳过**（None 不能当 0 —— 见 0e74d8a 的教训：缺「下料/具备验收」
+    #    日期的行算不出 offset，若当 0 会让 d0 退化成自身计划日、与锚点错位）。
+    # 完工判定：plan_qty > 0 且 actual_qty >= plan_qty（部分完成 / 无计划量的行都不算完工）。
+    exc_process_done: dict[tuple[str, str], bool] = {}
+    for _p in plans_all or []:
+        _pn = _p.get("process_name")
+        if _pn not in mfg:
+            continue
+        _info = (durations or {}).get((_pn, str(_p.get("plan_date") or "")[:10]))
+        if not _info or _info.get("offset_days") is None:
+            continue
+        _base = parse_date(_p.get("plan_date"))
+        if _base is None:
+            continue
+        _d0 = (_base - timedelta(days=int(_info["offset_days"]))).strftime("%Y-%m-%d")
+        _act = (actuals or {}).get(_p.get("id"), {}) or {}
+        _aq = int(_act.get("actual_qty", 0) or 0)
+        _pq = int(_p.get("plan_qty") or 0)
+        _done = _pq > 0 and _aq >= _pq
+        _key = (_d0, str(_pn).strip())
+        # 同一 (d0, 工序) 可能出现多行（重导残留/多负责人）→ 任一行完工即视为该工序已完成
+        exc_process_done[_key] = bool(exc_process_done.get(_key)) or _done
 
     def _rule(waiting: bool, eff: Optional[str], count: bool,
               paused: bool = False, set_date: Optional[str] = None,
@@ -375,9 +424,17 @@ def build_time_rules(plans_all: list[dict], actuals: dict, durations: Optional[d
         # 「后续工序」判定：本行 offset > 异常工序 offset；异常工序自身不暂停（它确实逾期了）
         # 🔴 2026-11：条件由 ``status != 'closed'`` 改为 ``active is True``
         #    —— 已过计划关闭日的异常（expired）暂停失效，下游恢复逾期判定。
+        # 🔴 2026-11（本单）：新增「异常工序已完工 → 自动解除下游暂停」。
+        #    用户口径：「当前 1 套存在异常时，后续套数也进行暂停操作，待前 1 套完成后其他套解除暂停」。
+        #    即「异常解决」不再只认 closed_at / 到期失效，**异常所在工序实际做完**也算解决：
+        #    · 异常工序 actual_qty >= plan_qty（且 >0）→ 该条异常不再暂停下游；
+        #    · 只做了一部分 / 没有 actual 行 / 该工序计划行已被重导删除 → 仍视为未完成，继续暂停；
+        #    · 多条异常时 any 语义天然满足「只要还有一条未完成，就仍然暂停」。
+        #    注意：这里**不改** ``active`` 语义，也不动 B 段（已关闭 → 重算日期）。
         paused = any(
             e.get("active") is True
             and int(e.get("offset_days") or 0) < offset
+            and not _exc_process_done(exc_process_done, d0, e)
             for e in exc_list
         )
 
