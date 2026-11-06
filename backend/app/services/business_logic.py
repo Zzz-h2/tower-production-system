@@ -713,6 +713,12 @@ def judge_project_risk(rows: list[dict], monthly_plan: int = 0, today=None, *,
         return "delayed"
     has_today_unfinished = any(
         r.get("status") == "in_progress"
+        # 🔴 2026-11-06 修复「所有工序都填完了还是预警」：
+        #    独立工序（累计完成总数 90 / 累计发运总数 91）与手动完成占位行（99）的 plan_date
+        #    是**填报日期**，不是"今天应完成的任务";它们的 actual<plan 代表"合同还没做完"，
+        #    属于常态。原判定把它们算作「今日计划未完成」→ 合同未做完的项目天天被判预警。
+        #    只让 11 道调度工序（process_order 1..11）参与该判定。
+        and 1 <= int(r.get("process_order") or 0) <= 11
         and str(r.get("plan_date") or "")[:10] == today_s
         and int(r.get("actual_qty") or 0) < int(r.get("plan_qty") or 0)
         for r in (rows or [])
