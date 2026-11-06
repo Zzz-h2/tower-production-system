@@ -288,6 +288,21 @@ def manual_complete(pid: int, payload: ManualCompleteRequest, user: dict = Depen
         raise HTTPException(status_code=404, detail="项目不存在")
     require_project_access(project, user)
 
+    # 🔴 2026-11-06 用户口径：**有排产计划的项目不再接受手动完成登记**。
+    #   「先手动完成、后又导入排产」→ 排产覆盖手动数据（导入时本就会删 99 行）；
+    #   反过来「先导入排产、后补手动完成」会让 99 行残留、与排产进度重复计算，
+    #   所以这里直接拦掉，避免用户白填。只有「从未导入排产」的项目才能手动完成。
+    _plans = db.get_node_plans(pid)
+    _has_schedule = any(1 <= int(p.get("process_order") or 0) <= 11 for p in (_plans or []))
+    if _has_schedule:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "HAS_SCHEDULE_PLAN",
+                "message": "该项目已有排产计划，手动完成登记不适用（排产进度会与手动数据重复计算）",
+            },
+        )
+
     # ---- 负责人解析与校验（v6.0 多负责人；手动完成必须归属，否则排名漏统计）----
     managers = db.split_managers(project.get("delivery_person"))
     mgr = payload.manager.strip() if (payload.manager and payload.manager.strip()) else None

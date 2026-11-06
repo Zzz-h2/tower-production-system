@@ -1099,17 +1099,50 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
             "independent": True,
         })
 
+    # ---- 手动完成（process_order=99）独立泳道（2026-11）----
+    # 背景：99 行仍在 rows 里（要参与 timeline 时序），但它的 process_name 也是「附件安装」，
+    # 与第 10 道真实施工工序同名 → 时间轴会把它画进「附件安装」泳道，用户完全看不出
+    # 这是「手动完成登记」，甚至会误以为附件安装多做了几套。
+    # 修法（用户要求：独立泳道，与附件安装彻底分开）：
+    #   · **只在输出 timeline 时**对 99 行做**浅拷贝改名**为「手动完成」，
+    #     原始 rows / proc_groups / kpis / 卡片聚合**一律不动**（避免污染既有计算）；
+    #   · `is_manual_complete=True` 供前端以后做差异化样式（可选字段，前端可忽略）；
+    #   · 有 99 行时把「手动完成」追加到 visible_processes **末尾**（11 道工序顺序不变）。
+    MANUAL_COMPLETE_LABEL = "手动完成"
+    # 🔴 2026-11-06 用户口径：**该项目只要有排产计划，手动完成就被覆盖、不展示**。
+    #   「先手动完成、后又导入排产」→ 排产覆盖手动数据（导入时本就删 99 行，
+    #   但「先导入排产、后补手动完成」的时序会让 99 行残留）；
+    #   「只有手动完成、从未导入排产」→ 只展示手动完成的数据。
+    #   判断依据用「有没有 11 道调度工序的计划行」，与列表/详情是否显示排产同源。
+    has_schedule_plan = any(pn in proc_groups for pn in SCHEDULE_PROCESS_NAMES)
+    timeline: list[dict] = []
+    manual_complete_rows = 0
+    for _r in rows:
+        if int(_r.get("process_order") or 0) == _db.MANUAL_COMPLETE_ORDER:
+            if has_schedule_plan:
+                # 有排产 → 手动完成视为已作废，既不画泳道也不计入节点数以外的任何统计
+                continue
+            manual_complete_rows += 1
+            timeline.append({**_r, "process_name": MANUAL_COMPLETE_LABEL,
+                             "is_manual_complete": True})
+        else:
+            timeline.append(_r)
+
+    visible_processes = [pn for pn in SCHEDULE_PROCESS_NAMES if pn in proc_groups]
+    if manual_complete_rows:
+        visible_processes.append(MANUAL_COMPLETE_LABEL)
+
     return {
         "kpis": {
             "total_sets": total_sets,
             "process_count": len(proc_groups),
-            "node_count": len(rows),
+            "node_count": len(timeline),
             "done_count": done_count,
             "overdue_count": overdue_count,
         },
         "processes": processes,
-        "timeline": rows,
-        "visible_processes": [pn for pn in SCHEDULE_PROCESS_NAMES if pn in proc_groups],
+        "timeline": timeline,
+        "visible_processes": visible_processes,
     }
 
 
