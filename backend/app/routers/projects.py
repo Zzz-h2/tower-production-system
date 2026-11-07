@@ -222,6 +222,44 @@ def clear_node_plans(pid: int, user: dict = Depends(require_admin)):
     return {"message": "✅ 已清空该项目的节点计划"}
 
 
+def _manual_complete_stats(pid: int, month: Optional[str] = None,
+                           exclude_date: Optional[str] = None) -> dict:
+    """手动完成弹窗与保存校验**共用**的完成量统计（2026-11-06 统一口径）。
+
+    口径说明（重要）：
+      - 只统计 ``process_name == '附件安装'`` 的行，但**按 process_order 区分来源**：
+        · ``1..11`` → 排产行的实际完成量（``scheduled``）；
+        · ``99``    → 手动完成占位行的数量（``manual``，这块**必须计入**：
+          它本身就是「手动补录的已完成套数」，排除会让纯手动项目恒显示 0 套）；
+      - ``month`` 非空 → 只统计该月：排产行按 plan_month、99 行按 plan_date 月份
+        （由 ``get_node_plans(pid, None, month)`` 统一处理）；
+        ``month`` 为空 → 跨月累计（合同累计口径，历史行为）。
+      - ``exclude_date`` → 保存时「同日覆盖」用：把该日期的旧值排除，避免「报满后想改小被误拒」。
+
+    Returns:
+        dict: ``{scheduled, manual, total}``（total = scheduled + manual）
+    """
+    plans = db.get_node_plans(pid, None, month)
+    actuals = db.get_node_actuals(pid)
+    scheduled = 0
+    manual = 0
+    for n in plans or []:
+        if str(n.get("process_name") or "") != "附件安装":
+            continue
+        order = int(n.get("process_order") or 0)
+        is_manual_row = order == db.MANUAL_COMPLETE_ORDER
+        if not is_manual_row and not (1 <= order <= 11):
+            continue
+        qty = int((actuals.get(n.get("id"), {}) or {}).get("actual_qty", 0) or 0)
+        if exclude_date and str(n.get("plan_date") or "")[:10] == exclude_date:
+            qty = 0
+        if is_manual_row:
+            manual += qty
+        else:
+            scheduled += qty
+    return {"scheduled": scheduled, "manual": manual, "total": scheduled + manual}
+
+
 @router.get("/{pid}/manual-completes")
 def list_manual_completes(pid: int, month: Optional[str] = None,
                           user: dict = Depends(get_current_user)):
@@ -244,18 +282,21 @@ def list_manual_completes(pid: int, month: Optional[str] = None,
     mth = month.strip() if month and month.strip() else None
     items = db.get_manual_completes(pid, mth)
     total = int(project.get("contract_count") or 0)
-    plans = db.get_node_plans(pid)
-    actuals = db.get_node_actuals(pid)
-    done = sum(
-        int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0)
-        for n in plans if n.get("process_name") == "附件安装"
-    )
+    # 🔴 2026-11-06：统计与 items **同一个月口径**（不再用全月 get_node_plans(pid)）；
+    #    99 行按「手动补录的完成量」计入，不重复也不漏。
+    #    `completed_sets` = **当月**完成量（与上方明细条数同源）；
+    #    `cumulative_completed` = 跨月累计（合同累计口径，与 remaining_sets 同源）。
+    stats_month = _manual_complete_stats(pid, mth)
+    stats_all = _manual_complete_stats(pid, None)
     return {
         "items": items,
         "month": mth,
         "contract_count": total,
-        "completed_sets": done,
-        "remaining_sets": max(0, total - done),
+        "completed_sets": stats_month["total"],
+        "scheduled_completed": stats_month["scheduled"],
+        "manual_completed": stats_month["manual"],
+        "cumulative_completed": stats_all["total"],
+        "remaining_sets": max(0, total - stats_all["total"]),
     }
 
 
@@ -347,20 +388,10 @@ def manual_complete(pid: int, payload: ManualCompleteRequest, user: dict = Depen
             detail={"code": "NO_REMAINING",
                     "message": "该项目未设置合同总数，无法确定剩余未完成数量，请先在项目中填写合同总数"},
         )
-    plans = db.get_node_plans(pid)
-    actuals = db.get_node_actuals(pid)
-    att_plans = [n for n in plans if n.get("process_name") == "附件安装"]
-    done = sum(
-        int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0)
-        for n in att_plans
-    )
-    # 同日覆盖：本次提交将「替代」同日期那条记录，它的旧值不该计入已完成（否则报满后想改小会被误拒）
-    same_date = [n for n in att_plans if str(n.get("plan_date") or "")[:10] == complete_date]
-    if same_date:
-        done -= sum(
-            int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0)
-            for n in same_date
-        )
+    # 🔴 2026-11-06：与「手动完成」弹窗共用同一个统计函数（口径不会漂）。
+    #    保存上限一律用**跨月累计**（合同口径）：项目总完成量不能超过合同数；
+    #    并排除「同日覆盖」那条旧记录（否则报满后想改小会被误拒）。
+    done = _manual_complete_stats(pid, None, exclude_date=complete_date)["total"]
     remaining = max(0, _total - done)
 
     if complete_qty > remaining:
@@ -580,7 +611,9 @@ def get_alerts(pid: int, month: Optional[str] = None,
     focus.sort(key=lambda r: {"exception": 0, "overdue": 1, "warning": 2, "in_progress": 3}[r["status"]])
 
     # 携带节点异常提报（按 node_id 分组，供预警「管理」按钮展示）
-    exceptions = db.get_node_exceptions_by_project(pid)
+    # 🔴 2026-11-06：必须按 month 过滤（方案 A），否则本月节点会挂出历史各月异常，
+    #    出现「has_exception=true 但列表是别的月份」的口径不一致。
+    exceptions = db.get_node_exceptions_by_project(pid, mth)
     exc_map = {}
     for e in exceptions:
         exc_map.setdefault(e["node_id"], []).append(e)
@@ -596,8 +629,13 @@ def get_alerts(pid: int, month: Optional[str] = None,
 
 
 @router.get("/{pid}/milestone-backward")
-def milestone_backward(pid: int, deadline: str = None, user: dict = Depends(get_current_user)):
-    """里程碑倒排：给定交付截止日，返回倒排计划与偏差分析。行级隔离：非本大区项目返回 404。"""
+def milestone_backward(pid: int, deadline: str = None, month: str = None,
+                       user: dict = Depends(get_current_user)):
+    """里程碑倒排：给定交付截止日，返回倒排计划与偏差分析。行级隔离：非本大区项目返回 404。
+
+    2026-11-06：新增 ``month`` —— 「当前工序状态」只用该月排产行计算（与详情页同口径）；
+    不传 month 时保持历史行为（全部月份汇总）。
+    """
     if not deadline:
         raise HTTPException(status_code=400, detail="缺少 deadline 参数")
     try:
@@ -607,13 +645,15 @@ def milestone_backward(pid: int, deadline: str = None, user: dict = Depends(get_
     project = db.get_project_by_id(pid)
     require_project_access(project, user)
     from ..services import milestone as milestone_svc
-    return milestone_svc.build_milestone_backward(pid, dl)
+    mth = str(month).strip()[:7] if month and str(month).strip() else None
+    return milestone_svc.build_milestone_backward(pid, dl, month=mth)
 
 
 class MilestoneBackwardRequest(BaseModel):
     """里程碑倒排请求体：交付截止日 + 可选的自定义工序工期。"""
     delivery_deadline: str
     custom_durations: Optional[dict[str, int]] = None
+    month: Optional[str] = None      # 2026-11-06：排产归属月（不传=全部月份汇总，历史兼容）
 
 
 @router.post("/{pid}/milestone-backward")
@@ -631,4 +671,5 @@ def milestone_backward_with_durations(pid: int, req: MilestoneBackwardRequest,
             if not isinstance(days, int) or days < 1 or days > 365:
                 raise HTTPException(status_code=400, detail=f"工序 {name} 工期必须是 1~365 的整数")
     from ..services import milestone as milestone_svc
-    return milestone_svc.build_milestone_backward(pid, dl, req.custom_durations)
+    mth = str(req.month).strip()[:7] if req.month and str(req.month).strip() else None
+    return milestone_svc.build_milestone_backward(pid, dl, req.custom_durations, month=mth)

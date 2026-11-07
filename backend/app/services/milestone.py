@@ -65,8 +65,14 @@ def estimate_delivery_date(status_list: list[str], custom_durations: dict | None
     return current
 
 
-def build_milestone_backward(pid: int, deadline: date, custom_durations: dict | None = None) -> dict:
-    """组装里程碑倒排结果：倒排计划 + 偏差分析 + 预计交付。"""
+def build_milestone_backward(pid: int, deadline: date, custom_durations: dict | None = None,
+                             month: str | None = None) -> dict:
+    """组装里程碑倒排结果：倒排计划 + 偏差分析 + 预计交付。
+
+    Args:
+        month: 排产归属月 'YYYY-MM'（2026-11-06 新增）。非空时「当前工序状态」只用
+            该月排产行计算（与详情页同口径）；None → 历史行为（全部月份汇总）。
+    """
     # 护防：过早起止日期倒推会触发 date 溢出（OverflowError），限定合理年份范围 → 400
     if not (2000 <= deadline.year <= 2100):
         raise HTTPException(status_code=400, detail="交付截止日应在 2000~2100 年之间")
@@ -75,7 +81,7 @@ def build_milestone_backward(pid: int, deadline: date, custom_durations: dict | 
 
     # 当前工序状态（来自 node_plans + node_actuals 实时计算）
     try:
-        plans = db.get_node_plans(pid)
+        plans = db.get_node_plans(pid, None, month)   # 2026-11-06：按查询月取计划行（None=全月兼容）
         actuals = db.get_node_actuals(pid)
         ov = build_overview(pid, plans, actuals)
         status_map = {p["process_name"]: p["status"] for p in ov.get("processes", [])}

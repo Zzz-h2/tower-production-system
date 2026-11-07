@@ -4,8 +4,15 @@ import http from './index'
 export const createException = (pid, nodeId, data) =>
   http.post(`/exceptions/projects/${pid}/nodes/${nodeId}`, data)
 
-export const listExceptionsByProject = (pid) =>
-  http.get(`/exceptions/projects/${pid}`)
+/**
+ * 项目下的异常记录（2026-11-06：按**提报属月**严格隔离，方案 A）。
+ *
+ * @param {number|string} pid 项目 ID
+ * @param {string} [month] 'YYYY-MM'；传空则返回项目全部历史异常（历史/兼容用）
+ * @returns {Promise<{items: Array, summary: object, month: string|null}>}
+ */
+export const listExceptionsByProject = (pid, month) =>
+  http.get(`/exceptions/projects/${pid}`, { params: month ? { month } : {} })
 
 // 项目下已关闭的历史异常记录（按关闭时间倒序）
 export const listClosedExceptions = (pid) =>

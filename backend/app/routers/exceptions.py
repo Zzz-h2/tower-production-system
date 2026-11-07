@@ -44,10 +44,16 @@ def create_exception(project_id: int, node_id: int, req: NodeExceptionCreate,
 
 
 @router.get("/projects/{project_id}")
-def list_exceptions(project_id: int, user: dict = Depends(get_current_user)):
-    """项目下**全部**异常（含已关闭 / 已到期失效），并附显示状态与计数条。
+def list_exceptions(project_id: int, month: str | None = None,
+                    user: dict = Depends(get_current_user)):
+    """项目下异常记录（含已关闭 / 已到期失效），并附显示状态与计数条。
 
     行级隔离：非本大区项目返回 404 防探测。
+
+    🔴 2026-11-06 用户口径（方案 A：严格按月）：``month`` 非空时只返回
+    **提报属月 = month** 的记录（``DATE_FORMAT(created_at,'%Y-%m')``）；
+    ``summary`` 与 ``items`` 用**同一份过滤后的列表**统计（不会一个全量一个过滤）。
+    ``month`` 为空 → 返回项目全部异常（历史/兼容调用方）。
 
     2026-11 改造（异常记录页看本项目全部异常）：
       - 每条记录补 ``display_status``(active|expired|closed) / ``is_active`` / ``is_expired`` /
@@ -60,7 +66,12 @@ def list_exceptions(project_id: int, user: dict = Depends(get_current_user)):
     require_project_access(project, user)
     # 基准日：本入口取一次（禁止 SQL CURDATE / date.today()）
     today = business_today()
-    return decorate_exception_records(db.get_node_exceptions_by_project(project_id), today)
+    mth = str(month).strip()[:7] if month and str(month).strip() else None
+    rows = db.get_node_exceptions_by_project(project_id, mth)
+    result = decorate_exception_records(rows, today)
+    # 便于前端提示「当前仅显示 X 月」，与列表同源
+    result["month"] = mth
+    return result
 
 
 @router.get("/projects/{project_id}/exceptions/closed")

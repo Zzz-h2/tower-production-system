@@ -954,15 +954,43 @@ def create_node_exception(exc: dict) -> int:
         conn.close()
 
 
-def get_node_exceptions_by_project(project_id: int) -> list[dict]:
-    """查询项目下所有异常（按创建时间倒序）。"""
+def get_node_exceptions_by_project(project_id: int, month: str | None = None) -> list[dict]:
+    """查询项目下的异常记录（按创建时间倒序）。
+
+    🔴 2026-11-06 用户口径（方案 A：严格按月）：
+      ``month`` 非空时只返回 **提报属月 = month** 的记录
+      （``DATE_FORMAT(created_at, '%%Y-%%m') = month``）。
+      归属键选 ``created_at``（提报时间）而不是 plan_date / planned_close_date：
+        - ``plan_date`` 会因异常重算/顺延漂移（eff 改造后已不等于原排产日），不能当归属键；
+        - ``planned_close_date`` 是承诺时间，不是发生时间；
+        - 与「提报情况总览」的 exceptions 事实口径一致（那边就是按 DATE(created_at)）。
+      ⚠️ 方案 A 的已知代价：上月提报、至今未关闭的异常，在**本月视图不再出现**
+         （用户明确选择「一个月处理一个月」）。
+      ``month`` 为空 → 保持历史行为（返回项目全部异常，供历史/兼容调用方）。
+
+    Args:
+        project_id: 项目 ID
+        month: 'YYYY-MM'；None = 全部历史
+
+    Returns:
+        list[dict]: 异常记录行
+    """
+    m = str(month).strip()[:7] if month else ""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT * FROM node_exceptions WHERE project_id = %s ORDER BY created_at DESC",
-                (project_id,),
-            )
+            if m:
+                cur.execute(
+                    "SELECT * FROM node_exceptions WHERE project_id = %s "
+                    "AND DATE_FORMAT(created_at, '%%Y-%%m') = %s "
+                    "ORDER BY created_at DESC",
+                    (project_id, m),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM node_exceptions WHERE project_id = %s ORDER BY created_at DESC",
+                    (project_id,),
+                )
             return [row for row in cur.fetchall()]
     finally:
         conn.close()

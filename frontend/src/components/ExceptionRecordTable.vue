@@ -220,6 +220,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { deleteException, listExceptionsByProject, updateException } from '../api/exception'
 import { useAuthStore } from '../store/auth'
+import { useProjectStore } from '../store/project'
 
 /**
  * 项目级异常记录表（2026-11）。
@@ -255,6 +256,8 @@ const emit = defineEmits(['changed'])
 
 /** 登录态：删除按钮仅 admin 显示（真正的权限边界在后端 require_admin） */
 const auth = useAuthStore()
+// 2026-11-06：异常记录按「提报属月」严格隔离（方案 A）——跟随全局调度令月份
+const store = useProjectStore()
 
 /** 责任分类选项（与提报表单 / AlertList 编辑弹窗保持同一组值，避免两处口径漂移） */
 const CATEGORY_OPTIONS = ['供应商', '内部生产', '物流运输', '天气/不可抗力', '其他']
@@ -391,7 +394,9 @@ async function load() {
   if (!props.pid) return
   loading.value = true
   try {
-    const res = await listExceptionsByProject(props.pid)
+    // 🔴 2026-11-06：先 ensureMonth()，避免「月份为空 → 不传参 → 后端返回全部历史」被误判为「隔离没生效」
+    const mth = typeof store.ensureMonth === 'function' ? store.ensureMonth() : store.filters.month
+    const res = await listExceptionsByProject(props.pid, mth || undefined)
     items.value = res?.items || []
   } catch (e) {
     // 错误已由 axios 拦截器统一提示；保持上一次数据，避免表格闪空
@@ -427,6 +432,8 @@ async function onClose(row) {
 
 watch(() => props.pid, load)
 watch(() => props.refreshKey, load)
+// 切换月份必须重拉（隔月隔离：本月只看本月提报的异常）
+watch(() => store.filters.month, load)
 onMounted(load)
 
 // ==================== 编辑 / 删除（2026-11 新增） ====================
