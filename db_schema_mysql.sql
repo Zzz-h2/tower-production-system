@@ -201,6 +201,7 @@ CREATE TABLE IF NOT EXISTS node_exceptions (
   planned_close_date DATE DEFAULT NULL COMMENT '计划关闭日期',
   measures TEXT DEFAULT NULL COMMENT '处理措施',
   status VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT '状态：pending/处理中processing/已关闭closed',
+  severity VARCHAR(16) NOT NULL DEFAULT 'medium' COMMENT '严重等级：high/medium/low（问题管控看板用）',
   set_seq INT DEFAULT NULL COMMENT '异常指向的套（project_process_durations.set_seq；NULL=整套/未指定）',
   set_d0 DATE DEFAULT NULL COMMENT '该套下料计划日快照（NULL=历史行，走中位数反推）',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

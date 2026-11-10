@@ -24,6 +24,10 @@
             <el-icon><Calendar /></el-icon>
             <template #title><span class="menu-label">提报情况总览</span></template>
           </el-menu-item>
+          <el-menu-item index="issues" :title="sidebarCollapsed ? '问题管控看板' : ''">
+            <el-icon><Warning /></el-icon>
+            <template #title><span class="menu-label">问题管控看板</span></template>
+          </el-menu-item>
         </el-menu>
         <!-- 收起/展开按钮：始终可见（移动端也保留），点击切换并记忆到 localStorage -->
         <button
@@ -274,6 +278,9 @@
 
         <!-- ========== 提报情况总览（副页面） ========== -->
         <SubmissionOverview v-else-if="activeView === 'submission'" />
+
+        <!-- ========== 问题管控看板（v7.10，副页面） ========== -->
+        <IssueBoardView v-else-if="activeView === 'issues'" />
       </div>
     </div>
   </div>
@@ -282,7 +289,7 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy, Calendar, Download, Fold, Expand } from '@element-plus/icons-vue'
+import { Plus, Refresh, TrendCharts, DocumentChecked, Trophy, Calendar, Download, Fold, Expand, Warning } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import * as XLSX from 'xlsx'
 import { saveAs } from 'file-saver'
@@ -296,14 +303,18 @@ import EditProjectDialog from '../components/EditProjectDialog.vue'
 import SchedulePlanOverview from '../components/SchedulePlanOverview.vue'
 import ProductionRankingOverview from '../components/ProductionRankingOverview.vue'
 import SubmissionOverview from '../components/SubmissionOverview.vue'
+import IssueBoardView from './IssueBoardView.vue'
 
 const store = useProjectStore()
 const router = useRouter()
 const auth = useAuthStore()   // 按钮级权限：管理员可编辑，普通账号只读
 const exporting = ref(false)  // 导出中状态
 
-// 左侧一级视图切换：production 生产进度总览 / schedule 排产计划总览
-const activeView = ref('production')
+// 左侧一级视图切换：production / schedule / ranking / submission / issues
+// 支持深链 ?view=issues（路由 /issues 重定向过来），只在首次挂载时读取
+const VALID_VIEWS = ['production', 'schedule', 'ranking', 'submission', 'issues']
+const _initialView = String(router.currentRoute.value.query.view || '')
+const activeView = ref(VALID_VIEWS.includes(_initialView) ? _initialView : 'production')
 function handleViewSwitch(index) {
   activeView.value = index   // 收起/展开只改宽度，不影响当前选中视图
   // 窄屏下展开态是浮层：选完视图自动收起，避免挡住内容

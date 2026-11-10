@@ -5,6 +5,8 @@ const routes = [
   { path: '/login', name: 'login', component: () => import('../views/LoginView.vue'), meta: { public: true } },
   { path: '/', redirect: '/projects' },
   { path: '/projects', name: 'projects', component: () => import('../views/ProjectListView.vue') },
+  // 问题管控看板（v7.10）：与其它总览页一样挂在 /projects 外壳下，此路由仅作深链兼容
+  { path: '/issues', redirect: '/projects?view=issues' },
   {
     path: '/projects/:id',
     name: 'project-detail',

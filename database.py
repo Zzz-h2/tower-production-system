@@ -2930,6 +2930,100 @@ def save_submission_overrides(items: list[dict], updated_by: str = '') -> dict:
         conn.close()
 
 
+# ============================================================
+# 问题管控看板（v7.10，2026-11）
+# ------------------------------------------------------------
+# 数据源：**复用 node_exceptions**（工序里提报的异常），不新建业务表；
+# 仅新增 node_exceptions.severity（high/medium/low，默认 medium）。
+# 字段映射：项目名 ← projects.project_name；来源部门 ← projects.big_area_person（大区）；
+#          问题描述 ← reason_detail；责任人 ← handler；解决时间 ← planned_close_date；
+#          当前状态 ← status（pending 计划中 / processing 执行中 / closed 已完成）。
+# 按月口径与「异常记录」一致：DATE_FORMAT(created_at,'%Y-%m') = month。
+# ============================================================
+ISSUE_SEVERITIES = ("high", "medium", "low")
+ISSUE_STATUSES = ("pending", "processing", "closed")
+
+
+def get_issue_board_rows(month: Optional[str] = None, status: Optional[str] = None,
+                         severity: Optional[str] = None,
+                         project_id: Optional[int] = None,
+                         keyword: Optional[str] = None,
+                         big_area_person: Optional[str] = None,
+                         today: Optional[str] = None) -> list[dict]:
+    """问题管控看板：**一条 SQL** 取当月异常 + 项目名/大区（无 N+1）。
+
+    排序（用户要求「高风险/超期优先」）：
+      ① 超期未关闭优先（status<>'closed' 且 planned_close_date < today）
+      ② severity 高 > 中 > 低
+      ③ 解决时间升序（无解决时间的排最后）
+      ④ id 升序（稳定排序，避免同条件抖动）
+
+    Args:
+        month: 'YYYY-MM'（按 **created_at 提报月**，与异常记录页同口径）；None = 全部
+        status: pending / processing / closed
+        severity: high / medium / low
+        project_id: 单项目过滤
+        keyword: 模糊匹配（项目名 / 问题描述 / 工序 / 责任人）
+        big_area_person: 大区隔离（None = 全量，admin）
+        today: 基准日 'YYYY-MM-DD'（由调用方传入，禁止 SQL 里 CURDATE）
+
+    Returns:
+        list[dict]: 每行含 id / project_id / project_name / area / process_name /
+            reason_detail / severity / handler / planned_close_date / status /
+            created_at / closed_at / set_seq
+    """
+    sql = (
+        "SELECT e.id AS id, e.project_id AS project_id, p.project_name AS project_name, "
+        "       p.big_area_person AS area, e.process_name AS process_name, "
+        "       e.reason_detail AS reason_detail, e.severity AS severity, "
+        "       e.handler AS handler, e.planned_close_date AS planned_close_date, "
+        "       e.status AS status, e.created_at AS created_at, e.closed_at AS closed_at, "
+        "       e.set_seq AS set_seq "
+        "FROM node_exceptions e JOIN projects p ON p.id = e.project_id "
+        "WHERE 1=1"
+    )
+    args: list = []
+    m = str(month).strip()[:7] if month else ""
+    if m:
+        sql += " AND DATE_FORMAT(e.created_at, '%%Y-%%m') = %s"
+        args.append(m)
+    if status:
+        sql += " AND e.status = %s"
+        args.append(str(status).strip())
+    if severity:
+        sql += " AND e.severity = %s"
+        args.append(str(severity).strip())
+    if project_id:
+        sql += " AND e.project_id = %s"
+        args.append(int(project_id))
+    if big_area_person:
+        sql += " AND p.big_area_person = %s"
+        args.append(big_area_person)
+    kw = str(keyword).strip() if keyword else ""
+    if kw:
+        like = f"%{kw}%"
+        sql += (" AND (p.project_name LIKE %s OR e.reason_detail LIKE %s"
+                " OR e.process_name LIKE %s OR e.handler LIKE %s)")
+        args.extend([like, like, like, like])
+    today_s = str(today)[:10] if today else ""
+    if today_s:
+        sql += (" ORDER BY (CASE WHEN e.status <> 'closed' AND e.planned_close_date IS NOT NULL"
+                " AND e.planned_close_date < %s THEN 0 ELSE 1 END),"
+                " (CASE e.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END),"
+                " (e.planned_close_date IS NULL), e.planned_close_date, e.id")
+        args.append(today_s)
+    else:
+        sql += (" ORDER BY (CASE e.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END),"
+                " (e.planned_close_date IS NULL), e.planned_close_date, e.id")
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(args))
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 if __name__ == '__main__':
     init_database()
     print("Database initialization test passed.")

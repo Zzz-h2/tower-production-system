@@ -1086,7 +1086,9 @@ def get_node_exception_by_id(exc_id: int) -> dict | None:
 def update_node_exception(exc_id: int, fields: dict) -> bool:
     """更新异常（仅允许白名单字段；status=closed 时自动写 closed_at）。"""
     allowed = {"responsibility_category", "reason_detail", "handler",
-               "planned_close_date", "measures", "status"}
+               "planned_close_date", "measures", "status",
+               # 2026-11 问题管控看板：严重等级（high/medium/low 由路由层校验）
+               "severity"}
     sets = [f"{k}=%({k})s" for k in fields if k in allowed]
     if not sets:
         return False
@@ -1101,6 +1103,17 @@ def update_node_exception(exc_id: int, fields: dict) -> bool:
             return cur.rowcount > 0
     finally:
         conn.close()
+
+
+def get_issue_board_rows(month: str | None = None, status: str | None = None,
+                         severity: str | None = None, project_id: int | None = None,
+                         keyword: str | None = None,
+                         big_area_person: str | None = None,
+                         today: str | None = None) -> list[dict]:
+    """问题管控看板数据（一条 SQL，含项目名与大区）——桥接根目录 database.py 同名函数。"""
+    from database import get_issue_board_rows as _fn
+    return getattr(_fn, "__wrapped__", _fn)(
+        month, status, severity, project_id, keyword, big_area_person, today)
 
 
 def get_node_exceptions_by_node(node_id: int) -> list[dict]:

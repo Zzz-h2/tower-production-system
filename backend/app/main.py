@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core.deps import require_login
 from .routers import (config, projects, nodes, schedule_import, dashboard,
-                      dispatch_import, exceptions, ranking, auth)
+                      dispatch_import, exceptions, ranking, issues, auth)
 
 app = FastAPI(
     title="塔筒生产进度管控系统 API",
@@ -40,6 +40,7 @@ app.include_router(dashboard.router, dependencies=[Depends(require_login)])
 app.include_router(dispatch_import.router, dependencies=[Depends(require_login)])
 app.include_router(exceptions.router, dependencies=[Depends(require_login)])
 app.include_router(ranking.router, dependencies=[Depends(require_login)])
+app.include_router(issues.router, dependencies=[Depends(require_login)])   # 问题管控看板（v7.10）
 
 
 @app.get("/api/health")
