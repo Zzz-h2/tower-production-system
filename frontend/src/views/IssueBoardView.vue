@@ -90,8 +90,8 @@
       </div>
     </div>
 
-    <!-- ③ 主区：左 16 栅格 = 主问题列表；右 8 栅格 = 三个图表竖排 -->
-    <el-row :gutter="16" class="main-row">
+    <!-- ③ 主区：左右两列**等高对齐**（align="stretch" + 卡片 flex 撑满） -->
+    <el-row :gutter="12" align="stretch" class="main-row">
       <!-- 左：主问题列表。≥1400px 时占 2/3；更窄时整宽（图表随后落到下方） -->
       <el-col :span="24" class="col-main">
         <div class="block-card">
@@ -99,46 +99,63 @@
             <span class="block-title">问题明细</span>
             <el-tag type="info" size="small">{{ items.length }}</el-tag>
           </div>
-          <el-table
-            :data="sortedItems"
-            border
-            stripe
-            size="small"
-            style="width: 100%"
-            :row-style="rowStyle"
-            :header-cell-style="{ background: '#f7fafc', color: '#1a365d', whiteSpace: 'nowrap' }"
-            @sort-change="onSortChange"
-          >
-            <el-table-column label="项目名称" prop="project_name" min-width="176" show-overflow-tooltip />
-            <el-table-column label="问题描述" prop="reason_detail" min-width="170" show-overflow-tooltip />
-            <el-table-column label="等级" width="72" align="center" sortable="custom" prop="severity">
-              <template #default="{ row }">
-                <el-tag :type="severityTagType(row.severity)" size="small">{{ row.severity_label }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="责任人" width="80" align="center">
-              <template #default="{ row }">{{ row.handler || '-' }}</template>
-            </el-table-column>
-            <el-table-column label="解决时间" width="140" align="center" sortable="custom" prop="planned_close_date">
-              <template #default="{ row }">
-                <div class="date-cell">
-                  <span :class="{ 'is-overdue-text': row.is_overdue }">{{ row.planned_close_date || '-' }}</span>
-                  <span v-if="row.is_overdue" class="overdue-days">逾期{{ row.overdue_days }}天</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="84" align="center">
-              <template #default="{ row }">
-                <el-tag :type="statusTagType(row.status)" size="small">{{ row.status_label }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="90" align="center" fixed="right">
-              <template #default="{ row }">
-                <el-button v-if="auth.isAdmin" type="primary" link size="small" @click="openEdit(row)">编辑</el-button>
-                <span v-else>-</span>
-              </template>
-            </el-table-column>
+          <!-- 表格容器 flex:1 → el-table height=100% 撑满卡片，多余空白落在表格内而不是卡片底部 -->
+          <div class="table-wrap">
+            <el-table
+              :data="sortedItems"
+              border
+              stripe
+              size="small"
+              height="100%"
+              style="width: 100%"
+              :row-style="rowStyle"
+              :header-cell-style="{ background: '#f7fafc', color: '#1a365d', whiteSpace: 'nowrap', textAlign: 'center' }"
+              @sort-change="onSortChange"
+            >
+              <el-table-column label="项目名称" prop="project_name" min-width="162" show-overflow-tooltip />
+              <el-table-column label="问题描述" prop="reason_detail" min-width="160" show-overflow-tooltip />
+              <el-table-column label="等级" width="72" align="center" sortable="custom" prop="severity">
+                <template #default="{ row }">
+                  <el-tag :type="severityTagType(row.severity)" size="small">{{ row.severity_label }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="责任人" width="76" align="center">
+                <template #default="{ row }">{{ row.handler || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="解决时间" width="136" align="center" sortable="custom" prop="planned_close_date">
+                <template #default="{ row }">
+                  <div class="date-cell">
+                    <span :class="{ 'is-overdue-text': row.is_overdue }">{{ row.planned_close_date || '-' }}</span>
+                    <span v-if="row.is_overdue" class="overdue-days">逾期{{ row.overdue_days }}天</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="80" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="statusTagType(row.status)" size="small">{{ row.status_label }}</el-tag>
+                </template>
+              </el-table-column>
+              <!-- 操作列：固定两列栅格（56px + 56px，gap 6），单/双按钮行左边缘始终对齐
+                   按钮为**浅底胶囊**（浅蓝=编辑 / 浅绿=关闭 / 浅灰=已关闭禁用），不再用纯文字 link -->
+              <el-table-column label="操作" width="130" fixed="right">
+                <template #default="{ row }">
+                  <div v-if="auth.isAdmin" class="op-cell">
+                    <el-button size="small" class="op-btn is-edit" @click="openEdit(row)">编辑</el-button>
+                    <!-- 关闭：**始终渲染**，已关闭行浅灰禁用（不隐藏 → 保证按钮位置一致）
+                         点确认 → PATCH status=closed → 整表刷新后本按钮变灰 -->
+                    <el-button
+                      size="small"
+                      class="op-btn is-close"
+                      :disabled="row.status === 'closed'"
+                      :title="row.status === 'closed' ? '该异常已关闭' : '关闭该异常'"
+                      @click="onCloseIssue(row)"
+                    >关闭</el-button>
+                  </div>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
           </el-table>
+          </div>
           <el-empty v-if="!items.length && !loading" description="当月暂无问题记录" />
         </div>
       </el-col>
@@ -219,8 +236,8 @@
  *
  * ⚠️ 数据/接口/筛选/排序/编辑逻辑与上一版**逐行一致**，本次只动结构与样式。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, RefreshLeft } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { useProjectStore } from '../store/project'
@@ -267,7 +284,7 @@ const rateColor = (rate) => (rate >= 100 ? '#38a169' : rate >= 60 ? '#3182ce' : 
 const severityTagType = (sev) => (sev === 'high' ? 'danger' : sev === 'medium' ? 'warning' : 'info')
 const statusTagType = (st) => (st === 'closed' ? 'success' : st === 'processing' ? 'primary' : 'info')
 // 超期行：左侧 3px 红条（inset box-shadow，不占布局）+ 不再整行浅红底（多行超期时避免一片红）
-const rowStyle = ({ row }) => (row.is_overdue ? { boxShadow: 'inset 3px 0 0 #e53e3e' } : {})
+const rowStyle = ({ row }) => ({ height: '38px', ...(row.is_overdue ? { boxShadow: 'inset 3px 0 0 #e53e3e' } : {}) })
 
 function onSortChange({ prop, order }) {
   sortState.prop = prop || ''
@@ -427,6 +444,8 @@ async function load() {
     renderStatusChart()
     renderAreaChart()
     renderSeverityChart()
+    // 数据刷新后容器尺寸可能变化（等高/滚动条），再对齐一次 canvas
+    nextTick(() => resizeCharts())
   } catch (e) {
     ElMessage.error('加载问题看板失败')
   } finally {
@@ -441,6 +460,37 @@ const editForm = reactive({
   id: null, project_name: '', reason_detail: '', severity: 'medium',
   handler: '', planned_close_date: null, status: 'pending',
 })
+
+/**
+ * 关闭一条异常（用户要求：异常情况区域可直接关闭，关闭后恢复默认状态）。
+ *
+ * 流程：二次确认 → PATCH status=closed（后端自动写 closed_at）→ 成功提示 → load() 刷新。
+ * 刷新后自动达成 4 点反馈：①状态标签变「已完成」②该行不再有关闭按钮
+ * ③KPI 已关闭 +1 / 未关闭 -1 / 关闭率上升 ④按排序规则重排（已关闭不再超期优先，可能下移）。
+ *
+ * @param {object} row 当前行（至少含 id / process_name / status）
+ */
+async function onCloseIssue(row) {
+  if (!auth.isAdmin || !row || row.status === 'closed') return
+  try {
+    await ElMessageBox.confirm(
+      '确认关闭该异常？关闭后将从「未关闭」统计中移除。',
+      '关闭异常',
+      { type: 'warning', confirmButtonText: '确认关闭', cancelButtonText: '取消' },
+    )
+  } catch (e) {
+    return   // 取消：不做任何改动
+  }
+  try {
+    await patchIssue(row.id, { status: 'closed' })
+    // ElMessage 只传一个参数（项目踩过坑）
+    ElMessage.success('已关闭')
+    await load()
+  } catch (e) {
+    // 失败不改本地状态：不乐观更新，列表保持原样
+    ElMessage.error(e?.response?.data?.detail || '关闭失败')
+  }
+}
 
 function openEdit(row) {
   if (!auth.isAdmin) return
@@ -500,7 +550,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.issue-wrap { display: flex; flex-direction: column; gap: 16px; }
+.issue-wrap { display: flex; flex-direction: column; gap: 12px; }
 
 /* ① 筛选条：sticky 吸顶（滚动时始终可操作；白底+阴影压住下方内容） */
 .filter-bar {
@@ -570,16 +620,36 @@ onBeforeUnmount(() => {
    因此把「并排」阈值提到 1400px，1280 及以下自动改为上下堆叠（用户验收项 3）。 */
 .main-row { margin-top: 0; }
 @media (min-width: 1400px) {
-  .col-main { flex: 0 0 66.6667%; max-width: 66.6667%; }
-  .col-side { flex: 0 0 33.3333%; max-width: 33.3333%; }
+  .col-main { flex: 0 0 66.6667%; max-width: 66.6667%; display: flex; }
+  .col-side { flex: 0 0 33.3333%; max-width: 33.3333%; display: flex; }
+  /* 🔴 卡片必须显式撑满：el-col 变成 flex 容器后，卡片默认按内容收缩，
+     会导致右侧图表容器只有 ~140px 宽（canvas 被压扁、图例被裁）。 */
+  .col-main > .block-card,
+  .col-side > .block-card { flex: 1 1 auto; min-width: 0; width: 100%; }
 }
-.block-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px 18px; }
-.block-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+/* <1400：两列上下堆叠，卡片不再等分高度（否则右侧会被拉出大片空白） */
+@media (max-width: 1399px) {
+  .block-card { height: auto; }
+  .table-wrap :deep(.el-table) { height: auto !important; }
+}
+.block-card {
+  background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px;
+  padding: 14px 16px;
+  /* 等高：卡片自身成为 flex 容器，表格区用 flex:1 撑满（多余空白落在表格内，不在卡片底部） */
+  display: flex; flex-direction: column; height: 100%;
+}
+.block-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex: 0 0 auto; }
 .block-title { font-size: 13px; font-weight: 600; color: #1a365d; }
-.chart-header { margin-top: 6px; }
-.chart-box { width: 100%; height: 108px; }
+.table-wrap { flex: 1 1 auto; min-height: 0; display: flex; }
+.table-wrap :deep(.el-table) { flex: 1 1 auto; }
+/* 三块图表之间的间隔收紧到 10px（配合等高） */
+.chart-header { margin-top: 10px; }
+.chart-box { width: 100%; height: 96px; flex: 0 0 auto; }
 
 .date-cell { display: flex; align-items: center; justify-content: center; gap: 4px; white-space: nowrap; font-size: 12px; }
+/* 表头高度收紧（38 行高 + 36 表头，与右侧三图总高更接近） */
+.table-wrap :deep(.el-table__header th) { height: 36px; padding: 4px 0; }
+.table-wrap :deep(.el-table__body td) { padding: 4px 0; }
 .is-overdue-text { color: #e53e3e; font-weight: 600; }
 .overdue-days {
   color: #e53e3e;
@@ -590,6 +660,57 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 .edit-readonly { color: #4a5568; }
+/* 操作列：固定两列栅格（56 + 56，gap 6），单/双按钮行左边缘恒等（差值 0px） */
+.op-cell {
+  display: grid;
+  grid-template-columns: 48px 48px;
+  gap: 6px;
+  align-items: center;
+  justify-content: start;   /* 整体左对齐（不居中） */
+}
+/* 浅底胶囊按钮：24px 高、4px 圆角、12px 字号，三态（normal / hover / disabled） */
+.op-cell .op-btn {
+  /* 48px 放 2 个 12px 汉字 + 左右 padding 各 4px 足够；操作列 130 内不再被裁切
+     （旧值 56×2 + gap6 + 单元格 padding 24 = 142 > 130 → 右侧 12px 被 overflow:hidden 切掉） */
+  width: 48px;
+  min-width: 48px;
+  height: 24px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  text-align: center;
+  justify-content: center;
+  box-shadow: none;
+}
+/* 编辑：浅蓝底 */
+.op-cell .op-btn.is-edit {
+  background: #ebf8ff !important;
+  color: #3182ce !important;
+  border: 1px solid #bee3f8 !important;
+}
+.op-cell .op-btn.is-edit:not(.is-disabled):hover {
+  background: #d6ecff !important;
+  border-color: #90cdf4 !important;
+}
+/* 关闭：浅绿底 */
+.op-cell .op-btn.is-close {
+  background: #f0fff4 !important;
+  color: #38a169 !important;
+  border: 1px solid #c6f6d5 !important;
+}
+.op-cell .op-btn.is-close:not(.is-disabled):hover {
+  background: #dcfce7 !important;
+  border-color: #9ae6b4 !important;
+}
+/* 已关闭：浅灰底 + 灰字 + 不可点（明确"已关闭"而不是隐藏） */
+.op-cell .op-btn.is-close.is-disabled,
+.op-cell .op-btn.is-close.is-disabled:hover,
+.op-cell .op-btn.is-close.is-disabled:focus {
+  background: #f7fafc !important;
+  color: #c0c4cc !important;
+  border-color: #e2e8f0 !important;
+  cursor: not-allowed;
+}
 
 /* ④ 响应式：lg 以下图表自动落到主表下方（栅格顺序天然如此），图表略增高 */
 @media (max-width: 1399px) {
