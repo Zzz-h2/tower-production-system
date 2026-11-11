@@ -188,8 +188,17 @@ class IssueUpdateRequest(BaseModel):
 
 @router.patch("/issues/{exception_id}")
 def update_issue(exception_id: int, payload: IssueUpdateRequest,
-                 user: dict = Depends(require_admin)):
-    """编辑一条问题（**仅管理员**，与异常编辑一致）。
+                 user: dict = Depends(get_current_user)):
+    """编辑一条问题（2026-11-11：**admin 全量 + 大区账号仅限本大区**）。
+
+    权限（🔴 服务端强制，不依赖前端是否显示按钮）：
+      - ``admin`` → 放行；
+      - ``big_area`` → 该异常所属项目的 ``projects.big_area_person`` 必须等于
+        自己的 ``big_area_name``（``get_scope_big_area``；``'ALL'`` 全区哨兵返回 None → 放行全部）；
+        不一致 / 项目大区为空 → **403** ``{"code":"OUT_OF_SCOPE"}``；
+      - 其它角色 → 403。
+
+    校验顺序：① 资源存在(404) → ② 权限范围(403) → ③ 字段白名单/格式(400) → ④ 落库。
 
     - 只更新传入字段；``severity``/``status`` 白名单校验；``planned_close_date`` 需 YYYY-MM-DD；
     - ``status='closed'`` 且原先 ``closed_at`` 为空 → 由 ``db.update_node_exception`` 自动写 closed_at（与异常关闭语义一致）；
@@ -198,6 +207,30 @@ def update_issue(exception_id: int, payload: IssueUpdateRequest,
     Returns:
         dict: 更新后的整行（与看板 items 同构，前端可直接替换）
     """
+    # ---- ① 资源存在 ----
+    row = db.get_node_exception_by_id(exception_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="问题不存在")
+
+    # ---- ② 权限范围（越权不能靠前端：直接调 PATCH 也必须被拒）----
+    role = str(user.get("role") or "")
+    if role != "admin":
+        if role != "big_area":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "FORBIDDEN", "message": "无权修改该问题"},
+            )
+        scope = get_scope_big_area(user)            # 'ALL' 哨兵 → None（全区大区可编辑全部）
+        if scope is not None:
+            project = db.get_project_by_id(int(row.get("project_id") or 0)) or {}
+            area = str(project.get("big_area_person") or "").strip()
+            if not area or area != str(scope).strip():
+                raise HTTPException(
+                    status_code=403,
+                    detail={"code": "OUT_OF_SCOPE", "message": "只能修改本大区的问题"},
+                )
+
+    # ---- ③ 字段校验 ----
     fields: dict = {}
     if payload.severity is not None:
         sv = str(payload.severity).strip()
@@ -227,10 +260,6 @@ def update_issue(exception_id: int, payload: IssueUpdateRequest,
     if not fields:
         raise HTTPException(status_code=400, detail="没有需要更新的字段")
 
-    row = db.get_node_exception_by_id(exception_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="问题不存在")
-    # 大区账号不允许跨区编辑（admin 不受限；require_admin 已挡住非 admin，这里再做一次项目归属防御）
     ok = db.update_node_exception(exception_id, fields)
     if not ok:
         raise HTTPException(status_code=404, detail="问题不存在或未更新")

@@ -139,7 +139,7 @@
                    按钮为**浅底胶囊**（浅蓝=编辑 / 浅绿=关闭 / 浅灰=已关闭禁用），不再用纯文字 link -->
               <el-table-column label="操作" width="130" fixed="right">
                 <template #default="{ row }">
-                  <div v-if="auth.isAdmin" class="op-cell">
+                  <div v-if="canTouchIssues" class="op-cell">
                     <el-button size="small" class="op-btn is-edit" @click="openEdit(row)">编辑</el-button>
                     <!-- 关闭：**始终渲染**，已关闭行浅灰禁用（不隐藏 → 保证按钮位置一致）
                          点确认 → PATCH status=closed → 整表刷新后本按钮变灰 -->
@@ -279,6 +279,15 @@ const sortedItems = computed(() => {
   })
   return arr
 })
+
+/**
+ * 是否可操作问题（2026-11-11 用户口径：**区域负责人也要能编辑/关闭**，但仅限本大区）。
+ *
+ * - 前端只负责「显示按钮」；真正的越权拦截在后端 PATCH（大区不符 → 403 OUT_OF_SCOPE）。
+ * - 大区账号看到的列表本身已由后端 `get_scope_big_area` 隔离，故无需再前端过滤。
+ * - 字段名：`store/auth.js` 提供 `isAdmin`（role==='admin'）与 `isBigArea`（role==='big_area'）。
+ */
+const canTouchIssues = computed(() => auth.isAdmin || auth.isBigArea)
 
 const rateColor = (rate) => (rate >= 100 ? '#38a169' : rate >= 60 ? '#3182ce' : '#e53e3e')
 const severityTagType = (sev) => (sev === 'high' ? 'danger' : sev === 'medium' ? 'warning' : 'info')
@@ -471,7 +480,7 @@ const editForm = reactive({
  * @param {object} row 当前行（至少含 id / process_name / status）
  */
 async function onCloseIssue(row) {
-  if (!auth.isAdmin || !row || row.status === 'closed') return
+  if (!canTouchIssues.value || !row || row.status === 'closed') return
   try {
     await ElMessageBox.confirm(
       '确认关闭该异常？关闭后将从「未关闭」统计中移除。',
@@ -493,7 +502,7 @@ async function onCloseIssue(row) {
 }
 
 function openEdit(row) {
-  if (!auth.isAdmin) return
+  if (!canTouchIssues.value) return
   editForm.id = row.id
   editForm.project_name = row.project_name
   editForm.reason_detail = row.reason_detail
