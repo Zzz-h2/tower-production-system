@@ -245,6 +245,12 @@ def _manual_complete_stats(pid: int, month: Optional[str] = None,
     scheduled = 0
     manual = 0
     completion_name = db.COMPLETION_PROCESS_NAME      # 2026-11：具备验收
+    # 🔴 2026-11-12 去重：手动完成会同时写「具备验收行」+「99 痕迹行」（同一笔），
+    #    同 (plan_date, manager) 已有具备验收行时，99 行不再重复计入。
+    _comp_keys = {
+        (str(n.get("plan_date") or "")[:10], str(n.get("manager") or "").strip())
+        for n in (plans or []) if n.get("process_name") == completion_name
+    }
     for n in plans or []:
         order = int(n.get("process_order") or 0)
         is_manual_row = order == db.MANUAL_COMPLETE_ORDER
@@ -255,6 +261,10 @@ def _manual_complete_stats(pid: int, month: Optional[str] = None,
             continue
         if not is_manual_row and not (1 <= order <= 11):
             continue
+        if is_manual_row:
+            key = (str(n.get("plan_date") or "")[:10], str(n.get("manager") or "").strip())
+            if key in _comp_keys:
+                continue      # 该笔已由「具备验收」行计入，避免双倍
         qty = int((actuals.get(n.get("id"), {}) or {}).get("actual_qty", 0) or 0)
         if exclude_date and str(n.get("plan_date") or "")[:10] == exclude_date:
             qty = 0
@@ -309,7 +319,9 @@ def list_manual_completes(pid: int, month: Optional[str] = None,
 def delete_manual_complete(pid: int, node_plan_id: int, user: dict = Depends(require_admin)):
     """删除一条手动完成记录（纠正误录 / 减少已录完成套数）。（仅 admin）
 
-    只允许删 process_order=99 且属于该项目的行（排产工序行绝不会被删）；连同其实际完成量一起清理。
+    2026-11-12：删除 99 痕迹行时**级联删除同批手动补录的 11 道工序行**
+    （同项目 + order 1..11 + 同 plan_date + 同 manager；90/91 独立工序与其它日期的真排产绝不动）。
+    整体在一个事务内完成，返回 ``deleted`` = 实际删除的计划行数（1 + 被级联的 1..11 行）。
     """
     project = db.get_project_by_id(pid)
     if not project:
@@ -322,30 +334,41 @@ def delete_manual_complete(pid: int, node_plan_id: int, user: dict = Depends(req
             detail={"code": "MANUAL_COMPLETE_NOT_FOUND",
                     "message": "该手动完成记录不存在（或已被删除）"},
         )
-    return {"message": "✅ 已删除该手动完成记录", "deleted": deleted,
-            "node_plan_id": node_plan_id}
+    return {"message": "✅ 已删除该手动完成记录（并清理其补全的工序行）",
+            "deleted": deleted, "node_plan_id": node_plan_id}
 
 
 @router.post("/{pid}/manual-complete")
 def manual_complete(pid: int, payload: ManualCompleteRequest, user: dict = Depends(require_admin)):
-    """手动完成：为「提前完工但无排产计划」的项目补录完成数量（写入 99 行；判定时计入「具备验收」口径）。（仅 admin）"""
+    """手动完成：为「提前完工但无排产计划」的项目补录完成数量。（仅 admin）
+
+    2026-11-12 口径（用户：手动完成 = 整套工序都完成）：
+      - 写入 99 痕迹行（判定时计入「具备验收」完成口径，保留以便区分"排产填的/手动补的"）；
+      - **并补全 11 道调度工序的计划行 + 实际完成**（plan_date = 完成日期、plan_month = 该月）；
+      - 之后若导入排产，`insert_node_plans` 会把这些行整体覆盖掉（与现状一致）。
+    """
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     require_project_access(project, user)
 
-    # 🔴 2026-11-06 用户口径：**有排产计划的项目不再接受手动完成登记**。
-    #   「先手动完成、后又导入排产」→ 排产覆盖手动数据（导入时本就会删 99 行）；
-    #   反过来「先导入排产、后补手动完成」会让 99 行残留、与排产进度重复计算，
-    #   所以这里直接拦掉，避免用户白填。只有「从未导入排产」的项目才能手动完成。
-    _plans = db.get_node_plans(pid)
-    _has_schedule = any(1 <= int(p.get("process_order") or 0) <= 11 for p in (_plans or []))
-    if _has_schedule:
+    # 🔴 2026-11-12 用户口径：**「隔月后就不受该条件影响」** —— 只有「**本月**真的导入过排产」
+    #    才拒绝手动完成；历史上传过、本月没传 → 允许补录（用户截图场景：华润浮山 100MW）。
+    #
+    # 判据**完全复用项目列表的 `has_schedule_plan` 同一函数**（`_month_schedule_ids`）：
+    #   ① `order 1..11` 且 `plan_month = 本月` 的行（**排除手动补录行**：同 plan_date+manager 有 99 行）；
+    #   ② `schedule_imports.plan_month = 本月`（上传台账）。
+    #   → 「列表说本月未上传」⇔「这里放行」，两处永远一致，不存在第三套判断。
+    # month 取请求体（弹窗会带当前查看月份）；缺省用业务今日所在自然月，与列表默认口径一致。
+    _mth = (payload.month or "").strip()[:7] or business_today().strftime("%Y-%m")
+    _month_scheduled = pid in db.get_month_schedule_project_ids(_mth)
+    if _month_scheduled:
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "HAS_SCHEDULE_PLAN",
-                "message": "该项目已有排产计划，手动完成登记不适用（排产进度会与手动数据重复计算）",
+                "message": f"该项目 {_mth} 已上传排产计划，手动完成登记不适用（排产进度会与手动数据重复计算）；"
+                           f"其他月份不受影响",
             },
         )
 

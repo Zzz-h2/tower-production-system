@@ -1021,7 +1021,9 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
         if pn in SCHEDULE_PROCESS_NAMES
     }
     total_sets = max(per_proc_sets.values()) if per_proc_sets else 0
-    done_count = sum(1 for r in rows if r["status"] == "done")
+    # ⚠️ done_count 必须在 timeline 组装后按 timeline 统计（见下方 return）：
+    #    手动完成项目同时有 11 道工序行 + 99 痕迹行，而 99 在有排产行时不进 timeline，
+    #    若按 rows 统计会出现「node_count=11 但 done_count=12」的错位。
     overdue_count = len(compute_real_overdue(rows, monthly_plan))
 
     processes = []
@@ -1137,7 +1139,7 @@ def build_overview(project_id: int, plans: list[dict], actuals: dict, today=None
             "total_sets": total_sets,
             "process_count": len(proc_groups),
             "node_count": len(timeline),
-            "done_count": done_count,
+            "done_count": sum(1 for _r in timeline if _r.get("status") == "done"),
             "overdue_count": overdue_count,
         },
         "processes": processes,
@@ -1199,8 +1201,18 @@ def build_process_detail(process_name: str, plans: list[dict], actuals: dict, to
     else:
         exc_anchors, exc_by_node = {}, {}
     rules = build_time_rules(plans, actuals, durations, exc_anchors, today=today)
+    # 🔴 2026-11-12 用户反馈「附件安装详情弹窗出现两条完全相同的记录」：
+    #    手动完成会同时写「该工序行(order 1..11)」+「99 痕迹行(process_name 也叫『附件安装』)」，
+    #    两者都命中 `process_name` 过滤 → 弹窗里重复两条。
+    #    修法：**排除 99 痕迹行**；但老数据（只有 99、没有任何 1..11 行）必须仍能打开，
+    #    因此「排除后为空」时回退用 99 行（与 build_overview 的 has_schedule_plan 同源语义：
+    #    有真实工序行 → 用工序行；没有 → 用痕迹行）。
+    from ..core import db as _db2      # MANUAL_COMPLETE_ORDER 定义在 core/db.py
+    _matched = [r for r in plans if r["process_name"] == process_name]
+    _ordered = [r for r in _matched
+                if int(r.get("process_order") or 0) != _db2.MANUAL_COMPLETE_ORDER]
     proc_nodes = sorted(
-        (r for r in plans if r["process_name"] == process_name),
+        (_ordered if _ordered else _matched),
         key=lambda r: str(r["plan_date"]),
     )
     # 分组/展示统一使用「重算后的计划日期」（闸门开时）——与节点详情、时间轴口径一致

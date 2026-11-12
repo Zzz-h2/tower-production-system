@@ -1434,7 +1434,16 @@ def upsert_node_actual(project_id: int, node_plan_id: int, process_name: str,
 
 def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: str,
                            manager: str | None = None) -> int:
-    """手动完成：为项目写入/更新一条『附件安装』节点计划 + 实际完成。
+    """手动完成：写入 99 痕迹行 **＋ 补全 11 道调度工序（计划+实际）**，返回 99 行的 node_plan_id。
+
+    2026-11-12 用户口径（"手动完成 = 整套工序已完成"）：
+      - 11 道调度工序（SCHEDULE_PROCESS_NAMES，order 1..11）各写一行计划：
+        plan_date = 完成日期、plan_qty = 完成套数、manager = 归属负责人、
+        **plan_month = 完成日期所属月**（必须写，否则跨月视图重复出现）；
+      - 11 道工序同时写实际完成（actual_qty = 完成套数、report_date = 完成日期）；
+      - 99 行继续保留（痕迹：区分"排产填的"与"手动补的"），plan_month 仍为 NULL；
+      - 导入排产时 insert_node_plans 会删除 order 1..11 与 99 行 → 手动数据被整份覆盖（用户口径）。
+
 
     用于「提前完工但没有排产计划」的项目补录产出。语义：
     - process_name='附件安装'，process_order=99（区别于排产工序 1-11 与独立工序 90/91）
@@ -1468,8 +1477,15 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
         int: 写入/更新的 node_plan_id
     """
     complete_date = str(complete_date)[:10]
+    qty = int(complete_qty or 0)
     mgr = (str(manager).strip() if manager else None) or None
+    # 🔴 2026-11-12 用户口径：手动完成 = **整套工序都完成**
+    #    11 道调度工序行必须带 plan_month（= 完成日期所属月），否则跨月视图会重复出现；
+    #    99 行仍**刻意保持 plan_month = NULL**（它没有「排产归属月」语义，见下方说明）。
+    plan_month = complete_date[:7]
     conn = get_connection()
+    node_plan_id = 0
+    schedule_rows: list[tuple[int, str]] = []
     try:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -1477,7 +1493,7 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
                     "(project_id, process_name, process_order, plan_date, plan_qty, manager) "
                 f"VALUES (%s, %s, {MANUAL_COMPLETE_ORDER}, %s, %s, %s) "
                 "ON DUPLICATE KEY UPDATE plan_qty = VALUES(plan_qty), manager = VALUES(manager)",
-                (project_id, "附件安装", complete_date, int(complete_qty or 0), mgr),
+                (project_id, "附件安装", complete_date, qty, mgr),
             )
             node_plan_id = cursor.lastrowid
             if not node_plan_id:
@@ -1492,12 +1508,41 @@ def upsert_manual_complete(project_id: int, complete_qty: int, complete_date: st
                 )
                 row = cursor.fetchone()
                 node_plan_id = row['id'] if row else 0
+
+            # ---- 补全 11 道调度工序（计划 + 实际，2026-11-12）----
+            # 顺序/命名严格取 SCHEDULE_PROCESS_NAMES（= 排产模板列序），不手写字符串。
+            for idx, pname in enumerate(SCHEDULE_PROCESS_NAMES, start=1):
+                cursor.execute(
+                    "INSERT INTO process_node_plans "
+                        "(project_id, process_name, process_order, plan_date, plan_qty, "
+                        " manager, plan_month) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                    "ON DUPLICATE KEY UPDATE plan_qty = VALUES(plan_qty), "
+                    "  manager = VALUES(manager), plan_month = VALUES(plan_month)",
+                    (project_id, pname, idx, complete_date, qty, mgr, plan_month),
+                )
+                rid = cursor.lastrowid
+                if not rid:
+                    # UPDATE 分支 → 按唯一键回查（uk_proj_proc_date_mgr 含 plan_month_key）
+                    cursor.execute(
+                        "SELECT id FROM process_node_plans "
+                        "WHERE project_id=%s AND process_name=%s AND plan_date=%s "
+                        "  AND manager <=> %s AND plan_month <=> %s LIMIT 1",
+                        (project_id, pname, complete_date, mgr, plan_month),
+                    )
+                    r = cursor.fetchone()
+                    rid = r['id'] if r else 0
+                if rid:
+                    schedule_rows.append((int(rid), pname))
             conn.commit()
     finally:
         conn.close()
 
-    upsert_node_actual(project_id, node_plan_id, "附件安装",
-                       int(complete_qty or 0), complete_date)
+    # 99 行实际（痕迹行，必须保留：用于区分「排产填的」与「手动补的」）
+    upsert_node_actual(project_id, node_plan_id, "附件安装", qty, complete_date, mgr)
+    # 11 道工序实际完成（同日期、同负责人）
+    for rid, pname in schedule_rows:
+        upsert_node_actual(project_id, rid, pname, qty, complete_date, mgr)
     return node_plan_id
 
 
@@ -1531,19 +1576,68 @@ def get_manual_completes(project_id: int, month: str | None = None) -> list[dict
 
 
 def delete_manual_complete(project_id: int, node_plan_id: int) -> int:
-    """删除一条「手动完成」记录及其实际完成量（用于纠正误录 / 减少已录成套数）。
+    """删除一条「手动完成」记录，**并级联删除同批手动补录的 11 道工序行**（2026-11-12 用户口径）。
 
-    安全约束（防止误删排产计划行）：
-      - 只允许删除 ``process_order = MANUAL_COMPLETE_ORDER(99)`` 且属于该项目的行；
-      - 先删计划行（带上述约束），**确实删到了**才继续清理它的 node_actual_progress
-        （该表无 FK，手工清理避免孤儿行）；node_segment_progress 由 FK CASCADE 自动清理。
+    背景：手动完成现在会同时写「99 痕迹行 + 11 道调度工序行（计划+实际）」。
+    只删 99 会让 11 道行残留 → 出现「记录删了但时间轴仍 11 道全绿」的假象。
+
+    删除范围（🔴 三个条件**同时**满足才删，避免误删真排产）：
+      ① ``project_id`` 相同；
+      ② ``process_order BETWEEN 1 AND 11``（**绝不碰 90/91 独立工序**）；
+      ③ ``plan_date = 99行的 plan_date`` **且** ``manager <=> 99行的 manager``（NULL 安全比较）。
+    即：只删「与这条手动完成同日、同负责人」的那一批手动生成行。
+
+    顺序：先删这批行的 ``node_actual_progress``（该表无 FK，手工清理避免孤儿行），
+    再删计划行；最后删 99 行及其 actual。全过程**同一连接、同一事务**，
+    异常时 rollback（要么全删、要么一条都不删，不会出现「11 道删了 99 没删」的中间态）。
+
+    Args:
+        project_id: 项目 ID
+        node_plan_id: 99 痕迹行的 id
 
     Returns:
-        int: 实际删除的计划行数（0 = 不存在 / 不属于该项目 / 不是手动完成行）
+        int: 实际删除的**计划行数**（99 行 + 被级联的 1..11 行；0 = 不存在/不属于该项目/不是 99 行）
     """
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
+            # ① 定位 99 行（不存在 → 直接 0，不产生任何写操作）
+            cursor.execute(
+                "SELECT id, plan_date, manager FROM process_node_plans "
+                "WHERE id = %s AND project_id = %s AND process_order = %s",
+                (int(node_plan_id), int(project_id), MANUAL_COMPLETE_ORDER),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return 0
+            plan_date = row["plan_date"]
+            manager = row["manager"]
+
+            # ② 找出同批手动补录的 1..11 行（三个条件同时卡）
+            cursor.execute(
+                "SELECT id FROM process_node_plans "
+                "WHERE project_id = %s AND process_order BETWEEN %s AND %s "
+                "  AND plan_date = %s AND manager <=> %s",
+                (int(project_id), SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX, plan_date, manager),
+            )
+            batch_ids = [int(r["id"]) for r in cursor.fetchall()]
+            cascade = 0
+            if batch_ids:
+                ph = ", ".join(["%s"] * len(batch_ids))
+                # 先清实际完成（无 FK，避免孤儿行）
+                cursor.execute(
+                    f"DELETE FROM node_actual_progress WHERE project_id = %s AND node_plan_id IN ({ph})",
+                    (int(project_id), *batch_ids),
+                )
+                # 再删计划行（再次带 order 1..11 约束，双保险）
+                cursor.execute(
+                    f"DELETE FROM process_node_plans WHERE project_id = %s AND id IN ({ph}) "
+                    f"  AND process_order BETWEEN %s AND %s",
+                    (int(project_id), *batch_ids, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX),
+                )
+                cascade = int(cursor.rowcount or 0)
+
+            # ③ 删 99 行及其 actual
             cursor.execute(
                 "DELETE FROM process_node_plans "
                 "WHERE id = %s AND project_id = %s AND process_order = %s",
@@ -1557,7 +1651,14 @@ def delete_manual_complete(project_id: int, node_plan_id: int) -> int:
                     (int(project_id), int(node_plan_id)),
                 )
             conn.commit()
-            return deleted
+            return deleted + cascade
+    except Exception:
+        # 一致性兜底：任一步失败 → 整批回滚（不留「删了一半」的中间态）
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
@@ -2021,10 +2122,17 @@ def get_attachment_plans_by_month(month_start: str, month_end: str, month: str |
                        p.delivery_person
                 FROM process_node_plans pnp
                 JOIN projects p ON pnp.project_id = p.id
-                WHERE (pnp.process_name = %s OR pnp.process_order = %s)
+                WHERE (pnp.process_name = %s
+                       OR (pnp.process_order = %s AND NOT EXISTS (
+                             SELECT 1 FROM process_node_plans c
+                             WHERE c.project_id = pnp.project_id
+                               AND c.process_name = %s
+                               AND c.plan_date = pnp.plan_date
+                               AND c.manager <=> pnp.manager)))
                   AND pnp.plan_date >= %s AND pnp.plan_date < %s
             """
-            params: list = [COMPLETION_PROCESS_NAME, MANUAL_COMPLETE_ORDER, month_start, month_end]
+            params: list = [COMPLETION_PROCESS_NAME, MANUAL_COMPLETE_ORDER,
+                            COMPLETION_PROCESS_NAME, month_start, month_end]
             if month:
                 sql += " AND DATE_FORMAT(p.created_at, '%%Y-%%m') = %s"
                 params.append(month)
@@ -2223,7 +2331,9 @@ def get_ranking_manager_rows_by_month(month: str,
                                 " AS today_actual")
                 today_arg.append(str(today)[:10])
             #    ⚠️ 占位符顺序必须与 SQL 文本一致：today_select → pids → 完成口径常量 → 月份作用域
-            actual_args: list = today_arg + list(pids) + [COMPLETION_PROCESS_NAME, MANUAL_COMPLETE_ORDER]
+            actual_args: list = (today_arg + list(pids)
+                                 + [COMPLETION_PROCESS_NAME, MANUAL_COMPLETE_ORDER,
+                                    COMPLETION_PROCESS_NAME])
             actual_month_sql = _month_scope("pnp.", month, actual_args)
             cur.execute(f"""
                 SELECT pnp.project_id, pnp.manager, SUM(nap.actual_qty) AS total_actual
@@ -2231,7 +2341,13 @@ def get_ranking_manager_rows_by_month(month: str,
                 FROM process_node_plans pnp
                 JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id
                 WHERE pnp.project_id IN ({ph})
-                  AND (pnp.process_name = %s OR pnp.process_order = %s)
+                  AND (pnp.process_name = %s
+                       OR (pnp.process_order = %s AND NOT EXISTS (
+                             SELECT 1 FROM process_node_plans c
+                             WHERE c.project_id = pnp.project_id
+                               AND c.process_name = %s
+                               AND c.plan_date = pnp.plan_date
+                               AND c.manager <=> pnp.manager)))
                   AND pnp.manager IS NOT NULL
                   {actual_month_sql}
                 GROUP BY pnp.project_id, pnp.manager
@@ -2317,7 +2433,12 @@ def get_ranking_summary_by_month(month: str, big_area_person: str | None = None)
                     FROM projects p
                     JOIN process_node_plans pnp ON pnp.project_id = p.id
                          AND (pnp.process_name = '{COMPLETION_PROCESS_NAME}'
-                              OR pnp.process_order = {MANUAL_COMPLETE_ORDER})
+                              OR (pnp.process_order = {MANUAL_COMPLETE_ORDER} AND NOT EXISTS (
+                                    SELECT 1 FROM process_node_plans c
+                                    WHERE c.project_id = pnp.project_id
+                                      AND c.process_name = '{COMPLETION_PROCESS_NAME}'
+                                      AND c.plan_date = pnp.plan_date
+                                      AND c.manager <=> pnp.manager)))
                     JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id
                     WHERE DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
                       AND p.delivery_person IS NOT NULL AND TRIM(p.delivery_person) <> ''

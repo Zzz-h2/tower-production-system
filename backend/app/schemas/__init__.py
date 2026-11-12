@@ -68,6 +68,9 @@ class ManualCompleteRequest(BaseModel):
     complete_qty: int
     complete_date: str
     manager: Optional[str] = None
+    # 2026-11-12：当前查看的排产归属月（'YYYY-MM'）。用于「本月是否已上传排产」的守卫；
+    # 缺省 = 业务今日所在自然月（与项目列表默认口径一致）。
+    month: Optional[str] = None
 
 
 # ---------- 按段填报（v7.1 行级化） ----------

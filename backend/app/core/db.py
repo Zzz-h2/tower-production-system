@@ -405,9 +405,10 @@ def get_manual_completes(project_id: int, month: str | None = None) -> list[dict
 
 @_invalidates_dashboard
 def delete_manual_complete(project_id: int, node_plan_id: int) -> int:
-    """删除一条手动完成记录（99 占位行）及其实际完成量（纠正/减少套数用）。
+    """删除一条手动完成记录（99 占位行）**并级联删除同批手动补录的 11 道工序行**。
 
-    只允许删 process_order=99 且属于该项目的行，返回实际删除行数（0=未命中）。
+    只允许删 process_order=99 且属于该项目的行；级联条件 = 同项目 + order 1..11 +
+    同 plan_date + 同 manager（NULL 安全）。返回实际删除的计划行数（0=未命中）。
     """
     from database import delete_manual_complete as _fn
     return getattr(_fn, "__wrapped__", _fn)(project_id, node_plan_id)
@@ -664,6 +665,57 @@ def get_dispatch_months() -> list:
 
 # ---------- 项目列表：搜索/筛选 + 服务端分页 ----------
 
+def _month_schedule_ids(cur, month: str) -> set[int]:
+    """本月「**真实导入过排产**」的项目 id 集合（**唯一判据**，2026-11-12）。
+
+    口径（项目列表 `has_schedule_plan` 与「手动完成是否允许」共用这一份，绝不另写第三套）：
+      ① ``process_node_plans`` 里 ``order 1..11`` 且 ``plan_month = month`` 的行；
+         但**排除手动补录**：同 (project_id, plan_date, manager) 存在 99 痕迹行的 1..11 行
+         是「手动完成补全出来的」，不算上传；
+      ② ``schedule_imports.plan_month = month``（上传台账，最强证据）。
+
+    参数是**已打开的 cursor**（供 `get_projects_filtered` 复用同一连接，不额外开连接）。
+
+    Returns:
+        set[int]: 本月真实导入过排产的项目 id
+    """
+    ids: set[int] = set()
+    if not month:
+        return ids
+    cur.execute(
+        "SELECT DISTINCT x.project_id FROM process_node_plans x "
+        "WHERE x.plan_month = %s AND x.process_order BETWEEN %s AND %s "
+        "  AND NOT EXISTS ("
+        "      SELECT 1 FROM process_node_plans c "
+        "      WHERE c.project_id = x.project_id "
+        "        AND c.process_order = %s "
+        "        AND c.plan_date = x.plan_date "
+        "        AND c.manager <=> x.manager)",
+        (month, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX, MANUAL_COMPLETE_ORDER),
+    )
+    ids |= {int(r["project_id"]) for r in cur.fetchall()}
+    cur.execute(
+        "SELECT DISTINCT project_id FROM schedule_imports WHERE plan_month = %s",
+        (month,),
+    )
+    ids |= {int(r["project_id"]) for r in cur.fetchall()}
+    return ids
+
+
+def get_month_schedule_project_ids(month: str) -> set[int]:
+    """本月真实导入过排产的项目 id 集合（对外入口；内部复用 ``_month_schedule_ids``）。
+
+    用途：``POST /api/projects/{pid}/manual-complete`` 的守卫 —— 让「列表说本月未上传」
+    与「允许手动完成」永远一致（同一个函数、同一套 SQL）。
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            return _month_schedule_ids(cur, month)
+    finally:
+        conn.close()
+
+
 def get_projects_filtered(keyword: str | None = None, person: str | None = None,
                           status: str | None = None, skip: int = 0, limit: int = 10,
                           month: str | None = None, big_area_person: str | None = None,
@@ -782,19 +834,10 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
             )
             has_schedule_ids = {int(r["project_id"]) for r in cur.fetchall()}
 
-            month_schedule_ids: set[int] = set()
-            if month:
-                cur.execute(
-                    "SELECT DISTINCT project_id FROM process_node_plans "
-                    "WHERE plan_month = %s AND process_order BETWEEN %s AND %s",
-                    (month, SCHEDULE_ORDER_MIN, SCHEDULE_ORDER_MAX),
-                )
-                month_schedule_ids |= {int(r["project_id"]) for r in cur.fetchall()}
-                cur.execute(
-                    "SELECT DISTINCT project_id FROM schedule_imports WHERE plan_month = %s",
-                    (month,),
-                )
-                month_schedule_ids |= {int(r["project_id"]) for r in cur.fetchall()}
+            # 🔴 2026-11-12：判据抽到 `_month_schedule_ids`（唯一来源），
+            #    同时供 `get_month_schedule_project_ids`（手动完成守卫）复用，
+            #    保证「列表说本月未上传」⇔「允许手动完成」永远一致。
+            month_schedule_ids: set[int] = _month_schedule_ids(cur, month) if month else set()
 
             # 「上次上传：X月」提示源（同一连接内取，不额外开连接）
             cur.execute(
@@ -867,10 +910,20 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         # 整体进度：取「具备验收」工序进度（2026-11 口径由「附件安装」改为「具备验收」）
         # 🔴 手动完成占位行（process_order=99，process_name 仍是「附件安装」）必须一并计入：
         #    它是「提前完工但无排产计划」的补录凭据，排除会让纯手动项目进度恒为 0。
+        # 🔴 2026-11-12：手动完成现在会同时写「11 道工序行（含具备验收）」+「99 痕迹行」，
+        #    两者代表同一笔完成量。若都计入会**双倍计数**（completed_sets=2×套数、remaining 少算）。
+        #    去重规则：同 (plan_date, manager) 已存在「具备验收」行时，99 行不再重复计入；
+        #    老数据（只有 99、没有 11 行）仍照常计入。
+        _comp_keys = {
+            (str(n.get("plan_date") or "")[:10], str(n.get("manager") or "").strip())
+            for n in plans if n.get("process_name") == COMPLETION_PROCESS_NAME
+        }
         comp_plans = [
             n for n in plans
             if n.get("process_name") == COMPLETION_PROCESS_NAME
-            or int(n.get("process_order") or 0) == MANUAL_COMPLETE_ORDER
+            or (int(n.get("process_order") or 0) == MANUAL_COMPLETE_ORDER
+                and (str(n.get("plan_date") or "")[:10], str(n.get("manager") or "").strip())
+                not in _comp_keys)
         ]
         att_plan_qty = sum(int(n["plan_qty"] or 0) for n in comp_plans)
         att_actual_qty = sum(

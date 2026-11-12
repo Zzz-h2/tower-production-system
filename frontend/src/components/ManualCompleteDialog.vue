@@ -42,7 +42,8 @@
         合同总数 <b>{{ summary.contract_count }}</b> 套 · 已完成 <b>{{ summary.completed_sets }}</b> 套 · 剩余未完成 <b>{{ summary.remaining_sets }}</b> 套
       </div>
       <div class="mc-hint">
-        完成套数计入该项目「完成套数」统计（2026-11 起完成判定工序为「具备验收」，手动完成同样计入），并同步刷新进度与排名。<br/>
+        提交后会**自动补全 11 道工序为已完成**（计划日与完成日 = 所选日期、验收工序计划日 = 当日、实际完成 = 本次套数），详情页时间轴将显示整套工序全部完成；同时计入「完成套数」统计并刷新进度与排名。<br/>
+        若之后导入该月排产计划，以导入内容为准，手动补录的工序行会被整体覆盖（与现有逻辑一致）。<br/>
         <b>同一天重复提交 = 覆盖该日记录</b>（想减少已录成套数：点下方记录的「修改」把套数改小，或直接「删除」整条）。
       </div>
 
@@ -89,11 +90,15 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { manualComplete, fetchManualCompletes, deleteManualComplete } from '../api/node'
+import { useProjectStore } from '../store/project'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   project: { type: Object, default: null },
 })
+
+// 2026-11-12：把当前查看月份带给后端守卫（「本月是否已上传排产」按月判断）
+const store = useProjectStore()
 const emit = defineEmits(['update:modelValue', 'completed'])
 
 // 本地时区「今天」（勿用 toISOString，东八区凌晨会偏前一天）
@@ -223,6 +228,8 @@ async function submit() {
     const payload = {
       complete_qty: form.value.qty,
       complete_date: form.value.date,
+      // 2026-11-12：带上当前查看的排产归属月（后端据此判断「本月是否已上传排产」）
+      month: store.filters.month || undefined,
     }
     // 多负责人项目：显式带上选择的负责人，否则后端按 400 拒绝
     if (managers.value.length > 1 && form.value.manager) {
