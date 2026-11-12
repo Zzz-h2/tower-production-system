@@ -1,6 +1,6 @@
 import http from './index'
 
-// 出品排名：按交付负责人聚合当月『附件安装』出品数据
+// 出品排名：按交付负责人聚合当月完成数据（完成判定工序 2026-11 起 = 具备验收）
 export const fetchProductionRanking = (month) =>
   http.get('/ranking/production', { params: { month } })
 

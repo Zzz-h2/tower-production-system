@@ -36,6 +36,12 @@ SCHEDULE_ORDER_MAX = len(SCHEDULE_PROCESS_NAMES)
 # 必须靠 process_order 与排产工序（1..11）、独立工序（90/91）区分。
 MANUAL_COMPLETE_ORDER = 99
 
+# 「完成」判定工序（2026-11 由「附件安装」改为「具备验收」）。
+# ⚠️ 这里是 SQL 层的镜像定义：database.py 位于下层，不能反向 import backend 包，
+#    因此与 backend/app/core/config.py 的 COMPLETION_PROCESS_NAME **两处定义、值必须一致**。
+#    改口径时两处同时改；上层（路由/服务）一律读 core/config 的那一份。
+COMPLETION_PROCESS_NAME = "具备验收"
+
 
 def _month_scope(alias: str, month: str | None, args: list,
                  with_manual_order: bool = True) -> str:
@@ -1995,7 +2001,11 @@ def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
 
 def get_attachment_plans_by_month(month_start: str, month_end: str, month: str | None = None,
                                   big_area_person: str | None = None) -> list[dict]:
-    """取某月内所有『附件安装』工序节点计划（出品排名统计源）。
+    """取某月内所有『具备验收』工序节点计划（＋手动完成 99 行；出品排名统计源）。
+
+    2026-11 口径变更：完成判定工序由「附件安装」改为「具备验收」（COMPLETION_PROCESS_NAME）；
+    手动完成占位行（process_order=99）虽仍叫「附件安装」，但它是补录凭据，必须一并取出。
+    
 
     month 传入时约束项目 created_at 月份（调度令月份口径，三页联动一致），并带回 delivery_person。
     big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
@@ -2011,10 +2021,10 @@ def get_attachment_plans_by_month(month_start: str, month_end: str, month: str |
                        p.delivery_person
                 FROM process_node_plans pnp
                 JOIN projects p ON pnp.project_id = p.id
-                WHERE pnp.process_name = '附件安装'
+                WHERE (pnp.process_name = %s OR pnp.process_order = %s)
                   AND pnp.plan_date >= %s AND pnp.plan_date < %s
             """
-            params: list = [month_start, month_end]
+            params: list = [COMPLETION_PROCESS_NAME, MANUAL_COMPLETE_ORDER, month_start, month_end]
             if month:
                 sql += " AND DATE_FORMAT(p.created_at, '%%Y-%%m') = %s"
                 params.append(month)
@@ -2137,7 +2147,7 @@ def get_ranking_manager_rows_by_month(month: str,
         若 delivery_person 为空/脏数据，则回退为原样单人（保持旧行为，不丢数据）。
       - total_plan：该负责人申报的本月计划数（project_manager_plans.monthly_plan）；
         单人项目且未申报时，回退用项目本月计划数（向后兼容旧数据）。
-      - total_actual：该负责人名下『附件安装』工序实际完成量之和（按 pnp.manager 归属）。
+      - total_actual：该负责人名下『具备验收』实际完成量之和（2026-11 口径；手动完成 99 行同样计入）。
       - today_actual（v7.8）：其中「最后一次填报日期 = today」那部分实际完成量之和，
         即该 (项目 × 负责人) 今日新增的完成套数（供前端 ↑ 箭头提示）。`today` 为 None →
         该字段恒为 0（行为与改动前完全一致，不影响任何既有数字/口径）。
@@ -2197,9 +2207,12 @@ def get_ranking_manager_rows_by_month(month: str,
             for r in cur.fetchall():
                 declared[(int(r["project_id"]), str(r["manager"]).strip())] = int(r["monthly_plan"] or 0)
 
-            # 3) 各负责人名下『附件安装』实际完成量
+            # 3) 各负责人名下『具备验收』实际完成量（2026-11 口径；含手动完成 99 行）
+            #    判定条件 = process_name == COMPLETION_PROCESS_NAME **OR** process_order == 99：
+            #    99 行是「提前完工但无排产计划」的补录凭据（其 process_name 仍是「附件安装」），
+            #    排除它会让纯手动完成的项目在排名里显示 0 套。
             #    v7.4：叠加排产归属月作用域（该月 ∪ 未标注月），避免其他月份导入的
-            #    「附件安装」行与手动完成占位行共同存在时把完成量重复计入。
+            #    同名工序行与手动完成占位行共同存在时把完成量重复计入。
             #    v7.8：同一条 SQL 附带算出「今日新增」（report_date = today 的那部分），
             #    保证今日增量与被统计范围（项目集合 / 月份作用域 / 工序 / 负责人归属）完全一致。
             #    ⚠️ 占位符顺序：CASE 在 SELECT 列表里 → 它的参数必须排在最前（pids / 月份之后不成立）。
@@ -2209,7 +2222,8 @@ def get_ranking_manager_rows_by_month(month: str,
                 today_select = (", SUM(CASE WHEN nap.report_date = %s THEN nap.actual_qty ELSE 0 END)"
                                 " AS today_actual")
                 today_arg.append(str(today)[:10])
-            actual_args: list = today_arg + list(pids)
+            #    ⚠️ 占位符顺序必须与 SQL 文本一致：today_select → pids → 完成口径常量 → 月份作用域
+            actual_args: list = today_arg + list(pids) + [COMPLETION_PROCESS_NAME, MANUAL_COMPLETE_ORDER]
             actual_month_sql = _month_scope("pnp.", month, actual_args)
             cur.execute(f"""
                 SELECT pnp.project_id, pnp.manager, SUM(nap.actual_qty) AS total_actual
@@ -2217,7 +2231,7 @@ def get_ranking_manager_rows_by_month(month: str,
                 FROM process_node_plans pnp
                 JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id
                 WHERE pnp.project_id IN ({ph})
-                  AND pnp.process_name = '附件安装'
+                  AND (pnp.process_name = %s OR pnp.process_order = %s)
                   AND pnp.manager IS NOT NULL
                   {actual_month_sql}
                 GROUP BY pnp.project_id, pnp.manager
@@ -2268,7 +2282,7 @@ def get_ranking_summary_by_month(month: str, big_area_person: str | None = None)
     口径（与「生产进度总览」页面联动一致）：
     - 累计计划套数 total_plan = SUM(projects.monthly_plan)（项目级「本月计划出品」之和，
       对应生产进度总览页面各项目「本月计划」列的总和）
-    - 累计完成套数 total_actual = SUM(附件安装工序节点 actual_qty)（名下项目附件安装实际完成量）
+    - 累计完成套数 total_actual = SUM(具备验收节点 actual_qty + 手动完成 99 行 actual_qty)（2026-11 口径）
     - project_count = 当月项目数
 
     big_area_person 非 None 时追加 ``AND p.big_area_person = %s``（大区行级隔离）。
@@ -2302,7 +2316,8 @@ def get_ranking_summary_by_month(month: str, big_area_person: str | None = None)
                     SELECT p.delivery_person, SUM(nap.actual_qty) AS total_actual
                     FROM projects p
                     JOIN process_node_plans pnp ON pnp.project_id = p.id
-                         AND pnp.process_name = '附件安装'
+                         AND (pnp.process_name = '{COMPLETION_PROCESS_NAME}'
+                              OR pnp.process_order = {MANUAL_COMPLETE_ORDER})
                     JOIN node_actual_progress nap ON nap.node_plan_id = pnp.id
                     WHERE DATE_FORMAT(p.created_at, '%%Y-%%m') = %s
                       AND p.delivery_person IS NOT NULL AND TRIM(p.delivery_person) <> ''

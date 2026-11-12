@@ -190,7 +190,7 @@
         <!-- 整体进度：宽度 180 → 210（原宽度下「进度条 + 百分比」溢出使 100.0% 换行）
              2026-11：加 el-tooltip —— 悬停显示「已完成 X 套 / 计划 Y 套」。
              X = completed_sets（已完成套数）；Y = monthly_plan（列表「本月计划」列同源，用户指定口径）。
-             注意 Y 是调度令口径、与进度百分比分母（att_plan_qty 附件安装工序口径）不同源，
+             注意 Y 是调度令口径、与进度百分比分母（att_plan_qty 具备验收工序口径）不同源，
              X/Y 可能 ≠ 进度百分比 —— 用户知情选择，详见 progressTip() 注释，勿当 bug 改回。 -->
         <el-table-column label="整体进度" width="210" align="center">
           <template #default="{ row }">
@@ -490,8 +490,8 @@ const progressColor = [
  *   - X = row.completed_sets —— 已完成套数（后端列表聚合 att_actual_qty 原值）；
  *   - Y = row.monthly_plan —— **列表「本月计划」列的值**（调度令口径）。
  *     用户明确要求 Y 必须与「本月计划」列一致，因此 X/Y 与进度百分比的分母
- *     （att_plan_qty，附件安装工序口径）**不同源**，可能出现 X/Y ≠ 进度百分比
- *     （如 id=170：已完成 1 / 计划 4 = 25%，但进度条按 1/6 附件安装口径显示 16.7%）。
+ *     （att_plan_qty，具备验收工序口径）**不同源**，可能出现 X/Y ≠ 进度百分比
+ *     （如 id=170：已完成 1 / 计划 4 = 25%，但进度条按 1/6 具备验收口径显示 16.7%）。
  *     这是用户知情选择的口径，不是 bug。
  *   - 后端 att_plan_qty 字段仍照常返回（db.py 聚合处未删），只是本 tooltip 不再使用。
  *

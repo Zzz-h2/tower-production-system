@@ -11,7 +11,8 @@ from typing import Any, Callable
 
 from .cache import TTLCache
 from .db_pool import get_connection as _pooled_get_connection
-from .config import MYSQL_CONFIG, SCHEDULE_PROCESS_NAMES  # MYSQL_CONFIG 仍对外 re-export（脚本/排障会 `db.MYSQL_CONFIG`）
+from .config import (COMPLETION_PROCESS_NAME, MYSQL_CONFIG,
+                   SCHEDULE_PROCESS_NAMES)  # MYSQL_CONFIG 仍对外 re-export（脚本/排障会 `db.MYSQL_CONFIG`）
 from .timeutil import business_today
 
 logger = logging.getLogger(__name__)
@@ -131,13 +132,13 @@ def get_node_actuals_batch(project_ids: list[int]) -> dict[int, dict]:
 
 def get_attachment_plans_by_month(month_start: str, month_end: str, month: str | None = None,
                                   big_area_person: str | None = None) -> list[dict]:
-    """取某月内所有『附件安装』工序节点计划（出品排名统计源；month 约束项目 created_at 月份）。"""
+    """取某月内所有『具备验收』工序节点计划（＋手动完成 99 行；出品排名统计源）。"""
     from database import get_attachment_plans_by_month as _fn
     return getattr(_fn, "__wrapped__", _fn)(month_start, month_end, month, big_area_person)
 
 
 def get_ranking_summary_by_month(month: str, big_area_person: str | None = None) -> list[dict]:
-    """出品排名总览聚合：累计计划套数=SUM(monthly_plan)；累计完成套数=SUM(附件安装 actual)。"""
+    """出品排名总览聚合：累计计划套数=SUM(monthly_plan)；累计完成套数=SUM(具备验收 actual ＋ 手动完成 99 行 actual)。"""
     from database import get_ranking_summary_by_month as _fn
     return getattr(_fn, "__wrapped__", _fn)(month, big_area_person)
 
@@ -863,12 +864,18 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
             has_warning_exception=_has_warning_exc,
         )
 
-        # 整体进度：取「附件安装」工序进度
-        att_plans = [n for n in plans if n["process_name"] == "附件安装"]
-        att_plan_qty = sum(int(n["plan_qty"] or 0) for n in att_plans)
+        # 整体进度：取「具备验收」工序进度（2026-11 口径由「附件安装」改为「具备验收」）
+        # 🔴 手动完成占位行（process_order=99，process_name 仍是「附件安装」）必须一并计入：
+        #    它是「提前完工但无排产计划」的补录凭据，排除会让纯手动项目进度恒为 0。
+        comp_plans = [
+            n for n in plans
+            if n.get("process_name") == COMPLETION_PROCESS_NAME
+            or int(n.get("process_order") or 0) == MANUAL_COMPLETE_ORDER
+        ]
+        att_plan_qty = sum(int(n["plan_qty"] or 0) for n in comp_plans)
         att_actual_qty = sum(
             int(actuals.get(n["id"], {}).get("actual_qty", 0) or 0)
-            for n in att_plans
+            for n in comp_plans
         )
         p["progress_pct"] = float(round(att_actual_qty / att_plan_qty * 100, 1)) if att_plan_qty else 0.0
 
@@ -877,7 +884,7 @@ def get_projects_filtered(keyword: str | None = None, person: str | None = None,
         # v7.5（2026-11）：把「整体进度」的分母一并返回，前端进度条 hover 展示
         #   「已完成 X 套 / 本月计划 Y 套」，X/Y 与 progress_pct **同源同分母**，
         #   保证 100% ↔ X==Y、16.7% ↔ 1/6，用户不会再看到「3/25 却是满条」的口径错位。
-        # 注意：此处必须用 att_plan_qty（附件安装计划合计），**不是** contract_count
+        # 注意：此处必须用 att_plan_qty（具备验收计划合计；字段名为兼容旧前端保留），**不是** contract_count
         #   （合同总数）也不是 monthly_plan（本月计划出品，语义不同）——三者不可互换。
         p["att_plan_qty"] = att_plan_qty
         # 剩余口径：contract_count = 项目总数（用户口径 2026-08-31 澄清）；

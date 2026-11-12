@@ -13,7 +13,7 @@
           @change="load"
         />
         <el-button type="primary" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-        <span class="hint">统计口径：多负责人按单人分别排名；累计计划套数=各负责人申报的本月计划数之和；累计完成套数=附件安装实际完成；完成率=累计完成套数÷累计计划套数×100%；按调度令月份归类</span>
+        <span class="hint">统计口径：多负责人按单人分别排名；累计计划套数=各负责人申报的本月计划数之和；累计完成套数=具备验收实际完成（含手动完成补录）；完成率=累计完成套数÷累计计划套数×100%；按调度令月份归类</span>
       </div>
     </div>
 
@@ -310,7 +310,7 @@ const fmtQty = (v) => (v === null || v === undefined ? '0' : Number(v).toLocaleS
 const rateColor = (rate) => (rate >= 100 ? '#38a169' : rate < 60 ? '#e53e3e' : '#ed8936')
 
 // ── 今日新增（v7.8）：后端 /ranking/production 返回 today_increment + today ──
-// today_increment = 该负责人名下『附件安装』中「最后一次填报日期 = 业务今日」的实际完成量之和；
+// today_increment = 该负责人名下「完成判定工序（2026-11=具备验收）」中「最后一次填报日期 = 业务今日」的实际完成量之和；
 // > 0 才在「累计完成套数」旁显示 ↑（无新增保持简洁，不给每条都挂箭头）。
 const todayIncrement = (row) => {
   const n = Number(row?.today_increment)

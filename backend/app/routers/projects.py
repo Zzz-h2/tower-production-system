@@ -71,7 +71,7 @@ def list_projects(
 def export_projects(month: Optional[str] = None, user: dict = Depends(get_current_user)):
     """导出指定调度令月份计划完成情况（全量，不分页）。
 
-    口径与列表/KPI 完全一致：按 projects.created_at 年月过滤，进度为附件安装实时完成率。
+    口径与列表/KPI 完全一致：按 projects.created_at 年月过滤，进度为「具备验收」实时完成率（2026-11 起）。
     行级隔离：big_area 用户导出仅本大区；admin 导出全量。
     """
     scope = get_scope_big_area(user)
@@ -227,9 +227,10 @@ def _manual_complete_stats(pid: int, month: Optional[str] = None,
     """手动完成弹窗与保存校验**共用**的完成量统计（2026-11-06 统一口径）。
 
     口径说明（重要）：
-      - 只统计 ``process_name == '附件安装'`` 的行，但**按 process_order 区分来源**：
-        · ``1..11`` → 排产行的实际完成量（``scheduled``）；
-        · ``99``    → 手动完成占位行的数量（``manual``，这块**必须计入**：
+      - 只统计「完成判定工序」（2026-11 起为 ``具备验收``；常量见 ``core/config.COMPLETION_PROCESS_NAME``），
+        并**按 process_order 区分来源**：
+        · ``具备验收``（1..11）→ 排产行的实际完成量（``scheduled``）；
+        · ``99`` 手动完成占位行 → ``manual``（其 process_name 仍是「附件安装」，但**必须计入**：
           它本身就是「手动补录的已完成套数」，排除会让纯手动项目恒显示 0 套）；
       - ``month`` 非空 → 只统计该月：排产行按 plan_month、99 行按 plan_date 月份
         （由 ``get_node_plans(pid, None, month)`` 统一处理）；
@@ -243,11 +244,15 @@ def _manual_complete_stats(pid: int, month: Optional[str] = None,
     actuals = db.get_node_actuals(pid)
     scheduled = 0
     manual = 0
+    completion_name = db.COMPLETION_PROCESS_NAME      # 2026-11：具备验收
     for n in plans or []:
-        if str(n.get("process_name") or "") != "附件安装":
-            continue
         order = int(n.get("process_order") or 0)
         is_manual_row = order == db.MANUAL_COMPLETE_ORDER
+        # 完成来源只有两类：
+        #   ① 排产来源 = 「具备验收」工序行（2026-11 由「附件安装」改口径）；
+        #   ② 手动来源 = process_order=99 的补录行（process_name 仍是「附件安装」）。
+        if not is_manual_row and str(n.get("process_name") or "") != completion_name:
+            continue
         if not is_manual_row and not (1 <= order <= 11):
             continue
         qty = int((actuals.get(n.get("id"), {}) or {}).get("actual_qty", 0) or 0)
@@ -268,7 +273,7 @@ def list_manual_completes(pid: int, month: Optional[str] = None,
     返回：
       items            [{node_plan_id, plan_date, plan_qty, actual_qty, manager, report_date}]
       contract_count   合同总数
-      completed_sets   已完成套数（全部「附件安装」实际完成量合计，与保存时的上限口径一致）
+      completed_sets   当月已完成套数（「具备验收」＋ 手动完成 99 行，与保存时的上限口径一致）
       remaining_sets   剩余未完成套数
 
     排产按月隔离（2026-10-10）：99 占位行无排产归属月，按 **完成时间(plan_date)所在月** 归属；
@@ -323,7 +328,7 @@ def delete_manual_complete(pid: int, node_plan_id: int, user: dict = Depends(req
 
 @router.post("/{pid}/manual-complete")
 def manual_complete(pid: int, payload: ManualCompleteRequest, user: dict = Depends(require_admin)):
-    """手动完成：为「提前完工但无排产计划」的项目补录『附件安装』完成数量。（仅 admin）"""
+    """手动完成：为「提前完工但无排产计划」的项目补录完成数量（写入 99 行；判定时计入「具备验收」口径）。（仅 admin）"""
     project = db.get_project_by_id(pid)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")

@@ -103,7 +103,7 @@ export const importSchedule = (pid, file, manager, monthlyPlan, planMonth) => {
   return http.post(`/projects/${pid}/import-schedule`, form)
 }
 
-// 手动完成（仅 admin）：为「提前完工但无排产计划」的项目补录『附件安装』产出
+// 手动完成（仅 admin）：为「提前完工但无排产计划」的项目补录产出（落 99 行，计入「具备验收」完成口径）
 // payload: { complete_qty: int, complete_date: 'YYYY-MM-DD' }；返回 { message, node_plan_id, completed_sets, remaining_sets }
 // 同日重复提交 = 覆盖（改小数值即「减少」已录成套数）
 export const manualComplete = (pid, payload) => http.post(`/projects/${pid}/manual-complete`, payload)

@@ -8,7 +8,7 @@
       </div>
     </div>
     <div class="info-group">
-      <div class="group-label">整体进度（附件安装）</div>
+      <div class="group-label">整体进度（具备验收）</div>
       <div class="progress-row">
         <b>{{ overallProgress }}%</b>
         <div class="thin-progress" style="flex:1;">
@@ -31,9 +31,9 @@ const props = defineProps({
   overview: { type: Object, default: () => null },
 })
 
-// 整体进度 = 「附件安装」工序进度（overview.processes 中查找；兜底 project.progress_pct）
+// 整体进度 = 「具备验收」工序进度（2026-11 口径由附件安装改为具备验收；兜底 project.progress_pct）
 const attachmentProcess = computed(() =>
-  props.overview?.processes?.find((p) => p.process_name === '附件安装')
+  props.overview?.processes?.find((p) => p.process_name === '具备验收')
 )
 const overallProgress = computed(() =>
   attachmentProcess.value?.progress_pct ?? props.project?.progress_pct ?? 0

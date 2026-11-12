@@ -31,7 +31,7 @@ def _valid_month(month: str) -> str:
 
 @router.get("/ranking/production")
 def api_production_ranking(month: str = None, user: dict = Depends(get_current_user)):
-    """出品排名：按交付负责人聚合当月『附件安装』出品并排名。
+    """出品排名：按交付负责人聚合当月完成量并排名（完成判定工序 = `COMPLETION_PROCESS_NAME`，2026-11 起为「具备验收」）。
 
     行级隔离：big_area 用户仅统计本大区项目；admin 全量。
 
