@@ -657,6 +657,25 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
     agg = db.get_submission_board_aggregates(ns, ne, big_area_person)
     override_map, override_meta = _load_submission_overrides(ns, ne)
 
+    # ---- 漏报快照（2026-11-16 用户口径）：先读当月已固化的判定 ----
+    # 「当天判定为漏报并落库后，即使后续补报也不消失」；人工覆盖优先级更高（见下方 missed 计算）。
+    # snap_cells: 某 (日期, 负责人) 有固化记录 → 该格恒显示 ×（除非 override=on_time）
+    # snap_nodes: (日期, node_plan_id) → 幂等去重，避免同一节点反复入参
+    snapshot_rows = db.get_submission_miss_snapshots(ns, ne)
+    snap_cells: set[tuple[str, str]] = set()
+    snap_nodes: set[tuple[str, int]] = set()
+    for r in snapshot_rows:
+        ds_ = _date_str(r.get("stat_date"))
+        mgr_ = str(r.get("manager") or "").strip()
+        try:
+            nid_ = int(r.get("node_plan_id"))
+        except (TypeError, ValueError):
+            continue
+        if not ds_ or not mgr_:
+            continue
+        snap_cells.add((ds_, mgr_))
+        snap_nodes.add((ds_, nid_))
+
     # ---- 有效计划日（2026-11）：用异常重算后的 eff_plan_date 决定格子归属 ----
     # 与工序详情（node_service.enrich_rows）同源：build_time_rules + build_exception_anchors
     plan_rows = agg.get("plan_rows") or []
@@ -696,6 +715,15 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
     # ---- 覆盖事实（2026-11 新口径）：已提前完成 / 前置工序异常暂停 → 当天视为已提报 ----
     covered_all, covered_early_map, covered_paused_map = _load_submission_covered(units, paused_nodes)
 
+    # 单元索引：{（负责人, 日期）: [unit...]} —— 固化时据此取 project_id / process_name / node_id
+    units_by_cell: dict[tuple[str, str], list[dict]] = {}
+    for u in units:
+        mgr_ = str(u.get("manager") or "").strip()
+        if mgr_:
+            units_by_cell.setdefault((mgr_, _date_str(u.get("d"))), []).append(u)
+    pending_snapshots: list[dict] = []      # 本轮待落库的漏报明细
+    new_snap_cells: set[tuple[str, str]] = set()
+
     # ---- 组装矩阵 ----
     rows: list[dict] = []
     missed_total = 0
@@ -725,12 +753,38 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
             # 人工覆盖只在「可编辑格」上生效（防御层）：即便库中存在陈旧记录
             # （排产重导后该日已无计划 / 该日已变为未来），也不得改变矩阵显示。
             override = override_map.get(key) if editable else None
+
+            # ---- 固化（2026-11-16）：判定为漏报 → 落库；今天/未来不固化（auto_missed 本身已含 judged）----
+            #     跳过 override='on_time' 的格子（双保险：人工判定为准时的不再写回快照）
+            if auto_missed and override != OVERRIDE_ON_TIME:
+                covered_units = cov_all if has_plan else set()
+                for u in units_by_cell.get((mgr, ds), []):
+                    try:
+                        nid_ = int(u.get("node_id"))
+                        pid_ = int(u.get("project_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    if (pid_, str(u.get("process_name") or "")) in covered_units:
+                        continue          # 该单元已被「提前完成/异常暂停」覆盖 → 不算漏报
+                    if (ds, nid_) in snap_nodes:
+                        continue          # 已固化过（幂等）
+                    pending_snapshots.append({
+                        "stat_date": ds,
+                        "project_id": pid_,
+                        "manager": mgr,
+                        "process_name": str(u.get("process_name") or ""),
+                        "node_plan_id": nid_,
+                    })
+                    snap_nodes.add((ds, nid_))
+                new_snap_cells.add((ds, mgr))
+
             if override == OVERRIDE_MISSED:
                 missed = True
             elif override == OVERRIDE_ON_TIME:
                 missed = False
             else:
-                missed = auto_missed
+                # 🔴 2026-11-16：auto_missed 或 **历史固化过** → 都显示 ×（补报后不再消失）
+                missed = bool(auto_missed or (ds, mgr) in snap_cells or (ds, mgr) in new_snap_cells)
             meta = override_meta.get(key) or {}
             if override:
                 override_count += 1
@@ -753,10 +807,20 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
                 "override": override,
                 "override_by": meta.get("updated_by") if override else None,
                 "override_at": meta.get("updated_at") if override else None,
+                # 2026-11-16：该格是否有「固化」记录（补报后仍保留 ×）
+                "snapshot": bool((ds, mgr) in snap_cells or (ds, mgr) in new_snap_cells),
                 "missed": missed,
             })
         missed_total += row_missed
         rows.append({"manager": mgr, "cells": cells, "missed_total": row_missed})
+
+    # ---- 批量落库（一次 executemany + INSERT IGNORE，幂等）----
+    snap_added = 0
+    if pending_snapshots:
+        try:
+            snap_added = db.save_submission_miss_snapshots(pending_snapshots)
+        except Exception as exc:            # noqa: BLE001 —— 固化失败不得影响页面出数
+            logging.getLogger(__name__).warning("漏报快照写入失败（忽略）：%s", exc)
 
     return {
         "month": month,
@@ -769,6 +833,9 @@ def get_submission_board(month: str, big_area_person: str | None = None) -> dict
             "missed_total": missed_total,
             "day_count": days_in_month,
             "override_count": override_count,
+            # 2026-11-16：本月固化格子数（含本次新增）与实际新增行数，便于观测/排查
+            "snapshot_cells": len(snap_cells | new_snap_cells),
+            "snapshot_added": snap_added,
         },
         "caveat": SUBMISSION_BOARD_CAVEAT,
     }

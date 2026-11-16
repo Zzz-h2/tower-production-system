@@ -373,6 +373,24 @@ CREATE TABLE IF NOT EXISTS process_node_plans_history (
 
 
 -- ============================================================
+-- 表12-1：submission_miss_snapshots（提报漏报快照，2026-11-16 新增）
+-- 用途：访问「提报情况总览」时把「昨天及更早」的漏报判定固化下来，
+--       此后即使补报该工序，× 也不再消失（用户 2026-11-16 口径）。
+--       唯一键 uk_date_node 保证幂等；人工调整走 submission_board_overrides（override 优先）。
+CREATE TABLE IF NOT EXISTS submission_miss_snapshots (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  stat_date DATE NOT NULL COMMENT '被判定的日期',
+  project_id INT NOT NULL,
+  manager VARCHAR(64) DEFAULT NULL COMMENT '负责人（快照时的归属）',
+  process_name VARCHAR(64) NOT NULL,
+  node_plan_id INT NOT NULL,
+  snapshot_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_date_node (stat_date, node_plan_id),
+  KEY idx_date (stat_date),
+  KEY idx_manager (manager)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='提报漏报快照：判定当时固化，后续补报不撤销';
+
+
 -- 表12：submission_board_overrides（提报情况总览人工覆盖表，v7.7 新增）
 -- ============================================================
 -- 背景：「提报情况总览」的 × 由 node_actual_progress / node_exceptions 自动判定，

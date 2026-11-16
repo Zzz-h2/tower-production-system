@@ -62,7 +62,10 @@ def api_production_ranking_detail(month: str = None, person: str = None,
 def api_submission_board(month: str = None, user: dict = Depends(get_current_user)):
     """提报情况总览：当月自然日 × 负责人矩阵，标记「当天有计划但完全未提报」（×）。
 
-    只读接口，不写任何表。
+    ⚠️ 2026-11-16：**不再是纯只读** —— 访问时会**惰性回填**本月「昨天及更早」的漏报判定到
+    ``submission_miss_snapshots``（幂等 INSERT IGNORE），此后即使补报，× 也保留（用户要求）。
+    出数口径：``override='on_time'`` → 留空（最高优先）；``override='missed'`` → 强制 ×；
+    否则 = 自动判定 **OR** 历史固化记录。
 
     口径：
     - 日期 = 筛选月份的自然月 1 日～月末（真实天数）
@@ -80,6 +83,38 @@ def api_submission_board(month: str = None, user: dict = Depends(get_current_use
 # ============================================================
 # 提报情况总览 · 人工覆盖（v7.7，仅管理员）
 # ============================================================
+
+@router.delete("/ranking/submission-board/snapshots")
+def api_clear_submission_snapshots(date: str = None, manager: str = None,
+                                   user: dict = Depends(require_admin)):
+    """清除「漏报固化」记录（2026-11-16，仅管理员，用于特殊情况手动调整）。
+
+    🔴 背景：访问 board 时会把「昨天及更早」的漏报判定**固化**到
+    ``submission_miss_snapshots``，此后即使补报，× 也不再消失（用户 2026-11-16 要求）。
+    如需撤销某格的历史判定，用本接口清除该 (日期, 负责人) 的快照；清完后再访问 board：
+      - 若该格当前仍满足自动判定（今天之前 + 无填报/无异常）→ **会重新固化**（会自动写回）；
+      - 想长期留空请同时把该格人工覆盖为 ``on_time``（override 优先级最高，且固化会跳过 on_time）。
+        —— 两条一起用，才能「永久清掉这一格」。
+
+    Args:
+        date: 'YYYY-MM-DD'（必填；缺省 400）
+        manager: 负责人；不传 = 清该日期全部负责人
+
+    Returns:
+        dict: {"message", "deleted", "date", "manager"}
+    """
+    d = (date or "").strip()[:10]
+    if not d:
+        raise HTTPException(status_code=400, detail="缺少 date 参数（YYYY-MM-DD）")
+    mgr = (manager or "").strip() or None
+    deleted = db.clear_submission_miss_snapshots(stat_date=d, manager=mgr)
+    return {
+        "message": f"✅ 已清除 {d} {mgr or '（全部负责人）'} 的漏报固化记录 {deleted} 条",
+        "deleted": deleted,
+        "date": d,
+        "manager": mgr,
+    }
+
 
 class SubmissionOverrideItem(BaseModel):
     """单格改动。"""

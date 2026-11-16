@@ -79,3 +79,18 @@ export const updateExtraCompletion = (id, payload) =>
  */
 export const deleteExtraCompletion = (id, month) =>
   http.delete(`/ranking/extra/${id}`, { params: { month } })
+
+/**
+ * 提报情况总览：清除「漏报固化」记录（仅管理员）。
+ *
+ * 2026-11-16 背景：访问 board 时会把「昨天及更早」的漏报判定固化到
+ * `submission_miss_snapshots`，此后即使补报，× 也不再消失（用户要求）。
+ * 特殊情况需要撤销时用本接口清除该 (日期, 负责人) 的快照；
+ * 若该格当前仍满足自动判定，下次访问会**重新固化**——想长期留空请同时置为「已按时」覆盖。
+ *
+ * @param {string} date 'YYYY-MM-DD'
+ * @param {string} [manager] 负责人；不传 = 清除该日全部负责人
+ * @returns {Promise<{message: string, deleted: number, date: string, manager: string|null}>}
+ */
+export const clearSubmissionSnapshots = (date, manager) =>
+  http.delete('/ranking/submission-board/snapshots', { params: manager ? { date, manager } : { date } })

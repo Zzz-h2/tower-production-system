@@ -2986,6 +2986,122 @@ def get_submission_override_records(month_start: str, month_end: str) -> list[di
         conn.close()
 
 
+# ---------- 提报漏报快照（2026-11-16：判定后固化，后续补报不撤销） ----------
+# 用户口径：「当天存在未提报情况被记录在该表后就不会消失，即使后续对该工序进行了提报」。
+# 设计：访问 board 时**惰性回填**当月「昨天及更早」的漏报判定 → 落库；出数读快照 ∪ 人工覆盖。
+# 唯一键 uk_date_node (stat_date, node_plan_id) 保证幂等（同一格反复判定不会新增行）。
+
+
+def get_submission_miss_snapshots(month_start: str, month_end: str) -> list[dict]:
+    """取某月已固化的漏报快照（供矩阵判定「这格曾经漏报过」）。
+
+    Args:
+        month_start: 'YYYY-MM-01'（含）
+        month_end:   下月 1 日（不含）
+
+    Returns:
+        list[dict]: [{'stat_date','manager','project_id','process_name','node_plan_id'}]
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT stat_date, manager, project_id, process_name, node_plan_id "
+                "FROM submission_miss_snapshots "
+                "WHERE stat_date >= %s AND stat_date < %s "
+                "ORDER BY stat_date, manager",
+                (month_start, month_end),
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def save_submission_miss_snapshots(rows: list[dict]) -> int:
+    """批量写入漏报快照（**幂等**：唯一键冲突即忽略，重复访问不会新增行）。
+
+    Args:
+        rows: [{'stat_date','project_id','manager','process_name','node_plan_id'}]
+
+    Returns:
+        int: 实际新增的行数（0 = 全部已存在 / 入参为空）
+    """
+    if not rows:
+        return 0
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT IGNORE INTO submission_miss_snapshots "
+                "(stat_date, project_id, manager, process_name, node_plan_id) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                [
+                    (str(r["stat_date"])[:10], int(r["project_id"]),
+                     (str(r["manager"]).strip() if r.get("manager") else None),
+                     str(r["process_name"]), int(r["node_plan_id"]))
+                    for r in rows
+                ],
+            )
+            inserted = int(cur.rowcount or 0)
+            conn.commit()
+            return max(0, inserted)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def clear_submission_miss_snapshots(stat_date: str | None = None,
+                                   manager: str | None = None,
+                                   month_start: str | None = None,
+                                   month_end: str | None = None) -> int:
+    """清除漏报快照（管理员「特殊情况手动调整」用）。
+
+    三种粒度，按传入参数自动选择：
+      - ``stat_date`` + ``manager`` → 只清「某天某负责人」的固化记录（前端单元格入口）；
+      - ``stat_date``（无 manager）  → 清某天的全部负责人；
+      - ``month_start``/``month_end`` → 清整月（运维兜底）。
+
+    Returns:
+        int: 删除行数
+    """
+    conds: list[str] = []
+    args: list = []
+    if stat_date:
+        conds.append("stat_date = %s")
+        args.append(str(stat_date)[:10])
+    if manager:
+        conds.append("manager <=> %s")
+        args.append(str(manager).strip())
+    if month_start and month_end:
+        conds.append("stat_date >= %s AND stat_date < %s")
+        args.extend([str(month_start)[:10], str(month_end)[:10]])
+    if not conds:
+        return 0
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM submission_miss_snapshots WHERE " + " AND ".join(conds),
+                tuple(args),
+            )
+            deleted = int(cur.rowcount or 0)
+            conn.commit()
+            return deleted
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 def save_submission_overrides(items: list[dict], updated_by: str = '') -> dict:
     """批量保存「提报情况总览」人工覆盖（单事务，整批成功或整批回滚）。
 

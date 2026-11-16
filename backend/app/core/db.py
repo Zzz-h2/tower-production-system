@@ -1326,6 +1326,27 @@ def get_submission_override_records(month_start: str, month_end: str) -> list[di
 
 
 @_invalidates_dashboard
+def get_submission_miss_snapshots(month_start: str, month_end: str) -> list[dict]:
+    """取某月已固化的提报漏报快照（判定后固化，供矩阵读快照）。"""
+    from database import get_submission_miss_snapshots as _fn
+    return getattr(_fn, "__wrapped__", _fn)(month_start, month_end)
+
+
+def save_submission_miss_snapshots(rows: list[dict]) -> int:
+    """批量写入漏报快照（INSERT IGNORE，幂等）。"""
+    from database import save_submission_miss_snapshots as _fn
+    return getattr(_fn, "__wrapped__", _fn)(rows)
+
+
+def clear_submission_miss_snapshots(stat_date: str | None = None,
+                                   manager: str | None = None,
+                                   month_start: str | None = None,
+                                   month_end: str | None = None) -> int:
+    """清除漏报快照（管理员手动调整 / 撤销固化）。"""
+    from database import clear_submission_miss_snapshots as _fn
+    return getattr(_fn, "__wrapped__", _fn)(stat_date, manager, month_start, month_end)
+
+
 def save_submission_overrides(items: list[dict], updated_by: str = "") -> dict:
     """批量保存人工覆盖（'missed'/'on_time' → UPSERT，'auto' → DELETE），单事务。
 

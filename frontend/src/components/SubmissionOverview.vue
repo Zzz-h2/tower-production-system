@@ -102,7 +102,7 @@
               <el-tooltip
                 placement="top"
                 :show-after="editing ? 800 : 80"
-                :enterable="false"
+                :enterable="isAdmin && !editing"
                 popper-class="subm-tip-popper"
                 :disabled="!row.byDate[d.date]"
               >
@@ -128,7 +128,7 @@
                       人工调整为「{{ row.byDate[d.date].override === 'missed' ? '未按时提报（×）' : '已按时提报（留空）' }}」
                       <span v-if="overrideMeta(row.byDate[d.date])" class="subm-tip-meta">（{{ overrideMeta(row.byDate[d.date]) }}）</span>
                     </div>
-                    <div v-if="!editing && row.byDate[d.date].missed" class="subm-tip-line">
+                    <div v-if="!editing && row.byDate[d.date].missed && row.byDate[d.date].auto_missed" class="subm-tip-line">
                       自动判定为未按时：{{ row.byDate[d.date].covered_count > 0
                         ? `剩余 ${row.byDate[d.date].plan_count - row.byDate[d.date].covered_count} 个节点当天无填报、无异常提报`
                         : '当天未填报、未提报异常' }}
@@ -137,7 +137,9 @@
                       自动判定为未按时，已人工调整为已按时
                     </div>
                     <div v-if="!editing && row.byDate[d.date].missed && !row.byDate[d.date].auto_missed" class="subm-tip-line">
-                      自动判定为已提报，已人工标记为未按时
+                      {{ row.byDate[d.date].override === 'missed'
+                        ? '自动判定为已提报，已人工标记为未按时'
+                        : '自动判定已提报（含事后补报），但该日漏报已固化保留 ×' }}
                     </div>
                     <!-- 编辑态：只用两行说明（自动判定 + 点击结果），避免大面积遮挡 -->
                     <div v-if="editing" class="subm-tip-line">
@@ -152,16 +154,33 @@
                     <div v-if="editing && !row.byDate[d.date].editable" class="subm-tip-line subm-tip-act">
                       不可编辑：{{ row.byDate[d.date].has_plan ? '今天/未来日期尚未判定' : '当天无计划' }}
                     </div>
+                    <!-- 2026-11-16：漏报「已固化」说明 + 管理员清除入口（补报后 × 不消失的来源） -->
+                    <div v-if="!editing && row.byDate[d.date].snapshot" class="subm-tip-line subm-tip-snap">
+                      🔒 已固化：该日漏报已记录，后续补报也不会消失
+                      <div v-if="isAdmin" class="subm-tip-meta">
+                        （特殊情况需撤销：<b>点击右上角 ×</b> 清除固化记录（需先点「编辑」）；
+                        若当天仍未提报，下次访问会重新固化，想长期留空请同时设为「已按时」）
+                      </div>
+                    </div>
                     <!-- 长文案（数据模型限制）只在非编辑态展示：编辑态下它会撑大弹层、遮挡相邻格 -->
                     <div v-if="!editing" class="subm-tip-note">{{ cellCaveat }}</div>
                   </template>
                 </template>
 
-                <div class="cell-box" :class="cellClass(row, d.date)" @click="onCellClick(row, d.date)">
+                <div class="cell-box" :class="cellClass(row, d.date)" @click="onCellClick(row, d.date, $event)">
                   <span v-if="row.byDate[d.date] && row.byDate[d.date].missed" class="miss-mark">×</span>
                   <span v-else class="blank-cell"></span>
                   <!-- 人工调整不显示任何视觉标识：按用户要求「手动改完留白即可，与其他未填项一样」。
                        需要确认某格是否人工调整过时，悬停 tooltip 仍会显示「人工调整为…（操作人 时间）」。 -->
+                  <!-- 2026-11-16：编辑态下「已固化」格子右上角小 × —— 点击清除该日固化记录（仅 admin）
+                       stopPropagation 防止触发布局内原有的「点击切换 override」逻辑 -->
+                  <i
+                    v-if="editing && isAdmin && row.byDate[d.date] && row.byDate[d.date].snapshot
+                          && row.byDate[d.date].override !== 'on_time'"
+                    class="snap-clear-icon"
+                    title="清除该日漏报记录"
+                    @click.stop.prevent="onClearSnapshot(row, d.date)"
+                  >×</i>
                   <!-- 未保存改动标识：右上角橙色角标 -->
                   <i v-if="row.byDate[d.date] && row.byDate[d.date].dirty" class="dirty-dot"></i>
                 </div>
@@ -194,7 +213,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Edit, Check, Close } from '@element-plus/icons-vue'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
-import { fetchSubmissionBoard, saveSubmissionOverrides } from '../api/ranking'
+import { clearSubmissionSnapshots, fetchSubmissionBoard, saveSubmissionOverrides } from '../api/ranking'
 
 const store = useProjectStore()   // 共享筛选月份（与其它页联动）
 const auth = useAuthStore()       // 角色判定：仅管理员可进入编辑态
@@ -256,7 +275,10 @@ const viewRows = computed(() =>
       const has = Object.prototype.hasOwnProperty.call(draft.value, key)
       const original = c.override || null
       const override = has ? draft.value[key] : original
-      const missed = override === 'missed' ? true : override === 'on_time' ? false : !!c.auto_missed
+      // 🔴 2026-11-16：无覆盖时以**服务端最终值 c.missed** 为基线（它 = 自动判定 OR 历史固化快照），
+      // 否则「补报后前端又把 × 抹掉」，固化就白做了（后端已固化、前端自己重算会看不见）。
+      const baseMissed = c.missed !== undefined && c.missed !== null ? !!c.missed : !!c.auto_missed
+      const missed = override === 'missed' ? true : override === 'on_time' ? false : baseMissed
       if (missed) total += 1
       byDate[c.date] = {
         ...c,
@@ -352,7 +374,16 @@ function cellClass(row, date) {
  * - 今日/未来、无计划的格子不可点（与后端校验一致）
  * - 非编辑态点击无任何副作用（只读）
  */
-function onCellClick(row, date) {
+function onCellClick(row, dateStr, ev) {
+  // 🔴 2026-11-16：Shift + 点击 = 清除该格「漏报固化」记录（仅管理员、且该格确有固化记录）
+  // 用快捷键而不是 tooltip 内按钮：popper 全局 pointer-events:none（防遮挡点击），按钮点不到。
+  const cell = row?.byDate?.[dateStr]
+  if (ev && ev.shiftKey && isAdmin.value && cell && cell.snapshot) {
+    ev.preventDefault()
+    onClearSnapshot(row, dateStr)
+    return
+  }
+
   if (!editing.value) return
   const c = row.byDate[date]
   if (!c || !c.editable) return
@@ -489,6 +520,33 @@ watch(() => store.filters.month, (val, old) => {
   }
 })
 
+/**
+ * 清除某格的「漏报固化」记录（2026-11-16，仅管理员）。
+ *
+ * 说明：清完后再点「刷新」——若当天仍满足自动判定（昨天及更早 + 无填报/无异常），
+ * 会被**重新固化**（× 回来）；想长期留空请同时把该格人工设为「已按时」（override 优先）。
+ */
+async function onClearSnapshot(row, dateStr) {
+  if (!isAdmin.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确认清除「${row.manager} · ${dateStr}」的漏报固化记录？\n` +
+      '若该日至今仍未提报，下次刷新会自动重新固化（× 会恢复）；想长期留空请同时设为「已按时」。',
+      '清除固化记录',
+      { type: 'warning', confirmButtonText: '确认清除', cancelButtonText: '取消' },
+    )
+  } catch (e) {
+    return
+  }
+  try {
+    const res = await clearSubmissionSnapshots(dateStr, row.manager)
+    ElMessage.success(res?.message || '✅ 已清除固化记录')
+    await load()
+  } catch (e) {
+    ElMessage.error('清除失败')
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -530,6 +588,26 @@ onMounted(load)
 .miss-total-zero { color: #cbd5e0; font-size: 13px; }
 
 /* 单元格容器：撑满 36×38 的日格，承载点击区与角标 */
+/* 编辑态「清除固化记录」小图标：右上角 14px 红 ×，hover 浅红底 */
+.snap-clear-icon {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 14px;
+  height: 14px;
+  line-height: 12px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+  color: #e53e3e;
+  text-align: center;
+  border-radius: 4px;
+  background: #ffffff;
+  cursor: pointer;
+  z-index: 2;
+}
+.snap-clear-icon:hover { background: #fed7d7; }
+
 .cell-box {
   position: relative;
   display: flex;
@@ -609,6 +687,7 @@ onMounted(load)
 }
 .subm-tip-title { font-weight: 700; margin-bottom: 2px; }
 .subm-tip-ovr { color: #fefcbf; font-weight: 600; }
+.subm-tip-snap { color: #92400e; }
 .subm-tip-meta { color: rgba(255, 255, 255, 0.85); }
 .subm-tip-act { color: #bee3f8; }
 .subm-tip-note {
