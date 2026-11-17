@@ -49,20 +49,42 @@
     </div>
 
     <!-- ② 指标行：5 张等宽卡（flex 均分，一行放完） -->
+    <!-- 2026-11-17 用户要求：**5 张卡全部按统一规范处理**（原只有「逾期未关闭」可点）
+         总数 = 清空卡片筛选（回全量）；已关闭 = status=closed；未关闭 = 非 closed；
+         逾期 = 只看超期；关闭率是比率指标 → 不可点（见报告） -->
     <div class="kpi-row">
-      <div class="kpi-card">
+      <div
+        class="kpi-card kpi-clickable"
+        :class="{ 'is-active': isCardActive('total') }"
+        role="button" tabindex="0" :aria-pressed="isCardActive('total')"
+        title="点击显示全部事项（清空卡片筛选）"
+        @click="clearCardFilters" @keydown.enter.prevent="clearCardFilters"
+      >
         <div class="kpi-value">{{ kpis.total }}</div>
         <div class="kpi-label">事项总数</div>
       </div>
-      <div class="kpi-card">
+      <div
+        class="kpi-card kpi-clickable kpi-card-closed"
+        :class="{ 'is-active': isCardActive('closed') }"
+        role="button" tabindex="0" :aria-pressed="isCardActive('closed')"
+        title="点击只看已关闭事项（再点一次取消）"
+        @click="toggleCard('closed')" @keydown.enter.prevent="toggleCard('closed')"
+      >
         <div class="kpi-value" style="color:#38a169;">{{ kpis.closed }}</div>
         <div class="kpi-label">已关闭事项数</div>
       </div>
-      <div class="kpi-card">
+      <div
+        class="kpi-card kpi-clickable kpi-card-open"
+        :class="{ 'is-active': isCardActive('open') }"
+        role="button" tabindex="0" :aria-pressed="isCardActive('open')"
+        title="点击只看未关闭事项（再点一次取消）"
+        @click="toggleCard('open')" @keydown.enter.prevent="toggleCard('open')"
+      >
         <div class="kpi-value" style="color:#dd6b20;">{{ kpis.open }}</div>
         <div class="kpi-label">未关闭事项数</div>
       </div>
-      <div class="kpi-card kpi-rate">
+      <!-- 关闭率：比率指标，不是事项集合维度 → 不可点 -->
+      <div class="kpi-card kpi-rate" title="比率指标，不参与事项筛选">
         <el-progress
           type="circle"
           :width="58"
@@ -77,10 +99,11 @@
       </div>
       <!-- 第 5 张：逾期未关闭（红卡 + 可点击联动筛选） -->
       <div
-        class="kpi-card kpi-danger"
-        :class="{ 'is-active': filters.overdue_only }"
-        title="判据：未关闭 且 解决时间早于今天（点击可只看逾期未关闭）"
-        @click="toggleOverdue"
+        class="kpi-card kpi-danger kpi-clickable"
+        :class="{ 'is-active': isCardActive('overdue') }"
+        role="button" tabindex="0" :aria-pressed="isCardActive('overdue')"
+        title="判据：未关闭 且 解决时间早于今天（点击只看逾期未关闭，再点一次取消）"
+        @click="toggleOverdue" @keydown.enter.prevent="toggleOverdue"
       >
         <div class="kpi-value" style="color:#e53e3e;">
           {{ kpis.overdue }}<span v-if="kpis.overdue > 0" class="pulse-dot"></span>
@@ -97,7 +120,7 @@
         <div class="block-card">
           <div class="block-header">
             <span class="block-title">问题明细</span>
-            <el-tag type="info" size="small">{{ items.length }}</el-tag>
+            <el-tag type="info" size="small">{{ cardItems.length }}</el-tag>
           </div>
           <!-- 表格容器 flex:1 → el-table height=100% 撑满卡片，多余空白落在表格内而不是卡片底部 -->
           <div class="table-wrap">
@@ -156,7 +179,7 @@
               </el-table-column>
           </el-table>
           </div>
-          <el-empty v-if="!items.length && !loading" description="当月暂无问题记录" />
+          <el-empty v-if="!cardItems.length && !loading" description="当月暂无问题记录" />
         </div>
       </el-col>
 
@@ -262,7 +285,7 @@ const projectOptions = ref([])
 // 前端排序（后端已按「超期→等级→解决时间」排好，这里只处理表头点击）
 const sortState = reactive({ prop: '', order: '' })
 const sortedItems = computed(() => {
-  const arr = [...items.value]
+  const arr = [...cardItems.value]
   if (!sortState.prop || !sortState.order) return arr
   const sevWeight = { high: 0, medium: 1, low: 2 }
   const dir = sortState.order === 'ascending' ? 1 : -1
@@ -288,6 +311,47 @@ const sortedItems = computed(() => {
  * - 字段名：`store/auth.js` 提供 `isAdmin`（role==='admin'）与 `isBigArea`（role==='big_area'）。
  */
 const canTouchIssues = computed(() => auth.isAdmin || auth.isBigArea)
+
+/**
+ * 2026-11-17 卡片筛选（客户端）：'' | 'closed' | 'open'
+ *
+ * 为什么「已关闭 / 未关闭」走前端过滤而不是接口参数：
+ *   `/api/issues/board` 的 `status` 只接受 pending/processing/closed 三值，
+ *   表达不了「非 closed」；而看板的 items **未分页**（一次全量返回），
+ *   KPI 也是基于同一份 items 聚合 → 前端过滤后的条数与卡片数字**必然相等**。
+ * 「逾期」沿用服务端 `overdue_only`（既有行为，与工具栏复选框联动）。
+ */
+const cardFilter = ref('')
+
+/** 某张卡当前是否处于选中态（同一时刻只有一张：逾期卡与 closed/open 互斥）。 */
+function isCardActive(key) {
+  if (key === 'overdue') return !!filters.overdue_only
+  if (key === 'total') return !cardFilter.value && !filters.overdue_only && !filters.status
+  return cardFilter.value === key && !filters.overdue_only
+}
+
+/** 点「已关闭 / 未关闭」卡：toggle（再点一次取消，回到全量）。 */
+function toggleCard(key) {
+  const next = cardFilter.value === key ? '' : key
+  cardFilter.value = next
+  if (next) filters.overdue_only = false   // 与逾期卡互斥
+}
+
+/** 点「总数」卡：清空**由卡片设置的**筛选（不动月份/项目/关键词/等级等工具栏筛选）。 */
+function clearCardFilters() {
+  cardFilter.value = ''
+  filters.overdue_only = false
+  filters.status = ''      // 状态下拉与卡片同维度；一并复位，避免"卡上是总数、列表还被 status 卡着"
+  load()
+}
+
+/** 卡片筛选后的行（在服务端结果之上再做一层集合过滤）。 */
+const cardItems = computed(() => {
+  const arr = items.value
+  if (cardFilter.value === 'closed') return arr.filter((it) => it.status === 'closed')
+  if (cardFilter.value === 'open') return arr.filter((it) => it.status !== 'closed')
+  return arr
+})
 
 const rateColor = (rate) => (rate >= 100 ? '#38a169' : rate >= 60 ? '#3182ce' : '#e53e3e')
 const severityTagType = (sev) => (sev === 'high' ? 'danger' : sev === 'medium' ? 'warning' : 'info')
@@ -600,6 +664,13 @@ onBeforeUnmount(() => {
 .kpi-rate-text { display: flex; flex-direction: column; }
 
 /* 第 5 卡：逾期未关闭（红卡 + 点击联动筛选） */
+/* 2026-11-17：可点击筛选卡（hover 微抬 + 选中 2px 语义色描边 + 浅底） */
+.kpi-clickable { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease, background .15s ease; }
+.kpi-clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26, 54, 93, .10); }
+.kpi-clickable:focus-visible { outline: 2px solid #3182ce; outline-offset: 2px; }
+.kpi-card.is-active { border-width: 2px; border-style: solid; background: #f7fafc; }
+.kpi-card.kpi-card-closed.is-active { border-color: #38a169; background: #f0fff4; }
+.kpi-card.kpi-card-open.is-active { border-color: #dd6b20; background: #fffaf0; }
 .kpi-danger {
   background: #fff5f5;
   border: 1px solid #fed7d7;

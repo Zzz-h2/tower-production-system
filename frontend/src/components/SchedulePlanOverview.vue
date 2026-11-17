@@ -1,24 +1,53 @@
 <template>
   <div class="schedule-overview">
     <!-- ① 统计卡片区 -->
+    <!-- 2026-11-17 用户要求：KPI 卡改为**可点击筛选**（点某卡 → 下方只显示该分组，再点取消）
+         已上传 / 未上传 / 手动完成 三卡与下方三个分组的取数条件**完全一致**（同一份 computed），
+         因此卡片数字 ⇄ 分组条数 恒等；总数卡 = 清空分组筛选（显示全部分组）
+         「本月应交项目」= monthly_plan>0 的计数，与三组切分不同维度 → 不可点 -->
     <div class="kpi-row">
-      <div class="kpi-card">
+      <div
+        class="kpi-card kpi-clickable"
+        :class="{ 'is-active': cardFilter === '' }"
+        role="button" tabindex="0" :aria-pressed="cardFilter === ''"
+        title="点击显示所有分组（清空卡片筛选）"
+        @click="pickCard('')" @keydown.enter.prevent="pickCard('')"
+      >
         <div class="kpi-value">{{ totalCount }}</div>
         <div class="kpi-label">项目总数</div>
       </div>
-      <div class="kpi-card kpi-blue">
+      <div
+        class="kpi-card kpi-blue kpi-clickable"
+        :class="{ 'is-active': cardFilter === 'uploaded' }"
+        role="button" tabindex="0" :aria-pressed="cardFilter === 'uploaded'"
+        title="点击只看已上传排产的项目（再点一次取消）"
+        @click="pickCard('uploaded')" @keydown.enter.prevent="pickCard('uploaded')"
+      >
         <div class="kpi-value" style="color:#38a169;">{{ uploadedCount }}</div>
         <div class="kpi-label">{{ monthLabel }}已上传排产</div>
       </div>
-      <div class="kpi-card kpi-warning">
+      <div
+        class="kpi-card kpi-warning kpi-clickable"
+        :class="{ 'is-active': cardFilter === 'not_uploaded' }"
+        role="button" tabindex="0" :aria-pressed="cardFilter === 'not_uploaded'"
+        title="点击只看未上传排产的项目（再点一次取消）"
+        @click="pickCard('not_uploaded')" @keydown.enter.prevent="pickCard('not_uploaded')"
+      >
         <div class="kpi-value" style="color:#ed8936;">{{ notUploadedCount }}</div>
         <div class="kpi-label">{{ monthLabel }}未上传排产</div>
       </div>
-      <div class="kpi-card">
+      <div
+        class="kpi-card kpi-clickable"
+        :class="{ 'is-active': cardFilter === 'manual' }"
+        role="button" tabindex="0" :aria-pressed="cardFilter === 'manual'"
+        title="点击只看手动完成（免传排产）的项目（再点一次取消）"
+        @click="pickCard('manual')" @keydown.enter.prevent="pickCard('manual')"
+      >
         <div class="kpi-value" style="color:#3182ce;">{{ manualDoneCount }}</div>
         <div class="kpi-label">{{ monthLabel }}手动完成</div>
       </div>
-      <div class="kpi-card">
+      <!-- 本月应交项目：monthly_plan>0 的计数，与「已上传/未上传/手动完成」三组非互斥 → 不可点 -->
+      <div class="kpi-card" title="按本月计划数(monthly_plan>0)统计，与上传分组非互斥，不参与卡片筛选">
         <div class="kpi-value">{{ monthDueCount }}</div>
         <div class="kpi-label">本月应交项目</div>
       </div>
@@ -72,8 +101,8 @@
       </div>
     </div>
 
-    <!-- ③ 未上传排产计划 -->
-    <div class="block-card">
+    <!-- ③ 未上传排产计划（卡片筛选：cardFilter 为空或 'not_uploaded' 时显示） -->
+    <div v-if="showSection('not_uploaded')" class="block-card">
       <div class="block-header">
         <span class="section-dot" style="background:#ed8936;"></span>
         <span class="block-title" style="color:#ed8936;">{{ monthLabel }}未上传排产计划</span>
@@ -126,8 +155,8 @@
       <el-empty v-if="!notUploadedList.length" description="暂无未上传排产计划的项目" :image-size="80" />
     </div>
 
-    <!-- ④ 手动完成（本月免传排产） -->
-    <div class="block-card" style="margin-top: 20px;">
+    <!-- ④ 手动完成（本月免传排产）（卡片筛选：cardFilter 为空或 'manual' 时显示） -->
+    <div v-if="showSection('manual')" class="block-card" style="margin-top: 20px;">
       <div class="block-header">
         <span class="section-dot" style="background:#3182ce;"></span>
         <span class="block-title" style="color:#3182ce;">{{ monthLabel }}手动完成（免传排产）</span>
@@ -183,8 +212,8 @@
       <el-empty v-if="!manualDoneList.length" description="本月暂无手动完成的项目" :image-size="80" />
     </div>
 
-    <!-- ⑤ 已上传排产计划 -->
-    <div class="block-card" style="margin-top: 20px;">
+    <!-- ⑤ 已上传排产计划（卡片筛选：cardFilter 为空或 'uploaded' 时显示） -->
+    <div v-if="showSection('uploaded')" class="block-card" style="margin-top: 20px;">
       <div class="block-header">
         <span class="section-dot" style="background:#38a169;"></span>
         <span class="block-title" style="color:#38a169;">{{ monthLabel }}已上传排产计划</span>
@@ -309,6 +338,26 @@ const manualDoneCount = computed(
 const notUploadedCount = computed(
   () => totalCount.value - uploadedCount.value - manualDoneCount.value,
 )
+/**
+ * 2026-11-17 卡片筛选：'' | 'uploaded' | 'not_uploaded' | 'manual'
+ * 决定下方三个分组卡片是否渲染（只显示被选中的那一组；'' = 全显示）。
+ */
+const cardFilter = ref('')
+
+/**
+ * 点 KPI 卡切换分组筛选（toggle：再点同一张 = 取消）。
+ *
+ * @param {''|'uploaded'|'not_uploaded'|'manual'} key 目标分组；'' = 全部分组
+ */
+function pickCard(key) {
+  cardFilter.value = (key === '' || cardFilter.value === key) ? '' : key
+}
+
+/** 某分组是否可见（cardFilter 为空 → 全显示；否则只显示被选中的分组）。 */
+function showSection(key) {
+  return cardFilter.value === '' || cardFilter.value === key
+}
+
 const monthDueCount = computed(
   () => allItems.value.filter((p) => Number(p.monthly_plan || 0) > 0).length,
 )
@@ -439,6 +488,13 @@ onMounted(async () => {
 <style scoped>
 .schedule-overview { }
 .kpi-row { display: flex; gap: 16px; margin-bottom: 16px; }
+/* 2026-11-17：可点击筛选卡（hover 微抬 + 选中 2px 语义色描边 + 浅底） */
+.kpi-clickable { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease, background .15s ease; }
+.kpi-clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26, 54, 93, .10); }
+.kpi-clickable:focus-visible { outline: 2px solid #3182ce; outline-offset: 2px; }
+.kpi-clickable.is-active { border: 2px solid #3182ce; background: #f7fafc; }
+.kpi-card.kpi-blue.is-active { border-color: #38a169; background: #f0fff4; }
+.kpi-card.kpi-warning.is-active { border-color: #ed8936; background: #fffaf0; }
 .kpi-card {
   flex: 1; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px;
   padding: 18px 20px;

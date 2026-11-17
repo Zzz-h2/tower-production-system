@@ -52,24 +52,53 @@
           </div>
 
     <!-- ② 概览指标卡区（2026-11：4 → 5 卡，在「预警」与「延期」之间插入第 4 态「异常」） -->
+    <!-- 2026-11-17 用户要求：KPI 卡改为**可点击筛选**（交互同「问题管控看板」的逾期卡）
+         · 异常/预警/延期 → 服务端 status=exception/warning/delayed（与「状态」下拉同一份 filterForm.status）
+         · 总数 → status=all（清空卡片筛选）
+         · 本月计划出品总量 = 套数求和，不是项目集合维度 → **不可点**（详见报告） -->
     <div class="kpi-row">
-      <div class="kpi-card">
+      <div
+        class="kpi-card kpi-clickable"
+        :class="{ 'is-active': filterForm.status === 'all' }"
+        role="button" tabindex="0" :aria-pressed="filterForm.status === 'all'"
+        title="点击显示全部项目（清空卡片筛选）"
+        @click="onRiskCardClick('all')" @keydown.enter.prevent="onRiskCardClick('all')"
+      >
         <div class="kpi-value">{{ stats.total_projects }}</div>
         <div class="kpi-label">在产项目总数</div>
       </div>
-      <div class="kpi-card kpi-exception">
+      <div
+        class="kpi-card kpi-exception kpi-clickable"
+        :class="{ 'is-active': filterForm.status === 'exception' }"
+        role="button" tabindex="0" :aria-pressed="filterForm.status === 'exception'"
+        title="点击只看异常项目（再点一次取消）"
+        @click="onRiskCardClick('exception')" @keydown.enter.prevent="onRiskCardClick('exception')"
+      >
         <div class="kpi-value" style="color:#dd6b20;">{{ stats.exception_projects }}</div>
         <div class="kpi-label">异常项目</div>
       </div>
-      <div class="kpi-card kpi-warning">
+      <div
+        class="kpi-card kpi-warning kpi-clickable"
+        :class="{ 'is-active': filterForm.status === 'warning' }"
+        role="button" tabindex="0" :aria-pressed="filterForm.status === 'warning'"
+        title="点击只看预警项目（再点一次取消）"
+        @click="onRiskCardClick('warning')" @keydown.enter.prevent="onRiskCardClick('warning')"
+      >
         <div class="kpi-value" style="color:#f6ad55;">{{ stats.warning_projects }}</div>
         <div class="kpi-label">预警项目</div>
       </div>
-      <div class="kpi-card kpi-delayed">
+      <div
+        class="kpi-card kpi-delayed kpi-clickable"
+        :class="{ 'is-active': filterForm.status === 'delayed' }"
+        role="button" tabindex="0" :aria-pressed="filterForm.status === 'delayed'"
+        title="点击只看延期项目（再点一次取消）"
+        @click="onRiskCardClick('delayed')" @keydown.enter.prevent="onRiskCardClick('delayed')"
+      >
         <div class="kpi-value" style="color:#e53e3e;">{{ stats.delayed_projects }}</div>
         <div class="kpi-label">延期项目</div>
       </div>
-      <div class="kpi-card kpi-blue">
+      <!-- 本月计划出品总量：套数求和，不是项目维度筛选 → 不可点 -->
+      <div class="kpi-card kpi-blue" title="套数求和指标，不参与项目筛选">
         <div class="kpi-value">{{ stats.monthly_plan_total }}</div>
         <div class="kpi-label">本月计划出品总量</div>
       </div>
@@ -520,6 +549,24 @@ function onFilterChange() {
   })
 }
 
+/**
+ * 首页 KPI 卡「点击筛选」（2026-11-17 用户要求，交互同问题管控看板的逾期卡）。
+ *
+ * - 与工具栏「状态」下拉共用同一份 `filterForm.status` → 卡片选中态 ⇄ 下拉值**永远一致**
+ *   （不会出现「卡说 2 条、列表 3 条」：两者走同一个服务端过滤条件）。
+ * - toggle 语义：点已选中的卡 → 回到 `all`（全量）；点「总数」卡 → 直接置 `all`。
+ * - 只动 status，不清月份/负责人/大区/关键词（那些属于工具栏）。
+ *
+ * @param {'all'|'exception'|'warning'|'delayed'} status 卡片对应的风险状态
+ */
+function onRiskCardClick(status) {
+  const next = (status === 'all' || filterForm.status === status) ? 'all' : status
+  if (filterForm.status === next) return
+  filterForm.status = next
+  onFilterChange()          // 内部：page=1 + loadProjects({ status })
+  store.loadDashboard()     // KPI 数字随筛选刷新（与列表同一 month 口径）
+}
+
 // 单个筛选字段清空（×）→ 同步表单并重新加载
 function onFilterClear(field) {
   filterForm[field] = ''
@@ -794,6 +841,16 @@ onMounted(async () => {
   gap: 16px;
   margin-bottom: 16px;
 }
+/* 2026-11-17：可点击筛选的 KPI 卡（hover 微抬 + 选中 2px 语义色描边 + 浅底） */
+.kpi-clickable { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease, background .15s ease; }
+.kpi-clickable:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26, 54, 93, .10); }
+.kpi-clickable:focus-visible { outline: 2px solid #3182ce; outline-offset: 2px; }
+.kpi-clickable.is-active { border-width: 2px; border-style: solid; }
+.kpi-card.is-active { background: #f7fafc; }                       /* 默认浅底 */
+.kpi-card.kpi-exception.is-active { border-color: #dd6b20; background: #fffaf0; }
+.kpi-card.kpi-warning.is-active { border-color: #d69e2e; background: #fffff0; }
+.kpi-card.kpi-delayed.is-active { border-color: #e53e3e; background: #fff5f5; }
+.kpi-card.kpi-clickable:not(.is-active) { border-color: #e2e8f0; }
 .kpi-exception { border-top: 3px solid #dd6b20; }
 .kpi-warning { border-top: 3px solid var(--color-warning); }
 .kpi-delayed { border-top: 3px solid var(--color-red); }
