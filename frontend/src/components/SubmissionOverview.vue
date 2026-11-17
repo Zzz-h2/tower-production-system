@@ -16,7 +16,7 @@
         <el-button type="primary" :icon="Refresh" :loading="loading" :disabled="editing" @click="load">刷新</el-button>
         <span class="hint">× = 当天有计划但当日完全未提报（仅判定至昨天 {{ board.cutoff || '—' }}）</span>
         <span v-if="editing" class="hint-edit">
-          编辑中：点一下格子即「取消 / 加上 ×」，再点一下恢复自动判定；改完点「保存」生效
+          编辑中：点一下格子<b>立即生效</b>（取消 / 加上 ×），再点一下恢复自动判定；<b>点「已固化」的格子 = 清除该日固化记录（会二次确认）</b>
         </span>
       </div>
     </div>
@@ -50,6 +50,8 @@
         <span class="block-subtitle">{{ board.month || '—' }} · 当月日期 × 负责人</span>
 
         <!-- 管理员「编辑」入口（大区账号不渲染） -->
+        <!-- 2026-11-16：改为「即时生效」模式 —— 编辑态下点格子/点小× 一律当场落库，
+             不再有草稿和批量保存，故「保存」「取消」按钮一并移除，只保留「完成」退出编辑。 -->
         <div v-if="isAdmin" class="edit-actions">
           <template v-if="!editing">
             <el-button size="small" type="primary" plain :icon="Edit" :disabled="!viewRows.length" @click="startEdit">
@@ -57,9 +59,8 @@
             </el-button>
           </template>
           <template v-else>
-            <span v-if="changedCount" class="edit-dirty-hint">待保存 {{ changedCount }} 处</span>
-            <el-button size="small" type="primary" :icon="Check" :loading="saving" @click="save">保存</el-button>
-            <el-button size="small" :icon="Close" :disabled="saving" @click="cancel">取消</el-button>
+            <span class="edit-dirty-hint">即时生效</span>
+            <el-button size="small" type="primary" :icon="Check" :loading="saving" @click="exitEdit">完成</el-button>
           </template>
         </div>
       </div>
@@ -148,7 +149,18 @@
                         · 原有覆盖：{{ row.byDate[d.date].original === 'missed' ? '未按时' : '按时' }}
                       </span>
                     </div>
-                    <div v-if="editing && row.byDate[d.date].editable" class="subm-tip-line subm-tip-act">
+                    <!-- 2026-11-17：已固化格子在编辑态点一下 = 清除固化记录（带二次确认） -->
+                    <div
+                      v-if="editing && row.byDate[d.date].editable && row.byDate[d.date].snapshot
+                            && row.byDate[d.date].override !== 'on_time'"
+                      class="subm-tip-line subm-tip-act"
+                    >
+                      <b>点击本格可清除该日固化记录（会二次确认）</b>，确认后标记为「已按时」，× 永久消失
+                    </div>
+                    <div
+                      v-else-if="editing && row.byDate[d.date].editable"
+                      class="subm-tip-line subm-tip-act"
+                    >
                       点击{{ row.byDate[d.date].missed ? '取消 ×' : '标记为未按时（×）' }}（再点一次恢复自动判定）
                     </div>
                     <div v-if="editing && !row.byDate[d.date].editable" class="subm-tip-line subm-tip-act">
@@ -158,8 +170,8 @@
                     <div v-if="!editing && row.byDate[d.date].snapshot" class="subm-tip-line subm-tip-snap">
                       🔒 已固化：该日漏报已记录，后续补报也不会消失
                       <div v-if="isAdmin" class="subm-tip-meta">
-                        （特殊情况需撤销：<b>点击右上角 ×</b> 清除固化记录（需先点「编辑」）；
-                        若当天仍未提报，下次访问会重新固化，想长期留空请同时设为「已按时」）
+                        （特殊情况需撤销：<b>点「编辑」后点击本格</b>，
+                        会二次确认，确认后把该格标记为「已按时」，× 立即消失且刷新不回弹）
                       </div>
                     </div>
                     <!-- 长文案（数据模型限制）只在非编辑态展示：编辑态下它会撑大弹层、遮挡相邻格 -->
@@ -172,15 +184,9 @@
                   <span v-else class="blank-cell"></span>
                   <!-- 人工调整不显示任何视觉标识：按用户要求「手动改完留白即可，与其他未填项一样」。
                        需要确认某格是否人工调整过时，悬停 tooltip 仍会显示「人工调整为…（操作人 时间）」。 -->
-                  <!-- 2026-11-16：编辑态下「已固化」格子右上角小 × —— 点击清除该日固化记录（仅 admin）
-                       stopPropagation 防止触发布局内原有的「点击切换 override」逻辑 -->
-                  <i
-                    v-if="editing && isAdmin && row.byDate[d.date] && row.byDate[d.date].snapshot
-                          && row.byDate[d.date].override !== 'on_time'"
-                    class="snap-clear-icon"
-                    title="清除该日漏报记录"
-                    @click.stop.prevent="onClearSnapshot(row, d.date)"
-                  >×</i>
+                  <!-- 2026-11-17（用户决定）：**移除右上角小 ×** —— 编辑态点击格子本体即触发
+                       「清除该日固化记录」的二次确认（见 onCellClick），右上角图标不再需要，
+                       避免它与格子中央的大 × 视觉重叠、点错目标。 -->
                   <!-- 未保存改动标识：右上角橙色角标 -->
                   <i v-if="row.byDate[d.date] && row.byDate[d.date].dirty" class="dirty-dot"></i>
                 </div>
@@ -210,7 +216,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Edit, Check, Close } from '@element-plus/icons-vue'
+import { Refresh, Edit, Check } from '@element-plus/icons-vue'
 import { useProjectStore } from '../store/project'
 import { useAuthStore } from '../store/auth'
 import { clearSubmissionSnapshots, fetchSubmissionBoard, saveSubmissionOverrides } from '../api/ranking'
@@ -221,6 +227,9 @@ const auth = useAuthStore()       // 角色判定：仅管理员可进入编辑�
 const loading = ref(false)
 const saving = ref(false)
 const editing = ref(false)        // 是否处于编辑态（批量保存模式）
+// 🔴 2026-11-17：小 × 清除的**重入保护** —— 连点多次只允许走一次「确认 → 删除」流程，
+// 否则 ElMessageBox 单例会被后来的调用覆盖/关闭，表现为「框一闪而过 or 没看见就删了」。
+const confirming = ref(false)
 /**
  * 未保存改动草稿：key = `${manager}\u0001${date}`，value = 'missed' | 'on_time' | null
  * null 表示「恢复自动判定」（提交时 action='auto'）。
@@ -254,11 +263,12 @@ const dateColumns = computed(() =>
 const summary = computed(() => board.value.summary || { manager_count: 0, missed_total: 0, day_count: 0 })
 const caveat = computed(() => board.value.caveat || '填报记录按节点覆盖式保存，历史个别已提报日期可能被反标为 ×。')
 
-/** 草稿中尚未保存的改动数量 */
-const changedCount = computed(() => Object.keys(draft.value).length)
-
 /**
  * 展示用行数据：把「服务端 cell + 本地草稿」合并成最终展示值。
+ *
+ * ⚠️ 2026-11-16：草稿模式已取消（点击即落库），`draft` 恒为空对象，这里的合并分支
+ * 只会走 `original`（服务端 override）。保留该层是为了万一将来恢复批量编辑时不必重写，
+ * 当前**不要**再往里写值。
  *
  * 合并规则（与后端完全一致，保证「保存前预览 == 保存后结果」）：
  *   override === 'missed'  → missed = true
@@ -337,6 +347,8 @@ function cellClass(row, date) {
   const cls = []
   if (editing.value) {
     cls.push(c.editable ? 'cell-editable' : 'cell-locked')
+    // 2026-11-17：已固化格 —— 点一下会弹「清除固化」确认，给它一个可点的浅红 hover 提示
+    if (c.editable && c.snapshot && c.override !== 'on_time') cls.push('cell-snapshot-clearable')
   }
   if (c.dirty) {
     cls.push('cell-dirty')
@@ -358,10 +370,10 @@ function cellClass(row, date) {
  *
  * 于是每个格子实际是「自动判定 ⇄ 强制另一侧」的双向切换，两步之内必回自动：
  *   ① auto_missed = true（自动显示 ×）
- *      自动(×) ──点──▶ on_time(留空,待保存) ──点──▶ 自动(×,回到自动判定)
+ *      自动(×) ──点──▶ on_time(留空,立即落库) ──点──▶ 自动(×,回到自动判定)
  *      若起点是历史/接口写入的 missed(×)：missed(×) ──点──▶ on_time(留空) ──点──▶ 自动(×)
  *   ② auto_missed = false（自动显示留空）
- *      自动(留空) ──点──▶ missed(×,待保存) ──点──▶ 自动(留空,回到自动判定)
+ *      自动(留空) ──点──▶ missed(×,立即落库) ──点──▶ 自动(留空,回到自动判定)
  *      若起点是历史/接口写入的 on_time(留空)：on_time ──点──▶ missed(×) ──点──▶ 自动(留空)
  *
  * 关于「三种覆盖记录状态」：'missed' / 'on_time' / 无记录 依然全部由 UI 可写入——
@@ -371,91 +383,71 @@ function cellClass(row, date) {
  * 正是「点了没反应」的根因；该组合记录仍被后端与矩阵完整支持（历史数据/接口写入照旧生效，
  * 存在时第一下点击会把它翻到可见的另一侧）。
  *
+ * 🔴 2026-11-16：**取消草稿模式，点击即落库**（用户要求去掉「保存」按钮）。
+ *   原实现把结果塞进 `draft` 等「保存」批量提交；现已改为当场 POST overrides 再 `load()`，
+ *   与小 × 的清除逻辑（写 on_time + 删快照）保持同一套即时语义。
+ *   同时修复原实现里的 `row.byDate[date]` —— `date` 未定义（形参是 dateStr），
+ *   一进这段就抛 ReferenceError，导致编辑态点格子从未生效（这也是「保存按钮没用」的真因）。
+ *
  * - 今日/未来、无计划的格子不可点（与后端校验一致）
  * - 非编辑态点击无任何副作用（只读）
  */
-function onCellClick(row, dateStr, ev) {
+async function onCellClick(row, dateStr, ev) {
   // 🔴 2026-11-16：Shift + 点击 = 清除该格「漏报固化」记录（仅管理员、且该格确有固化记录）
   // 用快捷键而不是 tooltip 内按钮：popper 全局 pointer-events:none（防遮挡点击），按钮点不到。
   const cell = row?.byDate?.[dateStr]
   if (ev && ev.shiftKey && isAdmin.value && cell && cell.snapshot) {
     ev.preventDefault()
-    onClearSnapshot(row, dateStr)
+    await onClearSnapshot(row, dateStr)
     return
   }
 
   if (!editing.value) return
-  const c = row.byDate[date]
-  if (!c || !c.editable) return
-  const key = draftKey(row.manager, date)
-  const targetMissed = !c.missed          // 翻转当前**显示**值（c.missed 已是「草稿合并后」的显示值）
-  // 目标显示值与自动判定一致 → 无需覆盖记录，直接删除（回到自动判定）
-  const next = targetMissed === c.auto_missed ? null : (targetMissed ? 'missed' : 'on_time')
-  const nextDraft = { ...draft.value }
-  if (next === c.original) {
-    delete nextDraft[key]        // 回到原值 → 不算改动
-  } else {
-    nextDraft[key] = next
+  if (!cell || !cell.editable) return
+
+  // 🔴 2026-11-17 根因修复：**已固化格子点格体也一律要求确认**。
+  //   此前点格体（含中间那个大 ×）会立刻写 override='on_time' 且不弹框 ——
+  //   用户看起来就是「点了 × 但没弹确认框，× 直接消失了」，误以为「未确认就删除了」。
+  //   现在把这类点击统一导向 onClearSnapshot（内部含确认框 + 重入保护），
+  //   保证「任何路径都没点确认就绝不改数据」。
+  if (cell.snapshot && cell.override !== 'on_time') {
+    await onClearSnapshot(row, dateStr)
+    return
   }
-  draft.value = nextDraft
+
+  if (saving.value) return          // 上一个请求未回，忽略连点
+
+  // 翻转当前**显示**值；目标显示值与自动判定一致 → 删覆盖（回到自动判定），否则写强制态
+  const targetMissed = !cell.missed
+  const next = targetMissed === cell.auto_missed ? 'auto' : (targetMissed ? 'missed' : 'on_time')
+
+  saving.value = true
+  try {
+    await saveSubmissionOverrides(store.filters.month, [
+      { manager: row.manager, date: dateStr, action: next },
+    ])
+    await load()
+    ElMessage.success(
+      next === 'auto'
+        ? `${row.manager} · ${dateStr} 已恢复自动判定`
+        : `${row.manager} · ${dateStr} 已标记为「${next === 'missed' ? '未按时提报' : '已按时提报'}」`,
+    )
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || '调整失败')
+  } finally {
+    saving.value = false
+  }
 }
 
-/** 进入编辑态 */
+/** 进入编辑态（即时生效模式：无草稿） */
 function startEdit() {
   draft.value = {}
   editing.value = true
 }
 
-/** 取消：有改动时二次确认后丢弃全部本地改动（不触碰后端） */
-async function cancel() {
-  const pending = changedCount.value
-  if (pending > 0) {
-    try {
-      await ElMessageBox.confirm(
-        `确认放弃本次 ${pending} 处未保存的调整？`,
-        '取消编辑',
-        { type: 'warning', confirmButtonText: '放弃改动', cancelButtonText: '继续编辑' },
-      )
-    } catch (e) {
-      return   // 用户选择「继续编辑」
-    }
-  }
-  draft.value = {}
+/** 退出编辑态：改动已在点击时落库，无需确认，直接关闭 */
+function exitEdit() {
   editing.value = false
-  ElMessage(pending > 0 ? `已放弃 ${pending} 处未保存的调整` : '已退出编辑')
-}
-
-/**
- * 保存：把草稿一次性批量提交（每格一条 {manager, date, action}）。
- * action 语义：'missed' 强制未按时 / 'on_time' 强制已按时 / 'auto' 恢复自动判定。
- * 成功后用响应里的最新矩阵刷新（省一次 GET）并退出编辑态。
- */
-async function save() {
-  if (!changedCount.value) {
-    ElMessage('没有需要保存的修改')
-    return
-  }
-  const items = Object.entries(draft.value).map(([key, action]) => {
-    const idx = key.indexOf(DRAFT_SEP)
-    return {
-      manager: key.slice(0, idx),
-      date: key.slice(idx + DRAFT_SEP.length),
-      action: action || 'auto',
-    }
-  })
-  saving.value = true
-  try {
-    const res = await saveSubmissionOverrides(store.filters.month, items)
-    applyBoard(res?.board)
-    draft.value = {}
-    editing.value = false
-    ElMessage(`已保存 ${res?.saved ?? items.length} 处调整`)
-  } catch (e) {
-    // 具体原因（403/400/503）由 axios 拦截器统一提示，此处仅保证不退出编辑态、不丢草稿
-    ElMessage('保存失败，改动仍保留在页面，可修正后重试')
-  } finally {
-    saving.value = false
-  }
 }
 
 /** 把后端矩阵写入本地状态（GET 与 POST 响应共用） */
@@ -495,55 +487,70 @@ async function load() {
   }
 }
 
-/** 月份切换：编辑态下先丢弃草稿（避免把 A 月的改动存到 B 月） */
+/** 月份切换：编辑态先退出（即时生效模式下改动已落库，不涉及草稿丢弃） */
 function onMonthChange() {
   // 月份必填（2026-10）：清空后立刻回补当前月，避免退化成「全部月份」汇总
   store.ensureMonth()
   if (editing.value) {
-    const pending = changedCount.value
-    draft.value = {}
     editing.value = false
-    ElMessage(pending > 0
-      ? `月份已切换，${pending} 处未保存的调整已放弃`
-      : '已退出编辑（月份已切换）')
+    ElMessage('已退出编辑（月份已切换）')
   }
   load()
 }
 
-// 其它页面同改 store.filters.month 时也要清理草稿（月份选择器本身在编辑态已禁用）
+// 其它页面同改 store.filters.month 时同步退出编辑态（月份选择器本身在编辑态已禁用）
 watch(() => store.filters.month, (val, old) => {
   if (val === old) return
   if (editing.value) {
-    draft.value = {}
     editing.value = false
-    ElMessage('月份已切换，未保存的调整已放弃')
+    ElMessage('月份已切换，已退出编辑')
   }
 })
 
 /**
  * 清除某格的「漏报固化」记录（2026-11-16，仅管理员）。
  *
- * 说明：清完后再点「刷新」——若当天仍满足自动判定（昨天及更早 + 无填报/无异常），
- * 会被**重新固化**（× 回来）；想长期留空请同时把该格人工设为「已按时」（override 优先）。
+ * 🔴 2026-11-16 修复：**必须同时写 override='on_time'**，否则清除无效。
+ * 原来只调 DELETE 删快照 → 紧接着的 load() 会 GET board，而 board 是「读时写」接口：
+ *     ranking_service.get_submission_board() → auto_missed 仍为 True（有计划/无填报/无异常）
+ *     → pending_snapshots 重新落库 → missed 仍为 True
+ * 即「删掉的记录在同一个请求里被重建」，页面 × 原地复活。写 on_time 覆盖后，
+ * 服务端固化分支会跳过该格（`if auto_missed and override != OVERRIDE_ON_TIME`），× 才真正消失。
+ *
+ * ⚠️ 顺序不能反：先写覆盖、再删快照。
+ * 若先删后写，saveSubmissionOverrides 内部的可编辑校验会再调一次 get_submission_board()，
+ * 那一次调用会把快照重新写回来，DB 残留脏数据（显示虽正常）。
  */
 async function onClearSnapshot(row, dateStr) {
   if (!isAdmin.value) return
+  if (confirming.value) return      // 已有一个确认框在流程中 → 连点直接忽略（只弹 1 个框、只发 1 次请求）
+  confirming.value = true
   try {
     await ElMessageBox.confirm(
-      `确认清除「${row.manager} · ${dateStr}」的漏报固化记录？\n` +
-      '若该日至今仍未提报，下次刷新会自动重新固化（× 会恢复）；想长期留空请同时设为「已按时」。',
-      '清除固化记录',
+      `确认清除「${row.manager} · ${dateStr}」的漏报记录？\n` +
+      '将同时把该格标记为「已按时」（人工覆盖），× 会立即消失且刷新不回弹。',
+      '清除漏报记录',
       { type: 'warning', confirmButtonText: '确认清除', cancelButtonText: '取消' },
     )
   } catch (e) {
+    // 用户取消 / 关闭弹框 → **必须复位标志并直接返回**，绝不能继续往下删
+    confirming.value = false
     return
   }
   try {
-    const res = await clearSubmissionSnapshots(dateStr, row.manager)
-    ElMessage.success(res?.message || '✅ 已清除固化记录')
+    // ① 先写覆盖（on_time 优先级最高，且固化分支会跳过它）
+    await saveSubmissionOverrides(store.filters.month, [
+      { manager: row.manager, date: dateStr, action: 'on_time' },
+    ])
+    // ② 再删固化快照（清掉残留行，避免脏数据）
+    await clearSubmissionSnapshots(dateStr, row.manager)
+    ElMessage.success(`已清除 ${dateStr} ${row.manager} 的漏报记录，并标记为「已按时」`)
+    // ③ 刷新矩阵
     await load()
   } catch (e) {
-    ElMessage.error('清除失败')
+    ElMessage.error(e?.response?.data?.detail || e?.message || '清除失败')
+  } finally {
+    confirming.value = false        // 成功/失败都复位，避免卡死后续点击
   }
 }
 
@@ -588,26 +595,6 @@ onMounted(load)
 .miss-total-zero { color: #cbd5e0; font-size: 13px; }
 
 /* 单元格容器：撑满 36×38 的日格，承载点击区与角标 */
-/* 编辑态「清除固化记录」小图标：右上角 14px 红 ×，hover 浅红底 */
-.snap-clear-icon {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-  width: 14px;
-  height: 14px;
-  line-height: 12px;
-  font-size: 12px;
-  font-style: normal;
-  font-weight: 700;
-  color: #e53e3e;
-  text-align: center;
-  border-radius: 4px;
-  background: #ffffff;
-  cursor: pointer;
-  z-index: 2;
-}
-.snap-clear-icon:hover { background: #fed7d7; }
-
 .cell-box {
   position: relative;
   display: flex;
@@ -621,6 +608,13 @@ onMounted(load)
 /* 编辑态：可编辑格 —— 可点 + hover 高亮 */
 .cell-box.cell-editable { cursor: pointer; }
 .cell-box.cell-editable:hover { background: #ebf8ff; outline: 1px solid #90cdf4; outline-offset: -1px; }
+/* 2026-11-17：编辑态「已固化」格 —— 点击会弹出清除确认，用浅红底提示可点（覆盖 cell-editable 的浅蓝） */
+.cell-box.cell-snapshot-clearable { cursor: pointer; }
+.cell-box.cell-snapshot-clearable:hover {
+  background: #fff5f5;
+  outline: 1px solid #fed7d7;
+  outline-offset: -1px;
+}
 /* 编辑态：不可编辑格 —— 置灰 + not-allowed（今天/未来、无计划） */
 .cell-box.cell-locked { cursor: not-allowed; background: #f7fafc; }
 /* 未保存改动：虚线边框 + 暖色底纹，与「已保存的人工覆盖」明显区分 */
