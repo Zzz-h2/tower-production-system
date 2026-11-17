@@ -40,7 +40,6 @@
           @keyup.enter="load"
           @clear="load"
         />
-        <el-checkbox v-model="filters.overdue_only" @change="load">只看逾期未关闭</el-checkbox>
         <div class="toolbar-right">
           <el-button :icon="RefreshLeft" @click="resetFilters">重置</el-button>
           <el-button type="primary" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
@@ -103,7 +102,7 @@
         :class="{ 'is-active': isCardActive('overdue') }"
         role="button" tabindex="0" :aria-pressed="isCardActive('overdue')"
         title="判据：未关闭 且 解决时间早于今天（点击只看逾期未关闭，再点一次取消）"
-        @click="toggleOverdue" @keydown.enter.prevent="toggleOverdue"
+        @click="toggleCard('overdue')" @keydown.enter.prevent="toggleCard('overdue')"
       >
         <div class="kpi-value" style="color:#e53e3e;">
           {{ kpis.overdue }}<span v-if="kpis.overdue > 0" class="pulse-dot"></span>
@@ -279,7 +278,9 @@ const bySeverity = ref([])
 const byArea = ref([])
 const today = ref('')
 
-const filters = reactive({ status: '', severity: '', project_id: null, keyword: '', overdue_only: false })
+// 2026-11-17：**去掉 overdue_only**（原服务端参数会让后端把 items 先过滤，KPI 也随之全变 0）。
+// 「只看逾期未关闭」改由卡片点击 → 前端 `cardFilter='overdue'` 过滤，KPI 永远基于全量 items。
+const filters = reactive({ status: '', severity: '', project_id: null, keyword: '' })
 const projectOptions = ref([])
 
 // 前端排序（后端已按「超期→等级→解决时间」排好，这里只处理表头点击）
@@ -319,28 +320,30 @@ const canTouchIssues = computed(() => auth.isAdmin || auth.isBigArea)
  *   `/api/issues/board` 的 `status` 只接受 pending/processing/closed 三值，
  *   表达不了「非 closed」；而看板的 items **未分页**（一次全量返回），
  *   KPI 也是基于同一份 items 聚合 → 前端过滤后的条数与卡片数字**必然相等**。
- * 「逾期」沿用服务端 `overdue_only`（既有行为，与工具栏复选框联动）。
+ * 「逾期未关闭」同样走前端（2026-11-17）：`item.is_overdue` 由后端逐行算好，
+ * 前端按它过滤即可 —— **不再向接口传 `overdue_only`**，否则后端会先把 items 过滤，
+ * 导致 KPI（total/closed/open/close_rate/overdue）全部按过滤后的集合重算 → 全变 0。
  */
 const cardFilter = ref('')
 
-/** 某张卡当前是否处于选中态（同一时刻只有一张：逾期卡与 closed/open 互斥）。 */
+/** 某张卡当前是否处于选中态（同一时刻只有一张；四张筛选卡共用同一个 cardFilter，天然互斥）。 */
 function isCardActive(key) {
-  if (key === 'overdue') return !!filters.overdue_only
-  if (key === 'total') return !cardFilter.value && !filters.overdue_only && !filters.status
-  return cardFilter.value === key && !filters.overdue_only
+  if (key === 'total') return !cardFilter.value && !filters.status
+  return cardFilter.value === key
 }
 
-/** 点「已关闭 / 未关闭」卡：toggle（再点一次取消，回到全量）。 */
+/**
+ * 点筛选卡：toggle（再点一次取消，回到全量）。
+ *
+ * @param {'closed'|'open'|'overdue'} key 卡片筛选键；与 cardFilter 单值互斥
+ */
 function toggleCard(key) {
-  const next = cardFilter.value === key ? '' : key
-  cardFilter.value = next
-  if (next) filters.overdue_only = false   // 与逾期卡互斥
+  cardFilter.value = cardFilter.value === key ? '' : key
 }
 
 /** 点「总数」卡：清空**由卡片设置的**筛选（不动月份/项目/关键词/等级等工具栏筛选）。 */
 function clearCardFilters() {
   cardFilter.value = ''
-  filters.overdue_only = false
   filters.status = ''      // 状态下拉与卡片同维度；一并复位，避免"卡上是总数、列表还被 status 卡着"
   load()
 }
@@ -350,6 +353,9 @@ const cardItems = computed(() => {
   const arr = items.value
   if (cardFilter.value === 'closed') return arr.filter((it) => it.status === 'closed')
   if (cardFilter.value === 'open') return arr.filter((it) => it.status !== 'closed')
+  // 2026-11-17：「逾期未关闭」也走前端 —— item.is_overdue 由后端按
+  // 「status<>'closed' 且 planned_close_date < 今天」逐行算好，前端直接取用即可
+  if (cardFilter.value === 'overdue') return arr.filter((it) => it.is_overdue === true)
   return arr
 })
 
@@ -370,13 +376,7 @@ function resetFilters() {
   filters.severity = ''
   filters.project_id = null
   filters.keyword = ''
-  filters.overdue_only = false
-  load()
-}
-
-/** 点击「逾期未关闭」卡：切换只看逾期（与复选框状态联动，可见可逆）。 */
-function toggleOverdue() {
-  filters.overdue_only = !filters.overdue_only
+  cardFilter.value = ''    // 卡片筛选（含「逾期未关闭」）一并清空
   load()
 }
 
@@ -505,7 +505,8 @@ async function load() {
       status: filters.status || undefined,
       severity: filters.severity || undefined,
       project_id: filters.project_id || undefined,
-      overdue_only: filters.overdue_only || undefined,
+      // 2026-11-17：**不再传 overdue_only** —— 后端一旦收到就会先把 items 过滤，
+      // 使 KPI/图表也对过滤后的集合重算（表现为其他卡全变 0）。逾期改前端过滤。
       keyword: filters.keyword || undefined,
     })
     items.value = res?.items || []
